@@ -127,10 +127,34 @@ def run_full_validation():
     passed_tests += 1
 
     # ─────────────────────────────────────────
+    # TEST 7: Gemini Aktiflik Durum Kontrolü
+    # ─────────────────────────────────────────
+    print("\n[TEST 7] Gemini Aktiflik Durum Kontrolü:")
+    from config import remove_api_key, set_api_key
+    remove_api_key()
+    res_nokey = ai.process_query("gemini aktif mi")
+    print(f"  • Anahtar Yokken 'gemini aktif mi' -> '{res_nokey['answer']}'")
+    assert res_nokey['answer'] == "Gemini aktif değil"
+
+    set_api_key("sk-non-gemini-fake-api-key-1234567890")
+    res_wrongkey = ai.process_query("gemini aktif mi")
+    print(f"  • Farklı API Girildiğinde -> '{res_wrongkey['answer']}'")
+    assert res_wrongkey['answer'] == "Gemini aktif değil"
+
+    set_api_key("AIzaSyD_TestValidGeminiKey1234567890XYZ")
+    res_validkey = ai.process_query("gemini aktif mi")
+    print(f"  • Gemini API Girildiğinde -> '{res_validkey['answer']}'")
+    assert res_validkey['answer'] == "Gemini aktif"
+    remove_api_key()
+
+    print("  ✅ TEST 7 BAŞARILI: Gemini API kontrolü hatasız çalışıyor.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
     # Özet Rapor
     # ─────────────────────────────────────────
     print("\n" + "=" * 65)
-    print(f"  🎉 TÜM ENTEGRASYON TESTLERİ TAMAMLANDI: {passed_tests}/{total_tests} BAŞARILI!")
+    print(f"  🎉 TÜM ENTEGRASYON TESTLERİ TAMAMLANDI: {passed_tests}/7 BAŞARILI!")
     print("=" * 65)
 
 

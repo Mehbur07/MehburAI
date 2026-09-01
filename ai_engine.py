@@ -208,6 +208,45 @@ class GreetingFilter:
 
 
 # ─────────────────────────────────────────────
+# Gemini API Durum Kontrolcüsü
+# ─────────────────────────────────────────────
+
+class GeminiStatusChecker:
+    """Gemini API durumunu ve anahtar geçerliliğini kontrol eder."""
+
+    @staticmethod
+    def is_gemini_query(text: str) -> bool:
+        """Kullanıcının Gemini durumunu sorup sormadığını anlar."""
+        cleaned = clean_text(text)
+        gemini_triggers = [
+            "gemini aktif mi", "gemini aktifmi", "gemini api aktif mi",
+            "gemini apisi aktif mi", "gemini apisi aktifmi", "gemini açık mı",
+            "gemini acik mi", "gemini çalışıyor mu", "gemini calisiyor mu",
+            "gemini durumu", "gemini api durumu", "gemini bağlı mı", "gemini bagli mi",
+            "gemini aktif", "gemini calisiyormu", "gemini açıkmı", "gemini acikmi"
+        ]
+        return any(tr in cleaned for tr in gemini_triggers)
+
+    @staticmethod
+    def get_status_reply() -> str:
+        """
+        API anahtarını inceler:
+        - Eğer Google Gemini API anahtarı girildiyse (AIzaSy formatında) -> 'Gemini aktif'
+        - Eğer başka bir API (OpenAI, Groq vb.) veya boş ise -> 'Gemini aktif değil'
+        """
+        key = get_api_key()
+        if not key or not isinstance(key, str) or not key.strip():
+            return "Gemini aktif değil"
+
+        cleaned_key = key.strip()
+        # Google Gemini API anahtarları standart olarak AIzaSy ile başlar ve 30+ karakterdir
+        if cleaned_key.startswith("AIzaSy") and len(cleaned_key) >= 30:
+            return "Gemini aktif"
+        else:
+            return "Gemini aktif değil"
+
+
+# ─────────────────────────────────────────────
 # Ana Yapay Zeka Karar Motoru (AIEngine)
 # ─────────────────────────────────────────────
 
@@ -230,15 +269,6 @@ class AIEngine:
         """
         Kullanıcı girdisini analiz eder, ağ durumuna göre yanıt üretir,
         gerekirse hafızaya kaydeder ve yanıt detaylarını döndürür.
-
-        Returns:
-            Dict[str, Any]:
-                - 'answer': str (MehburAI'nin verdiği yanıt)
-                - 'is_online': bool (İşlem anındaki bağlantı durumu)
-                - 'source': str ('greeting', 'gemini+wikipedia', 'gemini', 'wikipedia', 'memory', 'offline_unknown')
-                - 'learned': bool (Hafızaya yeni kaydedilip kaydedilmediği)
-                - 'score': Optional[float] (Hafızadan geldiyse benzerlik skoru)
-                - 'matched_question': Optional[str] (Hafızadan eşleşen soru)
         """
         query = user_query.strip()
         if not query:
@@ -262,7 +292,20 @@ class AIEngine:
                 "learned": False,
             }
 
-        # 2. ADIM: Bilgisayar & Sistem Araçları Kontrolü
+        # 2. ADIM: Gemini Aktiflik / API Durumu Kontrolü
+        if GeminiStatusChecker.is_gemini_query(query):
+            is_online = self.network.is_online
+            reply = GeminiStatusChecker.get_status_reply()
+            self.memory.log_message(role="user", message=query, is_online=is_online)
+            self.memory.log_message(role="mehbur", message=reply, is_online=is_online, source="gemini_status")
+            return {
+                "answer": reply,
+                "is_online": is_online,
+                "source": "Gemini API Kontrolü",
+                "learned": False,
+            }
+
+        # 3. ADIM: Bilgisayar & Sistem Araçları Kontrolü
         system_response = SystemTools.handle_system_query(query)
         if system_response:
             is_online = self.network.is_online
@@ -275,7 +318,7 @@ class AIEngine:
                 "learned": False,
             }
 
-        # 3. ADIM: İnternet Bağlantı Kontrolü (Cloudflare 1.1.1.1)
+        # 4. ADIM: İnternet Bağlantı Kontrolü (Cloudflare 1.1.1.1)
         is_online = self.network.check_now()
 
         # ─────────────────────────────────────
