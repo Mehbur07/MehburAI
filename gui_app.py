@@ -86,18 +86,40 @@ class MehburApp(ctk.CTk):
         # 1. Üst Başlık & Durum Çubuğu (Header Bar)
         self._build_header()
 
-        # 2. Ana Sekme Alanı (Tabview)
-        self._build_tabview()
+        # 2. Ana Panel Konteyneri
+        self.main_container = ctk.CTkFrame(self, fg_color=Theme.BG_DARK, corner_radius=0)
+        self.main_container.grid(row=1, column=0, sticky="nsew", padx=16, pady=(8, 16))
+        self.main_container.grid_rowconfigure(0, weight=1)
+        self.main_container.grid_columnconfigure(0, weight=1)
+
+        # 3 Paneli Oluştur
+        self.panel_chat = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        self.panel_memory = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        self.panel_settings = ctk.CTkFrame(self.main_container, fg_color="transparent")
+
+        self.panels = {
+            "chat": self.panel_chat,
+            "memory": self.panel_memory,
+            "settings": self.panel_settings,
+        }
+
+        # Panel İçeriklerini İnşa Et
+        self._build_chat_panel()
+        self._build_memory_panel()
+        self._build_settings_panel()
+
+        # Varsayılan olarak Sohbet panelini göster
+        self.switch_tab("chat")
 
     def _build_header(self):
-        """Üst kısımdaki Neon logo, canlı durum göstergesi ve sayaç paneli."""
+        """Üst kısımdaki Neon logo, sekmeler ve durum rozetleri."""
         self.header_frame = ctk.CTkFrame(
             self,
             fg_color=Theme.BG_CARD,
             corner_radius=0,
             border_width=1,
             border_color=Theme.CYAN_DARK,
-            height=65,
+            height=70,
         )
         self.header_frame.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
         self.header_frame.grid_propagate(False)
@@ -105,7 +127,7 @@ class MehburApp(ctk.CTk):
 
         # Sol: Logo & İsim
         logo_frame = ctk.CTkFrame(self.header_frame, fg_color="transparent")
-        logo_frame.grid(row=0, column=0, padx=20, pady=12, sticky="w")
+        logo_frame.grid(row=0, column=0, padx=(20, 10), pady=12, sticky="w")
 
         title_lbl = ctk.CTkLabel(
             logo_frame,
@@ -113,15 +135,61 @@ class MehburApp(ctk.CTk):
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=20, weight="bold"),
             text_color=Theme.CYAN_PRIMARY,
         )
-        title_lbl.pack(side="left", padx=(0, 10))
+        title_lbl.pack(side="left", padx=(0, 8))
 
         subtitle_lbl = ctk.CTkLabel(
             logo_frame,
-            text="v1.0 | Hibrit Çevrim İçi/Dışı Zeka",
-            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11),
+            text="v1.0",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11, weight="bold"),
             text_color=Theme.TEXT_SECONDARY,
         )
         subtitle_lbl.pack(side="left", pady=(4, 0))
+
+        # Orta: Belirgin Sekme Butonları (Navbar)
+        nav_frame = ctk.CTkFrame(self.header_frame, fg_color=Theme.BG_DARKEST, corner_radius=10)
+        nav_frame.grid(row=0, column=1, padx=10, pady=12)
+
+        self.btn_nav_chat = ctk.CTkButton(
+            nav_frame,
+            text="💬 Sohbet",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=13, weight="bold"),
+            fg_color=Theme.CYAN_PRIMARY,
+            text_color=Theme.BG_DARKEST,
+            hover_color=Theme.CYAN_GLOW,
+            width=110,
+            height=36,
+            corner_radius=8,
+            command=lambda: self.switch_tab("chat"),
+        )
+        self.btn_nav_chat.pack(side="left", padx=4, pady=4)
+
+        self.btn_nav_memory = ctk.CTkButton(
+            nav_frame,
+            text="🧠 Hafıza",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=13, weight="bold"),
+            fg_color="transparent",
+            text_color=Theme.TEXT_PRIMARY,
+            hover_color=Theme.BG_CARD_HOVER,
+            width=110,
+            height=36,
+            corner_radius=8,
+            command=lambda: self.switch_tab("memory"),
+        )
+        self.btn_nav_memory.pack(side="left", padx=4, pady=4)
+
+        self.btn_nav_settings = ctk.CTkButton(
+            nav_frame,
+            text="⚙️ Ayarlar",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=13, weight="bold"),
+            fg_color="transparent",
+            text_color=Theme.TEXT_PRIMARY,
+            hover_color=Theme.BG_CARD_HOVER,
+            width=110,
+            height=36,
+            corner_radius=8,
+            command=lambda: self.switch_tab("settings"),
+        )
+        self.btn_nav_settings.pack(side="left", padx=4, pady=4)
 
         # Sağ: Durum Rozetleri
         badge_frame = ctk.CTkFrame(self.header_frame, fg_color="transparent")
@@ -130,76 +198,81 @@ class MehburApp(ctk.CTk):
         # Hafıza Sayacı Rozeti
         self.memory_badge = ctk.CTkLabel(
             badge_frame,
-            text=f"🧠 {self.memory.get_memory_count()} Bilgi Hafızada",
-            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold"),
+            text=f"🧠 {self.memory.get_memory_count()} Bilgi",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11, weight="bold"),
             text_color=Theme.CYAN_PRIMARY,
             fg_color=Theme.BG_DARKEST,
-            corner_radius=12,
-            padx=12,
-            pady=6,
+            corner_radius=10,
+            padx=10,
+            pady=5,
         )
-        self.memory_badge.pack(side="left", padx=8)
+        self.memory_badge.pack(side="left", padx=6)
 
         # Canlı Ağ Durumu Rozeti
         self.network_badge = ctk.CTkLabel(
             badge_frame,
             text=self._get_network_badge_text(),
-            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold"),
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11, weight="bold"),
             text_color=Theme.STATUS_ONLINE if self.network.is_online else Theme.STATUS_OFFLINE,
             fg_color=Theme.BG_DARKEST,
-            corner_radius=12,
-            padx=12,
-            pady=6,
+            corner_radius=10,
+            padx=10,
+            pady=5,
         )
         self.network_badge.pack(side="left")
 
-    def _build_tabview(self):
-        """Sekmeli ana görünüm: Sohbet, Hafıza ve Ayarlar."""
-        self.tabview = ctk.CTkTabview(
-            self,
-            fg_color=Theme.BG_DARK,
-            segmented_button_fg_color=Theme.BG_CARD,
-            segmented_button_selected_color=Theme.CYAN_PRIMARY,
-            segmented_button_selected_hover_color=Theme.CYAN_GLOW,
-            segmented_button_unselected_color=Theme.BG_CARD,
-            segmented_button_unselected_hover_color=Theme.BG_CARD_HOVER,
-            text_color=Theme.BG_DARKEST,
-            border_width=1,
-            border_color=Theme.BORDER_DEFAULT,
-        )
-        self.tabview.grid(row=1, column=0, sticky="nsew", padx=16, pady=(8, 16))
+    def switch_tab(self, tab_name: str):
+        """Aktif sekmeyi değiştirir ve buton renklerini günceller."""
+        # Tüm panelleri gizle
+        for name, panel in self.panels.items():
+            panel.grid_forget()
 
-        # Sekmeleri Ekle
-        self.tab_chat = self.tabview.add("  💬 Sohbet  ")
-        self.tab_memory = self.tabview.add("  🧠 Öğrenilen Hafıza  ")
-        self.tab_settings = self.tabview.add("  ⚙️ Ayarlar  ")
+        # Seçilen paneli göster
+        if tab_name in self.panels:
+            self.panels[tab_name].grid(row=0, column=0, sticky="nsew")
 
-        # Sekme İçeriklerini İnşa Et
-        self._build_chat_tab()
-        self._build_memory_tab()
-        self._build_settings_tab()
+        # Buton stillerini güncelle
+        nav_buttons = {
+            "chat": self.btn_nav_chat,
+            "memory": self.btn_nav_memory,
+            "settings": self.btn_nav_settings,
+        }
+        for name, btn in nav_buttons.items():
+            if name == tab_name:
+                btn.configure(
+                    fg_color=Theme.CYAN_PRIMARY,
+                    text_color=Theme.BG_DARKEST,
+                )
+            else:
+                btn.configure(
+                    fg_color="transparent",
+                    text_color=Theme.TEXT_PRIMARY,
+                )
+
+        if tab_name == "memory":
+            self._refresh_memory_list()
 
     # ─────────────────────────────────────────
-    # SEKME 1: SOHBET (CHAT TAB)
+    # SEKME 1: SOHBET PANELİ (CHAT PANEL)
     # ─────────────────────────────────────────
 
-    def _build_chat_tab(self):
+    def _build_chat_panel(self):
         """Sohbet mesajlaşma alanı ve giriş kutusu."""
-        self.tab_chat.grid_rowconfigure(0, weight=1)
-        self.tab_chat.grid_columnconfigure(0, weight=1)
+        self.panel_chat.grid_rowconfigure(0, weight=1)
+        self.panel_chat.grid_columnconfigure(0, weight=1)
 
         # Mesaj Geçmişi (Scrollable Frame)
         self.chat_history_box = ctk.CTkScrollableFrame(
-            self.tab_chat,
+            self.panel_chat,
             fg_color=Theme.BG_DARKEST,
             corner_radius=10,
             border_width=1,
             border_color=Theme.BORDER_DEFAULT,
         )
-        self.chat_history_box.grid(row=0, column=0, sticky="nsew", padx=4, pady=(4, 10))
+        self.chat_history_box.grid(row=0, column=0, sticky="nsew", padx=0, pady=(0, 10))
 
         # Alt Giriş Paneli
-        input_container = ctk.CTkFrame(self.tab_chat, fg_color="transparent")
+        input_container = ctk.CTkFrame(self.panel_chat, fg_color="transparent")
         input_container.grid(row=1, column=0, sticky="ew", padx=4, pady=0)
         input_container.grid_columnconfigure(0, weight=1)
 
@@ -234,8 +307,8 @@ class MehburApp(ctk.CTk):
         )
         self.send_btn.grid(row=0, column=1, sticky="e")
 
-        # Hızlı Yardım Butonları
-        quick_frame = ctk.CTkFrame(self.tab_chat, fg_color="transparent", height=30)
+        # Hızlı Yardım & Ayarlar Butonları
+        quick_frame = ctk.CTkFrame(self.panel_chat, fg_color="transparent", height=30)
         quick_frame.grid(row=2, column=0, sticky="ew", padx=4, pady=(6, 0))
 
         btn_sample1 = ctk.CTkButton(
@@ -245,22 +318,34 @@ class MehburApp(ctk.CTk):
             fg_color=Theme.BG_CARD,
             text_color=Theme.TEXT_SECONDARY,
             hover_color=Theme.BG_CARD_HOVER,
-            height=24,
+            height=26,
             command=lambda: self._insert_quick_query("adın ne"),
         )
         btn_sample1.pack(side="left", padx=(0, 6))
 
         btn_sample2 = ctk.CTkButton(
             quick_frame,
-            text="🌍 Örnek: Türkiye'nin başkenti neresidir?",
+            text="🌍 Örnek: Albert Einstein kimdir?",
             font=ctk.CTkFont(size=11),
             fg_color=Theme.BG_CARD,
             text_color=Theme.TEXT_SECONDARY,
             hover_color=Theme.BG_CARD_HOVER,
-            height=24,
-            command=lambda: self._insert_quick_query("Türkiye'nin başkenti neresidir?"),
+            height=26,
+            command=lambda: self._insert_quick_query("Albert Einstein kimdir?"),
         )
         btn_sample2.pack(side="left", padx=6)
+
+        btn_goto_settings = ctk.CTkButton(
+            quick_frame,
+            text="⚙️ Gemini API Ayarları",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color=Theme.BG_CARD,
+            text_color=Theme.CYAN_PRIMARY,
+            hover_color=Theme.BG_CARD_HOVER,
+            height=26,
+            command=lambda: self.switch_tab("settings"),
+        )
+        btn_goto_settings.pack(side="left", padx=6)
 
         btn_clear_chat = ctk.CTkButton(
             quick_frame,
@@ -269,7 +354,7 @@ class MehburApp(ctk.CTk):
             fg_color=Theme.BG_CARD,
             text_color=Theme.TEXT_SECONDARY,
             hover_color=Theme.BG_CARD_HOVER,
-            height=24,
+            height=26,
             command=self._clear_chat_display,
         )
         btn_clear_chat.pack(side="right")
@@ -496,17 +581,17 @@ class MehburApp(ctk.CTk):
         self._send_welcome_message()
 
     # ─────────────────────────────────────────
-    # SEKME 2: HAFIZA YÖNETİMİ (MEMORY TAB)
+    # SEKME 2: HAFIZA YÖNETİMİ (MEMORY PANEL)
     # ─────────────────────────────────────────
 
-    def _build_memory_tab(self):
-        """Öğrenilen soru-cevapların listelendiği ve yönetildiği sekme."""
-        self.tab_memory.grid_rowconfigure(1, weight=1)
-        self.tab_memory.grid_columnconfigure(0, weight=1)
+    def _build_memory_panel(self):
+        """Öğrenilen soru-cevapların listelendiği ve yönetildiği panel."""
+        self.panel_memory.grid_rowconfigure(1, weight=1)
+        self.panel_memory.grid_columnconfigure(0, weight=1)
 
         # Üst Arama & Kontrol Çubuğu
-        top_bar = ctk.CTkFrame(self.tab_memory, fg_color=Theme.BG_CARD, corner_radius=8, height=45)
-        top_bar.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 8))
+        top_bar = ctk.CTkFrame(self.panel_memory, fg_color=Theme.BG_CARD, corner_radius=8, height=45)
+        top_bar.grid(row=0, column=0, sticky="ew", padx=0, pady=(0, 8))
         top_bar.grid_columnconfigure(0, weight=1)
 
         self.memory_search_entry = ctk.CTkEntry(
@@ -548,13 +633,13 @@ class MehburApp(ctk.CTk):
 
         # Hafıza Kartları Listesi (Scrollable)
         self.memory_list_box = ctk.CTkScrollableFrame(
-            self.tab_memory,
+            self.panel_memory,
             fg_color=Theme.BG_DARKEST,
             corner_radius=10,
             border_width=1,
             border_color=Theme.BORDER_DEFAULT,
         )
-        self.memory_list_box.grid(row=1, column=0, sticky="nsew", padx=4, pady=0)
+        self.memory_list_box.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
 
         # Listeyi Doldur
         self._refresh_memory_list()
@@ -675,30 +760,30 @@ class MehburApp(ctk.CTk):
         self._update_badges()
 
     # ─────────────────────────────────────────
-    # SEKME 3: AYARLAR (SETTINGS TAB)
+    # SEKME 3: AYARLAR (SETTINGS PANEL)
     # ─────────────────────────────────────────
 
-    def _build_settings_tab(self):
+    def _build_settings_panel(self):
         """Gemini API anahtarı ve uygulama ayarları paneli."""
-        self.tab_settings.grid_columnconfigure(0, weight=1)
+        self.panel_settings.grid_columnconfigure(0, weight=1)
 
         # 1. API Anahtarı Kartı
         api_card = ctk.CTkFrame(
-            self.tab_settings,
+            self.panel_settings,
             fg_color=Theme.BG_CARD,
             corner_radius=12,
             border_width=1,
             border_color=Theme.CYAN_DARK,
         )
-        api_card.pack(fill="x", padx=10, pady=10)
+        api_card.pack(fill="x", padx=0, pady=(0, 12))
 
         api_title = ctk.CTkLabel(
             api_card,
             text="🔑 Google Gemini API Anahtarı",
-            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=15, weight="bold"),
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=16, weight="bold"),
             text_color=Theme.CYAN_PRIMARY,
         )
-        api_title.pack(anchor="w", padx=16, pady=(14, 4))
+        api_title.pack(anchor="w", padx=16, pady=(16, 4))
 
         api_desc = ctk.CTkLabel(
             api_card,
@@ -711,7 +796,7 @@ class MehburApp(ctk.CTk):
             text_color=Theme.TEXT_SECONDARY,
             justify="left",
         )
-        api_desc.pack(anchor="w", padx=16, pady=(0, 10))
+        api_desc.pack(anchor="w", padx=16, pady=(0, 12))
 
         # Giriş & Buton Satırı
         api_input_row = ctk.CTkFrame(api_card, fg_color="transparent")
@@ -726,7 +811,7 @@ class MehburApp(ctk.CTk):
             fg_color=Theme.BG_INPUT,
             border_color=Theme.CYAN_DARK,
             show="•",
-            height=38,
+            height=40,
             corner_radius=8,
         )
         self.api_key_entry.grid(row=0, column=0, sticky="ew", padx=(0, 10))
@@ -741,7 +826,7 @@ class MehburApp(ctk.CTk):
             text_color=Theme.BG_DARKEST,
             hover_color=Theme.CYAN_GLOW,
             width=90,
-            height=38,
+            height=40,
             command=self._save_api_key,
         )
         btn_save_key.grid(row=0, column=1, padx=(0, 6))
@@ -754,7 +839,7 @@ class MehburApp(ctk.CTk):
             hover_color="#44111E",
             text_color="#FF8888",
             width=70,
-            height=38,
+            height=40,
             command=self._remove_api_key,
         )
         btn_del_key.grid(row=0, column=2)
@@ -763,20 +848,20 @@ class MehburApp(ctk.CTk):
         self.api_status_lbl = ctk.CTkLabel(
             api_card,
             text="✅ API Anahtarı Kayıtlı" if current_key else "⚠️ API Anahtarı Henüz Girilmedi",
-            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11, weight="bold"),
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold"),
             text_color=Theme.STATUS_ONLINE if current_key else Theme.STATUS_WARNING,
         )
-        self.api_status_lbl.pack(anchor="w", padx=16, pady=(0, 12))
+        self.api_status_lbl.pack(anchor="w", padx=16, pady=(0, 14))
 
         # 2. Ağ Testi & Durum Kartı
         net_card = ctk.CTkFrame(
-            self.tab_settings,
+            self.panel_settings,
             fg_color=Theme.BG_CARD,
             corner_radius=12,
             border_width=1,
             border_color=Theme.BORDER_DEFAULT,
         )
-        net_card.pack(fill="x", padx=10, pady=10)
+        net_card.pack(fill="x", padx=0, pady=(0, 12))
 
         net_title = ctk.CTkLabel(
             net_card,
@@ -799,13 +884,13 @@ class MehburApp(ctk.CTk):
 
         # 3. Hakkında Kartı
         about_card = ctk.CTkFrame(
-            self.tab_settings,
+            self.panel_settings,
             fg_color=Theme.BG_CARD,
             corner_radius=12,
             border_width=1,
             border_color=Theme.BORDER_DEFAULT,
         )
-        about_card.pack(fill="x", padx=10, pady=10)
+        about_card.pack(fill="x", padx=0, pady=(0, 12))
 
         about_title = ctk.CTkLabel(
             about_card,
