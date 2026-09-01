@@ -231,16 +231,28 @@ class GeminiStatusChecker:
     def get_status_reply() -> str:
         """
         API anahtarını inceler:
-        - Eğer Google Gemini API anahtarı girildiyse (AIzaSy formatında) -> 'Gemini aktif'
-        - Eğer başka bir API (OpenAI, Groq vb.) veya boş ise -> 'Gemini aktif değil'
+        - Google Gemini Studio (AIzaSy...), Vertex AI / Cloud (AQ....) veya geçerli Google anahtarı ise -> 'Gemini aktif'
+        - Eğer boşsa veya başka bir sağlayıcıya aitse (OpenAI: sk-, Groq: gsk_, vb.) -> 'Gemini aktif değil'
         """
         key = get_api_key()
         if not key or not isinstance(key, str) or not key.strip():
             return "Gemini aktif değil"
 
         cleaned_key = key.strip()
-        # Google Gemini API anahtarları standart olarak AIzaSy ile başlar ve 30+ karakterdir
-        if cleaned_key.startswith("AIzaSy") and len(cleaned_key) >= 30:
+
+        # Başka yapay zeka sağlayıcılarına ait prefixler
+        other_providers_prefixes = ["sk-", "gsk_", "sk-ant-", "hf_", "co-", "pplx-"]
+        if any(cleaned_key.startswith(p) for p in other_providers_prefixes):
+            return "Gemini aktif değil"
+
+        # Google Gemini API formatları: AIzaSy..., AQ...., ya29.... veya 20+ karakter uzunluğunda geçerli token
+        if (
+            cleaned_key.startswith("AIza") or
+            cleaned_key.startswith("AQ.") or
+            cleaned_key.startswith("AQ_") or
+            cleaned_key.startswith("ya29") or
+            (len(cleaned_key) >= 20 and not any(cleaned_key.startswith(p) for p in other_providers_prefixes))
+        ):
             return "Gemini aktif"
         else:
             return "Gemini aktif değil"
