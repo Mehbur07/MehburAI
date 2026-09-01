@@ -1,0 +1,19 @@
+# MehburAI - Bağımlılıklar
+# ========================
+
+# Masaüstü Arayüzü (GUI)
+customtkinter>=5.2.0
+Pillow>=10.0.0
+
+# Gemini API (Google AI)
+google-generativeai>=0.8.0
+
+# Semantik Vektör Arama (Offline Akıllı Bellek)
+sentence-transformers>=3.0.0
+
+# Kosinüs Benzerliği Hesaplama
+scikit-learn>=1.3.0
+
+# Ek Yardımcılar
+requests>=2.31.0
+numpy>=1.24.0
