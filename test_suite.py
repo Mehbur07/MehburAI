@@ -130,7 +130,9 @@ def run_full_validation():
     # TEST 7: Gemini Aktiflik Durum Kontrolü
     # ─────────────────────────────────────────
     print("\n[TEST 7] Gemini Aktiflik Durum Kontrolü:")
-    from config import remove_api_key, set_api_key
+    from config import get_api_key, remove_api_key, set_api_key
+    initial_user_key = get_api_key()
+
     remove_api_key()
     res_nokey = ai.process_query("gemini aktif mi")
     print(f"  • Anahtar Yokken 'gemini aktif mi' -> '{res_nokey['answer']}'")
@@ -145,7 +147,12 @@ def run_full_validation():
     res_validkey = ai.process_query("gemini aktif mi")
     print(f"  • Gemini API Girildiğinde -> '{res_validkey['answer']}'")
     assert res_validkey['answer'] == "Gemini aktif"
-    remove_api_key()
+
+    # Kullanıcının orijinal anahtarını geri yükle
+    if initial_user_key:
+        set_api_key(initial_user_key)
+    else:
+        remove_api_key()
 
     print("  ✅ TEST 7 BAŞARILI: Gemini API kontrolü hatasız çalışıyor.")
     passed_tests += 1

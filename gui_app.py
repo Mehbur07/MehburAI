@@ -251,6 +251,27 @@ class MehburApp(ctk.CTk):
 
         if tab_name == "memory":
             self._refresh_memory_list()
+        elif tab_name == "settings":
+            self._reload_settings_view()
+
+    def _reload_settings_view(self):
+        """Ayarlar sekmesine geçildiğinde kayıtlı anahtarı ve durumu yeniler."""
+        current_key = get_api_key() or ""
+        if hasattr(self, "api_key_entry") and self.api_key_entry:
+            self.api_key_entry.delete(0, "end")
+            if current_key:
+                self.api_key_entry.insert(0, current_key)
+        if hasattr(self, "api_status_lbl") and self.api_status_lbl:
+            if current_key:
+                self.api_status_lbl.configure(
+                    text="✅ API Anahtarı Kayıtlı",
+                    text_color=Theme.STATUS_ONLINE
+                )
+            else:
+                self.api_status_lbl.configure(
+                    text="⚠️ API Anahtarı Henüz Girilmedi",
+                    text_color=Theme.STATUS_WARNING
+                )
 
     # ─────────────────────────────────────────
     # SEKME 1: SOHBET PANELİ (CHAT PANEL)

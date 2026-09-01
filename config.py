@@ -158,39 +158,91 @@ GREETING_RESPONSES = {
 
 
 # ─────────────────────────────────────────────
-# API Anahtarı Yönetimi
+# API Anahtarı Yönetimi (Çift Katmanlı Kalıcı Bellek)
 # ─────────────────────────────────────────────
 
+def _ensure_settings_table():
+    """SQLite içinde ayarlar tablosunun var olduğundan emin olur."""
+    try:
+        import sqlite3
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            conn.commit()
+    except Exception:
+        pass
+
+
 def load_config() -> dict:
-    """Kayıtlı konfigürasyonu dosyadan yükler."""
+    """Kayıtlı konfigürasyonu dosyadan ve SQLite yedeğinden yükler."""
+    config = {}
+    # 1. JSON dosyasından oku
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                config = json.load(f)
         except (json.JSONDecodeError, IOError):
-            return {}
-    return {}
+            config = {}
+
+    # 2. Eğer JSON'da API anahtarı yoksa SQLite yedeğini kontrol et
+    if not config.get("gemini_api_key"):
+        try:
+            import sqlite3
+            _ensure_settings_table()
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT value FROM app_settings WHERE key = 'gemini_api_key'")
+                row = cursor.fetchone()
+                if row and row[0]:
+                    config["gemini_api_key"] = row[0]
+                    # JSON'ı da güncelle
+                    save_config(config)
+        except Exception:
+            pass
+
+    return config
 
 
 def save_config(config: dict) -> None:
-    """Konfigürasyonu dosyaya kaydeder."""
+    """Konfigürasyonu hem JSON dosyasına hem de SQLite'a kaydeder."""
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
     except IOError as e:
         print(f"[HATA] Konfigürasyon kaydedilemedi: {e}")
 
+    # SQLite yedeklemesi
+    if "gemini_api_key" in config:
+        try:
+            import sqlite3
+            _ensure_settings_table()
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute("""
+                    INSERT INTO app_settings (key, value, updated_at)
+                    VALUES ('gemini_api_key', ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+                """, (config["gemini_api_key"],))
+                conn.commit()
+        except Exception:
+            pass
+
 
 def get_api_key() -> str | None:
-    """Kayıtlı Gemini API anahtarını getirir."""
+    """Kayıtlı Gemini API anahtarını getirir (kalıcı)."""
     config = load_config()
     return config.get("gemini_api_key")
 
 
 def set_api_key(api_key: str) -> None:
-    """Gemini API anahtarını kaydeder."""
+    """Gemini API anahtarını kalıcı olarak kaydeder."""
+    cleaned = api_key.strip()
     config = load_config()
-    config["gemini_api_key"] = api_key
+    config["gemini_api_key"] = cleaned
     save_config(config)
 
 
@@ -198,4 +250,16 @@ def remove_api_key() -> None:
     """Kayıtlı Gemini API anahtarını siler."""
     config = load_config()
     config.pop("gemini_api_key", None)
-    save_config(config)
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+    try:
+        import sqlite3
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("DELETE FROM app_settings WHERE key = 'gemini_api_key'")
+            conn.commit()
+    except Exception:
+        pass
