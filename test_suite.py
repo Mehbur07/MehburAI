@@ -308,12 +308,14 @@ def run_full_validation():
     # 10c. Yol izleyici SADECE "kapalı → açık" geçişinde tetikler (edge)
     fired = []
     guard = _sg.SecurityGuard(on_access=lambda p: fired.append(p))
-    exe = _sg.SecurityGuard._norm(r"D:\a\b.exe")
     giz = _sg.SecurityGuard._norm(r"C:\Test\Gizli")
+    _scan_state = {"explorer": [], "exes": []}
+    _sg.SecurityGuard._scan = classmethod(
+        lambda cls: (list(_scan_state["explorer"]), list(_scan_state["exes"]))
+    )
 
     # İlk tarama (priming): program zaten çalışıyor → SORMAMALI
-    _sg.SecurityGuard._open_explorer_paths = staticmethod(lambda: [])
-    _sg.SecurityGuard._running_exe_paths = staticmethod(lambda: [r"D:\a\b.exe"])
+    _scan_state["exes"] = [r"D:\a\b.exe"]
     guard._check_once()
     assert fired == [], "başlangıçta zaten açık olan program için sorulmamalı"
 
@@ -322,7 +324,7 @@ def run_full_validation():
     assert fired == [], "açık kalan program tekrar tekrar sormamalı"
 
     # Şimdi korumalı klasör YENİ açılıyor → SORMALI
-    _sg.SecurityGuard._open_explorer_paths = staticmethod(lambda: [r"C:\Test\Gizli\ic"])
+    _scan_state["explorer"] = [r"C:\Test\Gizli\ic"]
     guard._check_once()
     assert fired == [giz], f"yeni açılan klasör için sorulmalı: {fired}"
 
@@ -334,10 +336,10 @@ def run_full_validation():
     assert fired == [], "doğrulama sonrası, hedef açıkken tekrar sormamalı"
 
     # Klasör kapandı, sonra tekrar açıldı → yeniden SORMALI
-    _sg.SecurityGuard._open_explorer_paths = staticmethod(lambda: [])
+    _scan_state["explorer"] = []
     guard._check_once()
     guard._cooldown.clear()
-    _sg.SecurityGuard._open_explorer_paths = staticmethod(lambda: [r"C:\Test\Gizli"])
+    _scan_state["explorer"] = [r"C:\Test\Gizli"]
     guard._check_once()
     assert fired == [giz], f"kapanıp tekrar açılınca yeniden sorulmalı: {fired}"
     print("  • Yol izleyici yalnızca 'kapalı→açık' geçişinde soruyor ✓")

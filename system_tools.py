@@ -32,6 +32,9 @@ from typing import Optional
 
 from memory_engine import clean_text
 
+# Konsol penceresi açmadan (flash olmadan) alt süreç çalıştırma bayrağı
+_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
 
 # ─────────────────────────────────────────────
 # Yardımcı Sabitler
@@ -222,7 +225,8 @@ class SystemTools:
                 return True
             except Exception:
                 try:
-                    subprocess.Popen(["cmd", "/c", "start", "", target], shell=False)
+                    subprocess.Popen(["cmd", "/c", "start", "", target], shell=False,
+                                     creationflags=_NO_WINDOW)
                     return True
                 except Exception:
                     return False
@@ -237,7 +241,7 @@ class SystemTools:
 
         # PATH veya "App Paths" üzerinden ("start" kabuğu her ikisini de çözer)
         try:
-            subprocess.Popen(f'start "" "{target}"', shell=True)
+            subprocess.Popen(f'start "" "{target}"', shell=True, creationflags=_NO_WINDOW)
             return True
         except Exception:
             pass
@@ -512,7 +516,7 @@ class SystemTools:
                 ["powershell", "-NoProfile", "-Command",
                  f"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods)"
                  f".WmiSetBrightness(1,{level})"],
-                capture_output=True, timeout=10,
+                capture_output=True, timeout=10, creationflags=_NO_WINDOW,
             )
             return f"☀️ Ekran parlaklığı %{level} olarak ayarlandı."
         except Exception as e:
@@ -526,7 +530,8 @@ class SystemTools:
                 return "🔒 Ekran kilitlendi."
             if any(w in key for w in ["uyku moduna al", "uyku moduna geç", "uykuya al",
                                       "bilgisayarı uyut", "uyut"]):
-                subprocess.Popen(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"])
+                subprocess.Popen(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"],
+                                 creationflags=_NO_WINDOW)
                 return "😴 Bilgisayar uyku moduna alınıyor..."
             if any(w in key for w in ["ekranı kapat", "monitörü kapat"]):
                 subprocess.Popen(
@@ -534,7 +539,7 @@ class SystemTools:
                     "'[DllImport(\\\"user32.dll\\\")]public static extern int "
                     "SendMessage(int hWnd,int hMsg,int wParam,int lParam);' -Name a -Pass)"
                     '::SendMessage(-1,0x0112,0xF170,2)"',
-                    shell=True,
+                    shell=True, creationflags=_NO_WINDOW,
                 )
                 return "🌑 Ekran kapatıldı (hareket ettirince açılır)."
         except Exception as e:
@@ -567,22 +572,24 @@ class SystemTools:
         try:
             if any(w in key for w in ["iptal et", "vazgeç", "kapatmayı iptal",
                                       "yeniden başlatmayı iptal", "shutdown iptal"]):
-                subprocess.run(["shutdown", "/a"], capture_output=True)
+                subprocess.run(["shutdown", "/a"], capture_output=True, creationflags=_NO_WINDOW)
                 return "✅ Planlanmış kapatma/yeniden başlatma iptal edildi."
 
             if any(w in key for w in ["yeniden başlat", "yeniden baslat", "restart", "reboot"]):
-                subprocess.run(["shutdown", "/r", "/t", str(cls._SHUTDOWN_DELAY)], capture_output=True)
+                subprocess.run(["shutdown", "/r", "/t", str(cls._SHUTDOWN_DELAY)],
+                               capture_output=True, creationflags=_NO_WINDOW)
                 return (f"🔄 Bilgisayar **{cls._SHUTDOWN_DELAY} saniye** içinde yeniden başlatılacak.\n"
                         f"Vazgeçmek için **'iptal et'** yaz.")
 
             if any(w in key for w in ["bilgisayarı kapat", "bilgisayari kapat", "sistemi kapat",
                                       "pc'yi kapat", "shutdown", "kapat bilgisayarı"]):
-                subprocess.run(["shutdown", "/s", "/t", str(cls._SHUTDOWN_DELAY)], capture_output=True)
+                subprocess.run(["shutdown", "/s", "/t", str(cls._SHUTDOWN_DELAY)],
+                               capture_output=True, creationflags=_NO_WINDOW)
                 return (f"⚠️ Bilgisayar **{cls._SHUTDOWN_DELAY} saniye** içinde kapanacak.\n"
                         f"Vazgeçmek için hemen **'iptal et'** yaz.")
 
             if any(w in key for w in ["oturumu kapat", "çıkış yap", "logout", "oturum kapat"]):
-                subprocess.run(["shutdown", "/l"], capture_output=True)
+                subprocess.run(["shutdown", "/l"], capture_output=True, creationflags=_NO_WINDOW)
                 return "👋 Oturum kapatılıyor..."
         except Exception as e:
             return f"⚠️ Güç komutu başarısız: {e}"

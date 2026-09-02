@@ -28,6 +28,22 @@ import requests
 
 from config import DATA_DIR, get_security_config
 
+# Windows'ta arka plan PowerShell çağrılarının konsol penceresi açmasını engeller
+_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+
+def _run_ps(script: str, timeout: float = 8.0) -> str:
+    """PowerShell betiğini GÖRÜNMEZ pencerede çalıştırır, stdout döndürür."""
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=timeout,
+            creationflags=_NO_WINDOW,
+        )
+        return out.stdout or ""
+    except Exception:
+        return ""
+
 
 # ─────────────────────────────────────────────
 # Telegram Bildirimi
@@ -236,22 +252,34 @@ class SecurityGuard:
             return []
         return [self._norm(p) for p in cfg.get("security_watch_paths", []) if str(p).strip()]
 
+    # Tek PowerShell çağrısıyla hem açık Explorer klasörlerini hem çalışan
+    # süreç yollarını alır (E| ve P| ön ekleriyle) — poll başına 1 süreç.
+    _SCAN_SCRIPT = (
+        "$ErrorActionPreference='SilentlyContinue';"
+        "(New-Object -ComObject Shell.Application).Windows() | "
+        "ForEach-Object { try { 'E|' + $_.Document.Folder.Self.Path } catch {} };"
+        "Get-Process | Where-Object { $_.Path } | ForEach-Object { 'P|' + $_.Path }"
+    )
+
+    @classmethod
+    def _scan(cls) -> tuple:
+        """(açık_explorer_klasörleri, çalışan_exe_yolları)"""
+        explorer, exes = [], []
+        for line in _run_ps(cls._SCAN_SCRIPT, timeout=6).splitlines():
+            line = line.strip()
+            if line.startswith("E|") and line[2:]:
+                explorer.append(line[2:])
+            elif line.startswith("P|") and line[2:]:
+                exes.append(line[2:])
+        return explorer, exes
+
     @staticmethod
     def _open_explorer_paths() -> List[str]:
-        """Şu an Dosya Gezgini'nde açık olan klasör yollarını döndürür."""
-        ps = (
-            "$ErrorActionPreference='SilentlyContinue';"
-            "(New-Object -ComObject Shell.Application).Windows() | "
-            "ForEach-Object { try { $_.Document.Folder.Self.Path } catch {} }"
-        )
-        try:
-            out = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps],
-                capture_output=True, text=True, timeout=6,
-            )
-            return [line.strip() for line in out.stdout.splitlines() if line.strip()]
-        except Exception:
-            return []
+        return SecurityGuard._scan()[0]
+
+    @staticmethod
+    def _running_exe_paths() -> List[str]:
+        return SecurityGuard._scan()[1]
 
     @staticmethod
     def list_running_apps() -> List[tuple]:
@@ -264,17 +292,9 @@ class SecurityGuard:
             "Get-Process | Where-Object { $_.Path -and $_.MainWindowTitle } | "
             "Sort-Object Name -Unique | ForEach-Object { $_.Name + '|' + $_.Path }"
         )
-        try:
-            out = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps],
-                capture_output=True, text=True, timeout=8,
-            )
-        except Exception:
-            return []
-
         win_dir = os.environ.get("SystemRoot", r"C:\Windows").lower()
         apps, seen = [], set()
-        for line in out.stdout.splitlines():
+        for line in _run_ps(ps, timeout=8).splitlines():
             if "|" not in line:
                 continue
             name, path = line.split("|", 1)
@@ -287,22 +307,6 @@ class SecurityGuard:
             seen.add(low)
             apps.append((name, path))
         return sorted(apps, key=lambda a: a[0].lower())
-
-    @staticmethod
-    def _running_exe_paths() -> List[str]:
-        """Çalışan süreçlerin çalıştırılabilir dosya yollarını döndürür."""
-        ps = (
-            "$ErrorActionPreference='SilentlyContinue';"
-            "Get-Process | Where-Object { $_.Path } | ForEach-Object { $_.Path }"
-        )
-        try:
-            out = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps],
-                capture_output=True, text=True, timeout=6,
-            )
-            return [line.strip() for line in out.stdout.splitlines() if line.strip()]
-        except Exception:
-            return []
 
     def _loop(self) -> None:
         while self._running:
@@ -322,8 +326,9 @@ class SecurityGuard:
                 self._active.clear()
             return
 
-        explorer = [self._norm(p) for p in self._open_explorer_paths()]
-        exes = set(self._norm(p) for p in self._running_exe_paths())
+        raw_explorer, raw_exes = self._scan()
+        explorer = [self._norm(p) for p in raw_explorer]
+        exes = set(self._norm(p) for p in raw_exes)
 
         # Şu an açık/çalışan korumalı hedefler
         now_active = set()
