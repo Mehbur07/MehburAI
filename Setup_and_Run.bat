@@ -24,7 +24,7 @@ echo  [OK] Python mevcut.
 
 echo.
 echo  [2/4] Gerekli yapay zeka kutuphaneleri yukleniyor...
-echo  (CustomTkinter, Google Generative AI, Pillow, Requests...)
+echo  (CustomTkinter, Pillow, Requests...)
 python -m pip install -r requirements.txt
 if %ERRORLEVEL% NEQ 0 (
     echo  [UYARI] Pip yuklemesinde bazi uyarilar olustu, devam ediliyor...

@@ -810,8 +810,9 @@ class MehburApp(ctk.CTk):
             api_card,
             text=(
                 "MehburAI'nin çevrim içi modda en güncel yapay zeka gücüyle çalışabilmesi için "
-                "Google Gemini API anahtarınızı giriniz.\n(API anahtarı olmadan yalnızca Wikipedia "
-                "özetleri ve kayıtlı hafıza çalışır.)"
+                "Google Gemini API anahtarınızı giriniz.\n"
+                "Ücretsiz anahtar: https://aistudio.google.com/apikey  (AIzaSy... veya AQ... ile başlar)\n"
+                "(API anahtarı olmadan yalnızca Wikipedia özetleri ve kayıtlı hafıza çalışır.)"
             ),
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
             text_color=Theme.TEXT_SECONDARY,
@@ -827,7 +828,7 @@ class MehburApp(ctk.CTk):
         current_key = get_api_key() or ""
         self.api_key_entry = ctk.CTkEntry(
             api_input_row,
-            placeholder_text="AIzaSy... ile başlayan Gemini API anahtarınızı yapıştırın",
+            placeholder_text="AIzaSy... veya AQ... ile başlayan Gemini API anahtarınızı yapıştırın",
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
             fg_color=Theme.BG_INPUT,
             border_color=Theme.CYAN_DARK,

@@ -5,15 +5,16 @@
 customtkinter>=5.2.0
 Pillow>=10.0.0
 
-# Gemini API (Google AI)
-google-generativeai>=0.8.0
-
-# Semantik Vektör Arama (Offline Akıllı Bellek)
-sentence-transformers>=3.0.0
-
-# Kosinüs Benzerliği Hesaplama
-scikit-learn>=1.3.0
-
-# Ek Yardımcılar
+# HTTP istekleri — Gemini REST API + Wikipedia
 requests>=2.31.0
-numpy>=1.24.0
+
+# ─────────────────────────────────────────────
+# NOT: Eski `google-generativeai` paketi Google tarafından kullanımdan
+# kaldırıldı ve MehburAI artık Gemini'ye doğrudan REST (streamGenerateContent)
+# üzerinden bağlanıyor. Ekstra bir SDK gerekmiyor.
+#
+# Aşağıdakiler şu an kod tarafından kullanılmıyor; gelecekteki gömülü
+# (embedding) tabanlı semantik arama için opsiyoneldir:
+# sentence-transformers>=3.0.0
+# scikit-learn>=1.3.0
+# numpy>=1.24.0

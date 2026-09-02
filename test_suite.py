@@ -10,6 +10,8 @@ Tüm sistem bileşenlerini otomatik olarak test eder:
   5. Çevrim Dışı Semantik Bellek Eşleştirmesi (Farklı cümle kalıpları)
   6. Çevrim Dışı Bilinmeyen Soru Ayrımı
   7. Gemini API Anahtarı Ayarları & Konfigürasyon
+  8. Küfür / Hakaret Algılama (yazım hatası toleranslı)
+  9. Genişletilmiş Bilgisayar Erişimi (program açma, dosya/klasör, ses, parlaklık, güç)
 """
 
 import io
@@ -19,8 +21,8 @@ import sys
 if sys.stdout.encoding != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
-from ai_engine import AIEngine
-from config import get_api_key, set_api_key
+from ai_engine import AIEngine, ProfanityFilter
+from config import PROFANITY_RESPONSE, get_api_key, set_api_key
 from memory_engine import MemoryEngine
 from network_manager import NetworkMonitor
 from system_tools import SystemTools
@@ -31,7 +33,7 @@ def run_full_validation():
     print("  🤖 MEHBUR AI — FAZ 5 ENTEGRASYON VE DOĞRULAMA TESTLERİ")
     print("=" * 65)
     passed_tests = 0
-    total_tests = 6
+    total_tests = 9
 
     memory = MemoryEngine()
     network = NetworkMonitor()
@@ -158,10 +160,131 @@ def run_full_validation():
     passed_tests += 1
 
     # ─────────────────────────────────────────
+    # TEST 8: Küfür ve Hakaret Algılama Filtresi
+    # ─────────────────────────────────────────
+    print("\n[TEST 8] Küfür ve Hakaret Algılama Filtresi:")
+
+    # 8a. Doğrudan küfürler (Tümü True dönmeli)
+    profanity_positives = [
+        "amk", "aq", "oç", "siktir git", "orospu çocuğu",
+        "piç kurusu", "sikeyim", "yarrak", "yavşak", "pezevenk",
+        "aptal Mehbur", "sen salaksın", "şerefsiz", "götlek",
+        "amına koyayım", "gerizekalı", "s*ktir",
+        # Yazım hatalı / eksik harfli varyasyonlar (yeni tolerans)
+        "orospo", "orospı", "aptl", "saalak", "çomarr",
+        "serefsız", "pezevengk", "gerizekali",
+    ]
+    prof_pos_ok = True
+    for pf in profanity_positives:
+        detected = ProfanityFilter.check_profanity(pf)
+        if not detected:
+            print(f"  ❌ Algılanamadı: '{pf}'")
+            prof_pos_ok = False
+
+    if prof_pos_ok:
+        print(f"  • {len(profanity_positives)} küfürlü ifade başarıyla algılandı ✓")
+
+    # 8b. Masum kelimeler (Tümü False dönmeli — False Positive olmamalı)
+    safe_sentences = [
+        "eksik parça var", "sıkıntı yok", "götürmek lazım",
+        "piliç eti", "fizik dersi", "klasik müzik", "fıstık ezmesi",
+        "10 dakika bekle", "malzeme listesi nedir", "görev yöneticisi",
+        "Merhaba nasılsın?", "Türkiye'nin başkenti neresidir?",
+        # Yazım-hatası toleransının bulaşmaması gereken masum kelimeler
+        "solak biri", "salık verdi", "silik yazı", "sülük tuttu",
+        "yürek yedi", "yörük çadırı", "yarık duvar", "hamak kurduk",
+    ]
+    safe_ok = True
+    for sf in safe_sentences:
+        detected = ProfanityFilter.check_profanity(sf)
+        if detected:
+            print(f"  ❌ Yanlış pozitif: '{sf}'")
+            safe_ok = False
+
+    if safe_ok:
+        print(f"  • {len(safe_sentences)} masum cümle doğru şekilde geçirildi ✓")
+
+    # 8c. process_query entegrasyonu — küfürlü mesaj doğru yanıtı vermeli
+    profanity_result = ai.process_query("siktir git")
+    assert profanity_result["answer"] == PROFANITY_RESPONSE, \
+        f"Beklenen '{PROFANITY_RESPONSE}', gelen '{profanity_result['answer']}'"
+    assert profanity_result["source"] == "profanity_filter"
+    assert profanity_result["learned"] is False
+    print(f"  • process_query küfür testi: '{profanity_result['answer']}' ✓")
+
+    assert prof_pos_ok and safe_ok
+    print("  ✅ TEST 8 BAŞARILI: Küfür algılama filtresi hatasız çalışıyor.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 9: Genişletilmiş Bilgisayar Erişimi (Program / Dosya / Sistem)
+    # ─────────────────────────────────────────
+    print("\n[TEST 9] Genişletilmiş Bilgisayar Erişimi:")
+    import os as _os
+
+    # Yan etkileri engelle: testlerde gerçek program/pencere açma ve tuş basma yok.
+    SystemTools._launch = staticmethod(lambda target: True)
+    SystemTools._press_vk = staticmethod(lambda vk, times=1: None)
+    if hasattr(_os, "startfile"):
+        _os.startfile = lambda *a, **k: None
+
+    # 9a. Komut olmayan sorular None dönmeli (yanlış tetikleme yok)
+    non_commands = [
+        "Albert Einstein kimdir", "Türkiye'nin başkenti neresi",
+        "bugün hava nasıl", "python nedir",
+        "discordda kanal nasıl açılır", "chrome nedir", "açıklama yapar mısın",
+        "kapıyı aç", "oruç ne zaman açılır", "excel formülü açıkla",
+    ]
+    nc_ok = all(SystemTools.handle_system_query(q) is None for q in non_commands)
+    assert nc_ok, "Normal sorular yanlışlıkla sistem komutu sanıldı!"
+    print(f"  • {len(non_commands)} normal soru doğru şekilde 'komut değil' sayıldı ✓")
+
+    # 9a-2. Fiil çekimi + yazım hatası toleransı ("açar mısın", "makimesini")
+    conjugated = {
+        "hesap makinesini açar mısın": "hesap makinesi",
+        "hesap makimesini açar mısın": "hesap makinesi",   # 'makimesini' yazım hatası
+        "not defteri açsana": "not defteri",
+        "chromu başlatır mısın": "chrome",
+    }
+    for phrase, expect in conjugated.items():
+        rep = SystemTools.handle_system_query(phrase)
+        assert rep and expect.split()[0].lower() in rep.lower(), \
+            f"'{phrase}' -> beklenen '{expect}', gelen {rep!r}"
+    print(f"  • {len(conjugated)} çekimli/yazım-hatalı 'aç' komutu doğru eşleşti ✓")
+
+    # 9b. Güç komutu iptali (zararsız) çalışmalı
+    cancel_reply = SystemTools.handle_system_query("kapatmayı iptal et")
+    assert cancel_reply and "iptal" in cancel_reply.lower()
+    print(f"  • Güç komutu iptali: '{cancel_reply}' ✓")
+
+    # 9c. Klasör oluşturma gerçekten dosya sistemine yazmalı
+    test_dir_name = "MehburAI_SelfTest_Klasor"
+    create_reply = SystemTools.handle_system_query(
+        f'masaüstünde "{test_dir_name}" klasörü oluştur'
+    )
+    desktop_path = _os.path.join(_os.path.expanduser("~"), "Desktop", test_dir_name)
+    assert _os.path.isdir(desktop_path), "Klasör oluşturulamadı!"
+    print(f"  • Klasör oluşturma: '{create_reply.splitlines()[0]}' ✓")
+    _os.rmdir(desktop_path)  # temizle
+
+    # 9d. Parlaklık komutu seviye çıkarımı yapmalı (donanım desteklemese bile yanıt üretir)
+    bright_reply = SystemTools.handle_system_query("parlaklığı %55 yap")
+    assert bright_reply and ("55" in bright_reply or "parlaklık" in bright_reply.lower())
+    print(f"  • Parlaklık komutu ayrıştırıldı ✓")
+
+    # 9e. Ses kısma komutu tanınmalı
+    vol_reply = SystemTools.handle_system_query("sesi kıs")
+    assert vol_reply and "ses" in vol_reply.lower()
+    print(f"  • Ses kontrolü: '{vol_reply}' ✓")
+
+    print("  ✅ TEST 9 BAŞARILI: Genişletilmiş bilgisayar erişimi çalışıyor.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
     # Özet Rapor
     # ─────────────────────────────────────────
     print("\n" + "=" * 65)
-    print(f"  🎉 TÜM ENTEGRASYON TESTLERİ TAMAMLANDI: {passed_tests}/7 BAŞARILI!")
+    print(f"  🎉 TÜM ENTEGRASYON TESTLERİ TAMAMLANDI: {passed_tests}/{total_tests} BAŞARILI!")
     print("=" * 65)
 
 

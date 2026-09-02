@@ -14,15 +14,18 @@ MehburAI'nin ana zeka modülü. Ağ durumuna göre dinamik olarak:
      - Eşleşme yoksa kullanıcıyı nazikçe bilgilendirir.
 """
 
+import difflib
+import json
 import re
 import urllib.parse
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 from config import (
     GREETING_PATTERNS,
     GREETING_RESPONSES,
+    PROFANITY_RESPONSE,
     GeminiConfig,
     get_api_key,
 )
@@ -92,64 +95,113 @@ class TrustedSourceFetcher:
 # ─────────────────────────────────────────────
 
 class GeminiService:
-    """Google Gemini API ile entegre yanıt üretici."""
+    """
+    Google Gemini API ile entegre yanıt üretici.
 
-    def __init__(self):
-        self._model = None
-        self._configured_key = None
+    Not: Eski `google-generativeai` Python paketi Google tarafından kullanımdan
+    kaldırıldı ve `gemini-2.0-flash` modeli kapatıldı. Ayrıca yeni nesil modellerde
+    klasik `:generateContent` uç noktası uzun süre yanıt vermeden askıda kalabiliyor.
+    Bu yüzden burada doğrudan REST üzerinden `:streamGenerateContent` (SSE) çağrısı
+    yapılır — hızlı, güvenilir ve ekstra bağımlılık gerektirmez (`requests` yeterli).
+    """
 
-    def _ensure_model(self) -> bool:
-        """API anahtarı varsa Gemini modelini hazırlar."""
-        api_key = get_api_key()
-        if not api_key:
-            return False
+    def _build_payload(self, question: str, context: Optional[str]) -> dict:
+        text = question
+        if context:
+            text = (
+                "Aşağıdaki güvenilir kaynak bilgisini dikkate alarak soruyu yanıtla:\n"
+                f"KAYNAK BİLGİSİ: {context}\n\n"
+                f"SORU: {question}\n\n"
+                "Lütfen net, anlaşılır, Türkçe ve samimi bir dille açıkla."
+            )
+        return {
+            "systemInstruction": {"parts": [{"text": GeminiConfig.SYSTEM_PROMPT}]},
+            "contents": [{"role": "user", "parts": [{"text": text}]}],
+            "generationConfig": {
+                "temperature": GeminiConfig.TEMPERATURE,
+                "maxOutputTokens": GeminiConfig.MAX_OUTPUT_TOKENS,
+            },
+        }
 
-        if self._model is None or self._configured_key != api_key:
+    @staticmethod
+    def _parse_sse_stream(response: requests.Response) -> str:
+        """SSE (`data: {...}`) satırlarını birleştirip tam metni döndürür."""
+        parts: List[str] = []
+        for raw in response.iter_lines():
+            if not raw:
+                continue
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
             try:
-                import google.generativeai as genai
-                genai.configure(api_key=api_key)
-                self._model = genai.GenerativeModel(
-                    model_name=GeminiConfig.MODEL_NAME,
-                    system_instruction=GeminiConfig.SYSTEM_PROMPT,
-                )
-                self._configured_key = api_key
-            except Exception as e:
-                print(f"[GeminiService] Başlatma hatası: {e}")
-                self._model = None
-                return False
-
-        return self._model is not None
+                data = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            for cand in data.get("candidates", []):
+                for part in cand.get("content", {}).get("parts", []):
+                    if part.get("text"):
+                        parts.append(part["text"])
+        return "".join(parts).strip()
 
     def generate_response(self, question: str, context: Optional[str] = None) -> Optional[str]:
         """
-        Gemini API'den soru ve güvenilir kaynak bağlamıyla yanıt alır.
+        Gemini API'den soru ve (varsa) güvenilir kaynak bağlamıyla yanıt alır.
+        Anahtar yoksa veya tüm modeller başarısız olursa None döner.
         """
-        if not self._ensure_model():
+        api_key = get_api_key()
+        if not api_key:
             return None
 
-        prompt = question
-        if context:
-            prompt = (
-                f"Aşağıdaki güvenilir kaynak bilgilerini dikkate alarak soruyu yanıtla:\n"
-                f"KAYNAK BİLGİSİ: {context}\n\n"
-                f"SORU: {question}\n\n"
-                f"Lütfen net, anlaşılır, Türkçe ve samimi bir dille açıkla."
-            )
+        payload = self._build_payload(question, context)
+        headers = {"Content-Type": "application/json"}
+        timeout = (GeminiConfig.CONNECT_TIMEOUT, GeminiConfig.READ_TIMEOUT)
 
-        try:
-            response = self._model.generate_content(
-                prompt,
-                generation_config={
-                    "max_output_tokens": GeminiConfig.MAX_OUTPUT_TOKENS,
-                    "temperature": GeminiConfig.TEMPERATURE,
-                }
+        last_error = None
+        for model in GeminiConfig.FALLBACK_MODELS:
+            url = (
+                f"{GeminiConfig.API_BASE}/models/{model}:streamGenerateContent"
+                f"?alt=sse&key={urllib.parse.quote(api_key)}"
             )
-            if response and response.text:
-                return response.text.strip()
-        except Exception as e:
-            print(f"[GeminiService] API Yanıt Hatası: {e}")
+            try:
+                with requests.post(
+                    url, json=payload, headers=headers, timeout=timeout, stream=True
+                ) as resp:
+                    if resp.status_code != 200:
+                        last_error = f"{model}: HTTP {resp.status_code} {resp.text[:160]}"
+                        # 404 = model kapalı, 503 = yoğunluk → sıradaki modeli dene
+                        continue
+                    text = self._parse_sse_stream(resp)
+                    if text:
+                        return text
+                    last_error = f"{model}: boş yanıt"
+            except requests.RequestException as e:
+                last_error = f"{model}: {type(e).__name__} {str(e)[:120]}"
+                continue
 
+        if last_error:
+            print(f"[GeminiService] API Yanıt Hatası: {last_error}")
         return None
+
+    def quick_check(self) -> Tuple[bool, str]:
+        """API anahtarının canlı çalışıp çalışmadığını kısa bir istekle test eder."""
+        api_key = get_api_key()
+        if not api_key:
+            return False, "API anahtarı girilmemiş."
+        try:
+            resp = requests.get(
+                f"{GeminiConfig.API_BASE}/models?key={urllib.parse.quote(api_key)}",
+                timeout=(GeminiConfig.CONNECT_TIMEOUT, 20.0),
+            )
+            if resp.status_code == 200:
+                return True, "Gemini API anahtarı geçerli ve aktif."
+            if resp.status_code in (401, 403):
+                return False, "API anahtarı geçersiz veya yetkisiz."
+            return False, f"Beklenmeyen durum: HTTP {resp.status_code}"
+        except requests.RequestException as e:
+            return False, f"Bağlantı hatası: {type(e).__name__}"
 
 
 # ─────────────────────────────────────────────
@@ -167,17 +219,27 @@ class GreetingFilter:
             return None
 
         # 1. Adın ne / Kimsin varyasyonları kontrolü
+        # (Kelime sınırıyla eşleşir; "ödevler adında klasör" gibi cümlelere bulaşmaz.)
         name_patterns = [
             "adın ne", "adin ne", "adın nedir", "adin nedir",
             "ismin ne", "ismin nedir", "senin adın ne", "senin adin ne",
             "senin ismin ne", "senin ismin nedir", "adını söyle", "adini soyle",
             "ismini söyle", "ismini soyle", "kimsin", "sen kimsin",
             "kendini tanıt", "kendini tanit", "adın neydi", "adin neydi",
-            "adın ne senin", "ismin ne senin", "adın", "ismin"
+            "adın ne senin", "ismin ne senin",
         ]
         for np in name_patterns:
-            if cleaned == np or np in cleaned:
+            if re.search(rf"(?<!\w){re.escape(np)}(?!\w)", cleaned):
                 return GREETING_RESPONSES["adin_ne"]
+        # Tek kelimelik "adın" / "ismin" yalnızca tam eşleşmede kimlik sorusudur
+        if cleaned in {"adın", "adin", "ismin", "adını", "ismini"}:
+            return GREETING_RESPONSES["adin_ne"]
+        # "adını/ismini ... söyle/söyler misin/verir misin/öğrenebilir miyim"
+        if re.search(r"\b(ad[ıi]n[ıi]|ismini)\b", cleaned) and any(
+            v in cleaned for v in ["söyle", "soyle", "söyler", "soyler", "verir",
+                                   "öğrenebilir", "ogrenebilir", "öğrensem", "merak"]
+        ):
+            return GREETING_RESPONSES["adin_ne"]
 
         # 2. Hal hatır / Nasılsın kontrolü
         if any(w in cleaned for w in ["nasılsın", "nasilsin", "naber", "ne haber", "napıyorsun", "napiyorsun"]):
@@ -205,6 +267,189 @@ class GreetingFilter:
             return "Rica ederim! 😊 Her zaman yardıma hazırım. Başka bir sorun var mı?"
 
         return None
+
+
+# ─────────────────────────────────────────────
+# Küfür & Hakaret Algılama Filtresi
+# ─────────────────────────────────────────────
+
+class ProfanityFilter:
+    """Türkçe küfür, hakaret ve argo ifadeleri tespit eder."""
+
+    # Kısaltmalar ve sembollü maskelemeler (tam kelime eşleşmesi)
+    EXACT_ACRONYMS = {
+        "amk", "aq", "amq", "oc", "oç", "sg", "sie", "mk", "mq",
+        "o.ç", "o.c", "a.m.k", "a.q", "s.g",
+    }
+
+    # Kök bazlı küfür/hakaretler (startswith ile kontrol edilir)
+    PROFANITY_ROOTS = [
+        "orospu", "yavşak", "yavsak", "pezevenk", "pezeveng",
+        "şerefsiz", "serefsiz", "haysiyetsiz", "karaktersiz", "namussuz",
+        "salak", "aptal", "gerizekal", "embesil", "moron", "dangalak",
+        "beyinsiz", "kahpe", "kancık", "kancik", "gavat", "kavat",
+        "fahişe", "fahise", "taşşak", "tassak", "daşşak", "dassak",
+        "taşak", "tasak", "dalyarak", "götlek", "gotlek", "götveren",
+        "gotveren", "puşt", "pust", "ibne", "amcık", "amcik",
+        "amcığ", "amcig", "yarrak", "yarak", "ahmak", "çomar", "comar",
+    ]
+
+    # Tam kelime eşleşmesi gereken kısa küfürler
+    EXACT_WORDS = {
+        "sik", "siki", "sike", "sikim", "sikti", "siktim", "siktin",
+        "siktiğimin", "siktigimin", "siker", "sikerim", "sikersin",
+        "sikerler", "sikeyim", "sikem", "sikik", "sikiş", "sikis",
+        "sikişmek", "sikismek", "siktir", "siktirgit",
+        "sokarım", "sokarim", "sokayım", "sokayim",
+        "piç", "pic", "piçler", "picler", "piçin", "picin",
+        "piçi", "pici", "piçsin", "picsin", "piçlik", "piclik",
+        "göt", "got", "götü", "gotu", "göte", "gote", "götün", "gotun",
+        "götüne", "gotune", "götünü", "gotunu", "götten", "gotten",
+        "amına", "amina", "amınakoyayım", "aminakoyayim",
+        "amınakoyim", "aminakoyim", "amkoyim",
+        "mal", "malsın", "malsin", "manyak", "manyaksın",
+    }
+
+    # İki kelimeli küfür kalıpları (regex)
+    PHRASE_PATTERNS = [
+        r"\borospu\s+[çc]ocu[gğ]u\b",
+        r"\bam[ıi]na\s+koy(ay[ıi]m|im|dum|du[gğ]um)\b",
+        r"\bam[ıi]na\s+sok(ay[ıi]m|im|tum|tu[gğ]um)\b",
+        r"\bsiktir\s+git\b",
+        r"\byar[ra]ak\s+kafal[ıi]\b",
+        r"\bg[öo]t\s+kafal[ıi]\b",
+        r"\bg[öo]t\s+deli[gğ]i\b",
+        r"\bg[öo]t\s+lalesi\b",
+        r"\bit\s+o[gğ]lu\s+it\b",
+        r"\bd[öo]l\s+israf[ıi]\b",
+        # Maskelenmiş ve boşluklu kısaltmalar
+        r"\ba\s*\.?\s*m\s*\.?\s*k\b",
+        r"\ba\s*\.?\s*q\b",
+        r"\bo\s*\.?\s*[çc]\b",
+        r"\bs\s*\.?\s*g\b",
+        r"\bs\s*[*#@x]+\s*k\b",
+        r"\bs\s*[*#@x]+\s*kt[ıi]r\b",
+        r"\bam\s*[*#@x]+\s*k\b",
+    ]
+
+    # False-positive koruması: masum kelimeler
+    SAFE_WORDS = {
+        "eksik", "eksikler", "eksiklik", "sıkıntı", "sıkıntılı", "sıkıntıları",
+        "sıkıcı", "sık", "sıklaşmak", "sıkışık", "sıkı", "sıkıştırmak", "sıkma",
+        "klasik", "fizik", "müzik", "vesika", "tasdik", "fıstık", "meksika",
+        "kesik", "kemik", "patik", "çeltik", "piknik", "çekiç", "piliç",
+        "kerpiç", "meriç", "götür", "götürmek", "götürdü", "götürün", "götürü",
+        "göster", "göstermek", "görev", "gölge", "gövde", "gözlem", "göz", "gözlük",
+        "malatya", "maliyet", "malzeme", "malum", "malik", "mallar",
+        "çocuk", "toprak", "bayrak", "kayak", "tarak", "durak",
+        "bakkal", "salata", "salatalık", "makarna", "nokta", "doktor",
+        "faktör", "sektör", "sokak", "asker", "baskı", "maske",
+        "aşırı", "şeker", "dakika", "tabak", "yasak",
+    }
+
+    # Türkçe sesli harfler (yazım hatası toleransı için)
+    _VOWELS = set("aeıioöuü")
+
+    @classmethod
+    def _skeleton(cls, word: str) -> str:
+        """Kelimenin sesli harflerini atıp ünsüz iskeletini döndürür."""
+        return "".join(ch for ch in word if ch not in cls._VOWELS)
+
+    @staticmethod
+    def _collapse_repeats(word: str) -> str:
+        """Ardışık tekrar eden harfleri teke indirir ('saalak' → 'salak')."""
+        return re.sub(r"(.)\1+", r"\1", word)
+
+    @classmethod
+    def _is_typo_of_profanity(cls, word: str) -> bool:
+        """
+        Yazım hatalı / eksik harfli küfürleri yakalar; masum kelimelere
+        bulaşmamak için dar ve temkinli kurallar kullanır.
+        Örn: 'orospo'→'orospu', 'aptl'→'aptal', 'saalak'→'salak', 'çomarr'→'çomar'.
+        """
+        if len(word) < 4 or word in cls.SAFE_WORDS:
+            return False
+
+        w_skel = cls._skeleton(word)
+        w_collapsed = cls._collapse_repeats(word)
+
+        for root in cls.PROFANITY_ROOTS:
+            if len(root) < 5 or word[0] != root[0] or abs(len(word) - len(root)) > 2:
+                continue
+
+            r_skel = cls._skeleton(root)
+
+            # 1) Uzun ve ayırt edici kök + ilk 3 harf aynı + yüksek benzerlik
+            #    ("orospo"≈"orospu", "serefsız"≈"serefsiz")
+            if len(root) >= 6 and word[:3] == root[:3]:
+                if difflib.SequenceMatcher(None, word, root).ratio() >= 0.80:
+                    return True
+
+            # 2) Eksik sesli harf: kelime kökten kısa ama ünsüz iskeleti aynı
+            #    ("aptl"→"aptal", "yavsk"→"yavşak" değil ama "yavsak" kökü var)
+            if len(word) < len(root) and w_skel == r_skel:
+                return True
+
+            # 3) Tekrar eden harf hatası: tekrarları silince köke/iskelete oturuyor
+            #    ("saalak"→"salak", "çomarr"→"çomar", "aptaal"→"aptal")
+            #    Yalnızca gerçekten tekrar silindiyse çalışır (masum kelime kalkanı).
+            if w_collapsed != word and (
+                w_collapsed == root or cls._skeleton(w_collapsed) == r_skel
+            ):
+                return True
+
+        return False
+
+    @classmethod
+    def check_profanity(cls, text: str) -> bool:
+        """Verilen metinde küfür veya hakaret varsa True döndürür."""
+        if not text or not text.strip():
+            return False
+
+        lower_text = turkish_lower(text)
+
+        # 1. Çok kelimeli regex kalıp kontrolü
+        for pattern in cls.PHRASE_PATTERNS:
+            if re.search(pattern, lower_text, re.IGNORECASE):
+                return True
+
+        # 2. Leetspeak normalizasyonu
+        leet_map = {"@": "a", "0": "o", "1": "i", "3": "e", "4": "a", "$": "s", "!": "i"}
+        norm_text = lower_text
+        for k, v in leet_map.items():
+            norm_text = norm_text.replace(k, v)
+
+        # Karakter tekrarlarını sadeleştir (örn. "siiiik" → "sik")
+        collapsed_text = re.sub(r"(.)\1{2,}", r"\1", norm_text)
+
+        # 3. Kelime bazlı kontrol
+        cleaned_orig = clean_text(lower_text)
+        cleaned_collapsed = clean_text(collapsed_text)
+        all_words = set(cleaned_orig.split() + cleaned_collapsed.split())
+
+        for word in all_words:
+            # Güvenli kelime ise atla
+            if word in cls.SAFE_WORDS:
+                continue
+
+            # Tam eşleşme (kısaltma veya kısa küfür)
+            if word in cls.EXACT_WORDS or word in cls.EXACT_ACRONYMS:
+                return True
+
+            # Kök eşleşmesi (uzun küfür/hakaret kökleri)
+            for root in cls.PROFANITY_ROOTS:
+                if word.startswith(root):
+                    return True
+
+            # "sik..." ile başlayan fiil çekimleri ("sıkıntı" vb. SAFE_WORDS'te elendi)
+            if re.match(r"^(sik|skt|s!k|s1k)[a-zçğıöşü]*", word) and word not in cls.SAFE_WORDS:
+                return True
+
+            # Yazım hatalı / eksik harfli küfürler ("orospo", "aptl", "yavsk" ...)
+            if cls._is_typo_of_profanity(word):
+                return True
+
+        return False
 
 
 # ─────────────────────────────────────────────
@@ -291,7 +536,34 @@ class AIEngine:
                 "learned": False,
             }
 
-        # 1. ADIM: Selamlaşma / Kimlik Kontrolü
+        # 0. ADIM: Küfür & Hakaret Filtresi
+        if ProfanityFilter.check_profanity(query):
+            is_online = self.network.is_online
+            self.memory.log_message(role="user", message="[küfür filtresi]", is_online=is_online)
+            self.memory.log_message(role="mehbur", message=PROFANITY_RESPONSE, is_online=is_online, source="profanity_filter")
+            return {
+                "answer": PROFANITY_RESPONSE,
+                "is_online": is_online,
+                "source": "profanity_filter",
+                "learned": False,
+            }
+
+        # 1. ADIM: Bilgisayar & Sistem Araçları Kontrolü
+        # (Açık bir komut — "... klasörü oluştur", "not defteri aç" — selam/kimlik
+        #  filtresinden önce gelir ki yanlış eşleşmeyle ele geçirilmesin.)
+        system_response = SystemTools.handle_system_query(query)
+        if system_response:
+            is_online = self.network.is_online
+            self.memory.log_message(role="user", message=query, is_online=is_online)
+            self.memory.log_message(role="mehbur", message=system_response, is_online=is_online, source="system_tool")
+            return {
+                "answer": system_response,
+                "is_online": is_online,
+                "source": "💻 Bilgisayar Sistemi",
+                "learned": False,
+            }
+
+        # 2. ADIM: Selamlaşma / Kimlik Kontrolü
         greeting_response = GreetingFilter.check_greeting(query)
         if greeting_response:
             is_online = self.network.is_online
@@ -304,7 +576,7 @@ class AIEngine:
                 "learned": False,
             }
 
-        # 2. ADIM: Gemini Aktiflik / API Durumu Kontrolü
+        # 3. ADIM: Gemini Aktiflik / API Durumu Kontrolü
         if GeminiStatusChecker.is_gemini_query(query):
             is_online = self.network.is_online
             reply = GeminiStatusChecker.get_status_reply()
@@ -314,19 +586,6 @@ class AIEngine:
                 "answer": reply,
                 "is_online": is_online,
                 "source": "Gemini API Kontrolü",
-                "learned": False,
-            }
-
-        # 3. ADIM: Bilgisayar & Sistem Araçları Kontrolü
-        system_response = SystemTools.handle_system_query(query)
-        if system_response:
-            is_online = self.network.is_online
-            self.memory.log_message(role="user", message=query, is_online=is_online)
-            self.memory.log_message(role="mehbur", message=system_response, is_online=is_online, source="system_tool")
-            return {
-                "answer": system_response,
-                "is_online": is_online,
-                "source": "💻 Bilgisayar Sistemi",
                 "learned": False,
             }
 

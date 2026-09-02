@@ -18,7 +18,8 @@
 - 🧠 **Öğrenen Kalıcı Bellek (SQLite):** Çevrim içiyken sorulan her soru ve cevabı hafızaya kaydeder (*"Eğer bu soru sorulursa bu cevabı ver"*).
 - 🔍 **Türkçe Semantik Eşleme:** Soru farklı kelimeler veya eklerle sorulsa bile (Karakter N-Gram + Kök Jaccard + Token Kosinüs Benzerliği) hafızadaki doğru cevabı bulur.
 - ⚡ **Neon Cyan & Siyah Masaüstü Arayüzü:** CustomTkinter ile donmayan asenkron arka plan thread mimarisi.
-- 💻 **Bilgisayar & Sistem Araçları:** Saat/tarih sorgulama, sistem/donanım/disk bilgisi alma, Not Defteri, Hesap Makinesi gibi uygulamaları doğrudan açma.
+- 💻 **Gerçek Bilgisayar Erişimi:** Sadece sabit birkaç uygulama değil — *herhangi bir programı* adından bulup açar (Spotify, Word, Chrome, Ayarlar, Kamera…), klasör açar, dosya arar, klasör/dosya oluşturur, **ses / parlaklık** ayarlar, ekranı kilitler, uyku moduna alır, **ekran görüntüsü** alır ve (onaylı, iptal edilebilir) **kapatma / yeniden başlatma** komutlarını çalıştırır.
+- 🤬 **Yazım Hatası Toleranslı Küfür Filtresi:** `orospo`, `aptl`, `çomarr` gibi bilerek/yanlışlıkla bozuk yazılmış hakaretleri de yakalar; `solak`, `yürek`, `sülük` gibi masum kelimelere bulaşmaz.
 - 😈 **Özel İsim Yanıtı:** *"Adın ne?"*, *"Kimsin?"* gibi sorulara *"Merhaba, ben MehburAI dünyayı ele geçireceğim"* şeklinde özel yanıt verir.
 - 🔑 **Güvenli Ayarlar Paneli:** Gemini API anahtarınızı arayüz üzerinden kolayca ekleyebilir, güncelleyebilir veya silebilirsiniz.
 
@@ -54,8 +55,8 @@ MehburAI/
 ├── config.py             # Neon Cyan tema sabitleri & ayar yöneticisi
 ├── network_manager.py    # Cloudflare 1.1.1.1 anlık ağ izleyici
 ├── memory_engine.py      # SQLite + Türkçe Morfolojik Semantik Bellek
-├── ai_engine.py          # Wikipedia + Gemini API + Karar Motoru
-├── system_tools.py       # Bilgisayar donanım, saat & masaüstü araçları
+├── ai_engine.py          # Wikipedia + Gemini REST (streamGenerateContent) + Karar Motoru + Küfür Filtresi
+├── system_tools.py       # Program açma, dosya/klasör, ses/parlaklık, kilit/uyku, ekran görüntüsü, güç
 ├── gui_app.py            # CustomTkinter Neon Cyan & Siyah Masaüstü GUI
 ├── requirements.txt      # Bağımlılıklar
 ├── run_mehbur.py         # Ana başlatıcı

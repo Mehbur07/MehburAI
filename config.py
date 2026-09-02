@@ -102,9 +102,17 @@ class NetworkConfig:
 class GeminiConfig:
     """Google Gemini API konfigürasyonu."""
 
-    MODEL_NAME = "gemini-2.0-flash"
+    # Birincil model ve sırayla denenecek yedek modeller.
+    # (Eski "gemini-2.0-flash" Google tarafından kapatıldı; artık 3.x nesli kullanılıyor.)
+    MODEL_NAME = "gemini-3.6-flash"
+    FALLBACK_MODELS = ["gemini-3.6-flash", "gemini-flash-latest", "gemini-3.5-flash"]
     MAX_OUTPUT_TOKENS = 2048
     TEMPERATURE = 0.7
+
+    # REST akış (SSE) uç noktası ayarları
+    API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+    CONNECT_TIMEOUT = 10.0
+    READ_TIMEOUT = 75.0
 
     # Sistem promptu (MehburAI Kişiliği)
     SYSTEM_PROMPT = (
@@ -155,6 +163,11 @@ GREETING_RESPONSES = {
     "iyi geceler": "İyi geceler! 🌟 Uyumadan önce bir sorun varsa yardımcı olayım!",
     "default": "Merhaba! 👋 Ben MehburAI. Sana nasıl yardımcı olabilirim?",
 }
+
+# ─────────────────────────────────────────────
+# Küfür & Hakaret Filtresi Yanıtı
+# ─────────────────────────────────────────────
+PROFANITY_RESPONSE = "Sana böyle laflar yakışıyor mu?"
 
 
 # ─────────────────────────────────────────────

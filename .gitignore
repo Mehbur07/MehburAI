@@ -49,3 +49,7 @@ data/*.db-journal
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Yerel bellek veritabanı (kişisel sohbet geçmişi + API anahtarı içerir, repoya girmez)
+data/mehbur_memory.db
+data/*.db
