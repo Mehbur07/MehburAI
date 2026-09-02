@@ -12,6 +12,7 @@ Tüm sistem bileşenlerini otomatik olarak test eder:
   7. Gemini API Anahtarı Ayarları & Konfigürasyon
   8. Küfür / Hakaret Algılama (yazım hatası toleranslı)
   9. Genişletilmiş Bilgisayar Erişimi (program açma, dosya/klasör, ses, parlaklık, güç)
+ 10. 🛡️ Güvenlik Modu (parola hash'i, yol izleme, alarm akışı)
 """
 
 import io
@@ -33,7 +34,7 @@ def run_full_validation():
     print("  🤖 MEHBUR AI — FAZ 5 ENTEGRASYON VE DOĞRULAMA TESTLERİ")
     print("=" * 65)
     passed_tests = 0
-    total_tests = 9
+    total_tests = 10
 
     memory = MemoryEngine()
     network = NetworkMonitor()
@@ -278,6 +279,86 @@ def run_full_validation():
     print(f"  • Ses kontrolü: '{vol_reply}' ✓")
 
     print("  ✅ TEST 9 BAŞARILI: Genişletilmiş bilgisayar erişimi çalışıyor.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 10: 🛡️ Güvenlik Modu
+    # ─────────────────────────────────────────
+    print("\n[TEST 10] 🛡️ Güvenlik Modu:")
+    import config as _cfg
+    import security_guard as _sg
+
+    _prev = _cfg.load_config()
+
+    # 10a. Parola tuzlu SHA-256 olarak saklanıyor, düz metin yok
+    _cfg.set_security_password("GizliParola!42")
+    assert _cfg.verify_security_password("GizliParola!42")
+    assert not _cfg.verify_security_password("yanlis")
+    sc = _cfg.get_security_config()
+    assert sc["security_password_hash"] and "GizliParola" not in str(sc)
+    assert len(sc["security_password_hash"]) == 64
+    print("  • Parola tuzlu SHA-256 olarak saklanıyor (düz metin yok) ✓")
+
+    # 10b. update_security_config parola alanlarını ezemez
+    _cfg.update_security_config(security_password_hash="EZILDI", security_enabled=True,
+                                security_watch_paths=[r"C:\Test\Gizli", r"D:\a\b.exe"])
+    assert _cfg.get_security_config()["security_password_hash"] != "EZILDI"
+    print("  • Parola alanı ayar güncellemesiyle ezilemiyor ✓")
+
+    # 10c. Yol izleyici SADECE "kapalı → açık" geçişinde tetikler (edge)
+    fired = []
+    guard = _sg.SecurityGuard(on_access=lambda p: fired.append(p))
+    exe = _sg.SecurityGuard._norm(r"D:\a\b.exe")
+    giz = _sg.SecurityGuard._norm(r"C:\Test\Gizli")
+
+    # İlk tarama (priming): program zaten çalışıyor → SORMAMALI
+    _sg.SecurityGuard._open_explorer_paths = staticmethod(lambda: [])
+    _sg.SecurityGuard._running_exe_paths = staticmethod(lambda: [r"D:\a\b.exe"])
+    guard._check_once()
+    assert fired == [], "başlangıçta zaten açık olan program için sorulmamalı"
+
+    # Program hâlâ açık, ikinci tarama → yine SORMAMALI
+    guard._check_once()
+    assert fired == [], "açık kalan program tekrar tekrar sormamalı"
+
+    # Şimdi korumalı klasör YENİ açılıyor → SORMALI
+    _sg.SecurityGuard._open_explorer_paths = staticmethod(lambda: [r"C:\Test\Gizli\ic"])
+    guard._check_once()
+    assert fired == [giz], f"yeni açılan klasör için sorulmalı: {fired}"
+
+    # Doğru şifre girildi; klasör açık kalıyor → tekrar SORMAMALI
+    fired.clear()
+    guard.mark_passed(r"C:\Test\Gizli")
+    guard._cooldown.clear()
+    guard._check_once()
+    assert fired == [], "doğrulama sonrası, hedef açıkken tekrar sormamalı"
+
+    # Klasör kapandı, sonra tekrar açıldı → yeniden SORMALI
+    _sg.SecurityGuard._open_explorer_paths = staticmethod(lambda: [])
+    guard._check_once()
+    guard._cooldown.clear()
+    _sg.SecurityGuard._open_explorer_paths = staticmethod(lambda: [r"C:\Test\Gizli"])
+    guard._check_once()
+    assert fired == [giz], f"kapanıp tekrar açılınca yeniden sorulmalı: {fired}"
+    print("  • Yol izleyici yalnızca 'kapalı→açık' geçişinde soruyor ✓")
+
+    # 10d. Alarm akışı: kamera yoksa Telegram metin uyarısına düşüyor
+    _sg.CameraCapture.snapshot = staticmethod(lambda save_dir=None: None)
+    _sg.TelegramNotifier.is_configured = classmethod(lambda cls: True)
+    _sg.TelegramNotifier.send_message = classmethod(lambda cls, t: True)
+    _sg.TelegramNotifier.send_photo = classmethod(lambda cls, p, caption="": False)
+    res = _sg.trigger_intruder_alert("yanlış şifre (test)")
+    assert res["telegram"] is True and res["photo"] is None
+    print(f"  • Alarm akışı: {res['detail']} ✓")
+
+    # Ayarları eski haline getir
+    try:
+        with open(_cfg.CONFIG_FILE, "w", encoding="utf-8") as _f:
+            import json as _json
+            _json.dump(_prev, _f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+    print("  ✅ TEST 10 BAŞARILI: Güvenlik modu bileşenleri çalışıyor.")
     passed_tests += 1
 
     # ─────────────────────────────────────────

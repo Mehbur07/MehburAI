@@ -16,6 +16,7 @@ Neon Cyan & Derin Siyah temalı CustomTkinter masaüstü arayüzü.
 """
 
 import os
+import queue
 import sys
 import threading
 import tkinter as tk
@@ -28,12 +29,18 @@ from ai_engine import AIEngine
 from config import (
     Theme,
     get_api_key,
+    get_security_config,
+    has_security_password,
     load_config,
     remove_api_key,
     set_api_key,
+    set_security_password,
+    update_security_config,
+    verify_security_password,
 )
 from memory_engine import MemoryEngine
 from network_manager import NetworkMonitor
+from security_guard import SecurityGuard, TelegramNotifier, trigger_intruder_alert
 
 
 # CustomTkinter Genel Tema Ayarları
@@ -60,12 +67,24 @@ class MehburApp(ctk.CTk):
 
         # Durum Değişkenleri
         self._is_processing = False
+        self._security_dialogs = {}   # path -> Toplevel (aynı yol için tek ekran)
+        self._security_queue = queue.Queue()   # guard thread -> UI thread köprüsü
+
+        # 🛡️ Güvenlik Modu izleyicisi
+        self.security_guard = SecurityGuard(on_access=self._security_queue.put)
 
         # UI Bileşenlerini İnşa Et
         self._build_ui()
 
         # Ağ İzleyiciyi Başlat
         self.network.start()
+
+        # Güvenlik Modu etkinse izlemeyi başlat
+        if get_security_config().get("security_enabled"):
+            self.security_guard.start()
+
+        # Güvenlik kuyruğunu düzenli aralıkla ana thread'de kontrol et
+        self.after(700, self._poll_security_queue)
 
         # İlk Başlangıç Mesajı
         self._send_welcome_message()
@@ -272,6 +291,8 @@ class MehburApp(ctk.CTk):
                     text="⚠️ API Anahtarı Henüz Girilmedi",
                     text_color=Theme.STATUS_WARNING
                 )
+        if hasattr(self, "sec_status"):
+            self._refresh_security_status()
 
     # ─────────────────────────────────────────
     # SEKME 1: SOHBET PANELİ (CHAT PANEL)
@@ -785,12 +806,20 @@ class MehburApp(ctk.CTk):
     # ─────────────────────────────────────────
 
     def _build_settings_panel(self):
-        """Gemini API anahtarı ve uygulama ayarları paneli."""
+        """Gemini API anahtarı, güvenlik modu ve uygulama ayarları paneli."""
         self.panel_settings.grid_columnconfigure(0, weight=1)
+        self.panel_settings.grid_rowconfigure(0, weight=1)
+
+        # Ayarlar uzun olduğundan kaydırılabilir bir konteynere yerleştirilir
+        self.settings_scroll = ctk.CTkScrollableFrame(
+            self.panel_settings, fg_color="transparent"
+        )
+        self.settings_scroll.grid(row=0, column=0, sticky="nsew")
+        self.settings_scroll.grid_columnconfigure(0, weight=1)
 
         # 1. API Anahtarı Kartı
         api_card = ctk.CTkFrame(
-            self.panel_settings,
+            self.settings_scroll,
             fg_color=Theme.BG_CARD,
             corner_radius=12,
             border_width=1,
@@ -875,9 +904,12 @@ class MehburApp(ctk.CTk):
         )
         self.api_status_lbl.pack(anchor="w", padx=16, pady=(0, 14))
 
-        # 2. Ağ Testi & Durum Kartı
+        # 2. 🛡️ Güvenlik Modu Kartı
+        self._build_security_card(self.settings_scroll)
+
+        # 3. Ağ Testi & Durum Kartı
         net_card = ctk.CTkFrame(
-            self.panel_settings,
+            self.settings_scroll,
             fg_color=Theme.BG_CARD,
             corner_radius=12,
             border_width=1,
@@ -904,9 +936,9 @@ class MehburApp(ctk.CTk):
         )
         btn_test_net.pack(anchor="w", padx=16, pady=(0, 14))
 
-        # 3. Hakkında Kartı
+        # 4. Hakkında Kartı
         about_card = ctk.CTkFrame(
-            self.panel_settings,
+            self.settings_scroll,
             fg_color=Theme.BG_CARD,
             corner_radius=12,
             border_width=1,
@@ -936,6 +968,466 @@ class MehburApp(ctk.CTk):
             justify="left",
         )
         about_lbl.pack(anchor="w", padx=16, pady=(0, 14))
+
+    # ─────────────────────────────────────────
+    # 🛡️ GÜVENLİK MODU KARTI
+    # ─────────────────────────────────────────
+
+    def _build_security_card(self, parent):
+        """Yetkisiz erişim alarmı ayarları (korumalı yol, şifre, Telegram)."""
+        cfg = get_security_config()
+
+        card = ctk.CTkFrame(
+            parent, fg_color=Theme.BG_CARD, corner_radius=12,
+            border_width=1, border_color=Theme.STATUS_OFFLINE,
+        )
+        card.pack(fill="x", padx=0, pady=(0, 12))
+
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.pack(fill="x", padx=16, pady=(16, 4))
+        ctk.CTkLabel(
+            head, text="🛡️ Güvenlik Modu (Yetkisiz Erişim Alarmı)",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=16, weight="bold"),
+            text_color=Theme.STATUS_OFFLINE,
+        ).pack(side="left")
+
+        self.sec_enable_switch = ctk.CTkSwitch(
+            head, text="Aktif", command=self._toggle_security,
+            progress_color=Theme.STATUS_ONLINE,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold"),
+        )
+        self.sec_enable_switch.pack(side="right")
+        if cfg.get("security_enabled"):
+            self.sec_enable_switch.select()
+
+        ctk.CTkLabel(
+            card, justify="left", wraplength=820,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+            text_color=Theme.TEXT_SECONDARY,
+            text=(
+                "Korunan bir klasör Dosya Gezgini'nde açıldığında veya korunan bir program "
+                "çalıştırıldığında MehburAI şifre sorar. Şifre yanlış girilir ya da ekran "
+                "kapatılırsa: web kameradan fotoğraf çekilir, Telegram'dan size gönderilir ve "
+                "kişiye \"fotoğrafınız çekildi ve cihaz sahibine iletildi\" uyarısı gösterilir."
+            ),
+        ).pack(anchor="w", padx=16, pady=(0, 10))
+
+        # — Korumalı yollar —
+        ctk.CTkLabel(
+            card, text="📁 Korumalı yollar (her satıra bir tane — klasör veya .exe):",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold"),
+            text_color=Theme.TEXT_PRIMARY,
+        ).pack(anchor="w", padx=16, pady=(4, 4))
+
+        self.sec_paths_box = ctk.CTkTextbox(
+            card, height=70, fg_color=Theme.BG_INPUT, border_color=Theme.CYAN_DARK,
+            border_width=1, font=ctk.CTkFont(family="Consolas", size=12), corner_radius=8,
+        )
+        self.sec_paths_box.pack(fill="x", padx=16, pady=(0, 6))
+        self.sec_paths_box.insert("1.0", "\n".join(cfg.get("security_watch_paths", [])))
+
+        paths_btns = ctk.CTkFrame(card, fg_color="transparent")
+        paths_btns.pack(anchor="w", padx=16, pady=(0, 12))
+        ctk.CTkButton(
+            paths_btns, text="💾 Yolları Kaydet", height=30, width=140,
+            font=ctk.CTkFont(size=12), fg_color=Theme.BG_CARD_HOVER,
+            hover_color=Theme.CYAN_DARK, command=self._save_security_paths,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            paths_btns, text="🖥️ Çalışan programdan seç", height=30, width=190,
+            font=ctk.CTkFont(size=12), fg_color=Theme.BG_CARD_HOVER,
+            hover_color=Theme.CYAN_DARK, command=self._pick_running_app,
+        ).pack(side="left")
+
+        # — Şifre —
+        pass_row = ctk.CTkFrame(card, fg_color="transparent")
+        pass_row.pack(fill="x", padx=16, pady=(0, 4))
+        pass_row.grid_columnconfigure(0, weight=1)
+        self.sec_pass_entry = ctk.CTkEntry(
+            pass_row, placeholder_text="🔒 Güvenlik şifresi belirle / değiştir",
+            show="•", height=38, fg_color=Theme.BG_INPUT, border_color=Theme.CYAN_DARK,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12), corner_radius=8,
+        )
+        self.sec_pass_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ctk.CTkButton(
+            pass_row, text="🔒 Kaydet", width=90, height=38,
+            font=ctk.CTkFont(size=12, weight="bold"), fg_color=Theme.CYAN_PRIMARY,
+            text_color=Theme.BG_DARKEST, hover_color=Theme.CYAN_GLOW,
+            command=self._save_security_password,
+        ).grid(row=0, column=1)
+
+        self.sec_pass_status = ctk.CTkLabel(
+            card, font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11, weight="bold"),
+            text=("✅ Şifre tanımlı" if has_security_password() else "⚠️ Henüz şifre belirlenmedi"),
+            text_color=(Theme.STATUS_ONLINE if has_security_password() else Theme.STATUS_WARNING),
+        )
+        self.sec_pass_status.pack(anchor="w", padx=16, pady=(0, 12))
+
+        # — Telegram —
+        ctk.CTkLabel(
+            card, text="📨 Telegram Bildirimi — bot: \"MehburAI (Telegram)\"",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold"),
+            text_color=Theme.TEXT_PRIMARY,
+        ).pack(anchor="w", padx=16, pady=(4, 2))
+        ctk.CTkLabel(
+            card, justify="left", wraplength=820,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11),
+            text_color=Theme.TEXT_DARK,
+            text=(
+                "1) Telegram'da @BotFather → /newbot → ad: MehburAI (Telegram) → "
+                "bir kullanıcı adı ver → TOKEN'ı kopyala\n"
+                "2) Oluşturduğun bota Telegram'dan bir mesaj yaz (\"merhaba\")\n"
+                "3) Chat ID'n için: @userinfobot'a yaz, verdiği numarayı aşağıya gir"
+            ),
+        ).pack(anchor="w", padx=16, pady=(0, 6))
+
+        self.sec_tg_token = ctk.CTkEntry(
+            card, placeholder_text="Bot Token (123456:ABC-DEF...)", show="•", height=36,
+            fg_color=Theme.BG_INPUT, border_color=Theme.CYAN_DARK,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12), corner_radius=8,
+        )
+        self.sec_tg_token.pack(fill="x", padx=16, pady=(0, 6))
+        if cfg.get("telegram_bot_token"):
+            self.sec_tg_token.insert(0, cfg["telegram_bot_token"])
+
+        chat_row = ctk.CTkFrame(card, fg_color="transparent")
+        chat_row.pack(fill="x", padx=16, pady=(0, 8))
+        chat_row.grid_columnconfigure(0, weight=1)
+        self.sec_tg_chat = ctk.CTkEntry(
+            chat_row, placeholder_text="Chat ID (örn. 123456789)", height=36,
+            fg_color=Theme.BG_INPUT, border_color=Theme.CYAN_DARK,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12), corner_radius=8,
+        )
+        self.sec_tg_chat.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        if cfg.get("telegram_chat_id"):
+            self.sec_tg_chat.insert(0, cfg["telegram_chat_id"])
+        ctk.CTkButton(
+            chat_row, text="🔎 Otomatik Bul", width=130, height=36,
+            font=ctk.CTkFont(size=12), fg_color=Theme.BG_CARD_HOVER,
+            hover_color=Theme.CYAN_DARK, command=self._autodetect_chat_id,
+        ).grid(row=0, column=1)
+
+        tg_btns = ctk.CTkFrame(card, fg_color="transparent")
+        tg_btns.pack(anchor="w", padx=16, pady=(0, 10))
+        ctk.CTkButton(
+            tg_btns, text="💾 Telegram Kaydet", width=150, height=32,
+            font=ctk.CTkFont(size=12), fg_color=Theme.BG_CARD_HOVER,
+            hover_color=Theme.CYAN_DARK, command=self._save_telegram,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            tg_btns, text="📨 Test Gönder", width=120, height=32,
+            font=ctk.CTkFont(size=12), fg_color=Theme.BG_CARD_HOVER,
+            hover_color=Theme.CYAN_DARK, command=self._test_telegram,
+        ).pack(side="left")
+
+        self.sec_status = ctk.CTkLabel(
+            card, text=self._security_status_text(),
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11, weight="bold"),
+            text_color=Theme.TEXT_SECONDARY,
+        )
+        self.sec_status.pack(anchor="w", padx=16, pady=(0, 14))
+
+    def _security_status_text(self) -> str:
+        cfg = get_security_config()
+        parts = []
+        parts.append("🟢 İzleme açık" if self.security_guard.is_running() else "🔴 İzleme kapalı")
+        parts.append(f"{len(cfg.get('security_watch_paths', []))} korumalı yol")
+        parts.append("Telegram ✓" if TelegramNotifier.is_configured() else "Telegram ✗")
+        parts.append("Şifre ✓" if has_security_password() else "Şifre ✗")
+        return "  •  ".join(parts)
+
+    def _refresh_security_status(self):
+        if hasattr(self, "sec_status"):
+            self.sec_status.configure(text=self._security_status_text())
+        if hasattr(self, "sec_pass_status"):
+            ok = has_security_password()
+            self.sec_pass_status.configure(
+                text=("✅ Şifre tanımlı" if ok else "⚠️ Henüz şifre belirlenmedi"),
+                text_color=(Theme.STATUS_ONLINE if ok else Theme.STATUS_WARNING),
+            )
+
+    def _toggle_security(self):
+        enabled = bool(self.sec_enable_switch.get())
+        if enabled and not has_security_password():
+            self.sec_enable_switch.deselect()
+            self.sec_status.configure(
+                text="⚠️ Önce bir güvenlik şifresi belirleyin!", text_color=Theme.STATUS_WARNING
+            )
+            return
+        update_security_config(security_enabled=enabled)
+        if enabled:
+            self.security_guard.start()
+        else:
+            self.security_guard.stop()
+        self._refresh_security_status()
+
+    def _save_security_paths(self):
+        raw = self.sec_paths_box.get("1.0", "end")
+        paths = [ln.strip().strip('"') for ln in raw.splitlines() if ln.strip()]
+        update_security_config(security_watch_paths=paths)
+        self.sec_status.configure(
+            text=f"✅ {len(paths)} korumalı yol kaydedildi.", text_color=Theme.STATUS_ONLINE
+        )
+        self.after(1800, self._refresh_security_status)
+
+    def _add_watch_path(self, path: str):
+        cur = [ln.strip() for ln in self.sec_paths_box.get("1.0", "end").splitlines() if ln.strip()]
+        if path not in cur:
+            cur.append(path)
+        self.sec_paths_box.delete("1.0", "end")
+        self.sec_paths_box.insert("1.0", "\n".join(cur))
+        self._save_security_paths()
+
+    def _pick_running_app(self):
+        """Açık programları listeleyip seçileni korumalı yollara ekler."""
+        top = ctk.CTkToplevel(self)
+        top.title("🖥️ Çalışan Programlar")
+        top.geometry("620x440")
+        top.configure(fg_color=Theme.BG_DARK)
+        top.transient(self)
+        top.attributes("-topmost", True)
+        try:
+            top.after(120, top.grab_set)
+        except Exception:
+            pass
+
+        ctk.CTkLabel(
+            top, text="Korumalı yollara eklemek için bir programa tıkla",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=13, weight="bold"),
+            text_color=Theme.CYAN_PRIMARY,
+        ).pack(pady=(14, 8))
+
+        listbox = ctk.CTkScrollableFrame(top, fg_color=Theme.BG_DARKEST)
+        listbox.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        loading = ctk.CTkLabel(listbox, text="Programlar taranıyor...", text_color=Theme.TEXT_SECONDARY)
+        loading.pack(pady=20)
+
+        def fill(apps):
+            if not listbox.winfo_exists():
+                return
+            try:
+                loading.destroy()
+            except Exception:
+                pass
+            if not apps:
+                ctk.CTkLabel(
+                    listbox, text="Penceresi açık program bulunamadı.\nProgramı açıp tekrar dene.",
+                    text_color=Theme.TEXT_SECONDARY, justify="center",
+                ).pack(pady=20)
+                return
+            for name, path in apps:
+                def choose(p=path):
+                    self._add_watch_path(p)
+                    top.destroy()
+                ctk.CTkButton(
+                    listbox, text=f"  {name}\n  {path}", anchor="w", height=46,
+                    font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11),
+                    fg_color=Theme.BG_CARD, hover_color=Theme.CYAN_DARK,
+                    text_color=Theme.TEXT_PRIMARY, command=choose,
+                ).pack(fill="x", pady=3)
+
+        # Tarama ana thread'de (kısa sürer, ~1-2 sn); pencere çizildikten sonra
+        top.after(80, lambda: fill(SecurityGuard.list_running_apps()))
+
+    def _save_security_password(self):
+        pw = self.sec_pass_entry.get().strip()
+        if len(pw) < 3:
+            self.sec_pass_status.configure(
+                text="⚠️ Şifre en az 3 karakter olmalı", text_color=Theme.STATUS_WARNING
+            )
+            return
+        set_security_password(pw)
+        self.sec_pass_entry.delete(0, "end")
+        self._refresh_security_status()
+        self.sec_pass_status.configure(text="✅ Şifre kaydedildi", text_color=Theme.STATUS_ONLINE)
+
+    def _save_telegram(self):
+        update_security_config(
+            telegram_bot_token=self.sec_tg_token.get().strip(),
+            telegram_chat_id=self.sec_tg_chat.get().strip(),
+        )
+        self.sec_status.configure(text="✅ Telegram bilgileri kaydedildi.", text_color=Theme.STATUS_ONLINE)
+        self.after(1800, self._refresh_security_status)
+
+    def _autodetect_chat_id(self):
+        token = self.sec_tg_token.get().strip()
+        if not token:
+            self.sec_status.configure(text="⚠️ Önce Bot Token gir.", text_color=Theme.STATUS_WARNING)
+            return
+        self.sec_status.configure(
+            text="🔎 Bota yazdığın mesaj aranıyor...", text_color=Theme.TEXT_SECONDARY
+        )
+
+        def worker():
+            chat_id, msg = TelegramNotifier.detect_chat_id(token)
+
+            def show():
+                if chat_id and self.sec_tg_chat.winfo_exists():
+                    self.sec_tg_chat.delete(0, "end")
+                    self.sec_tg_chat.insert(0, chat_id)
+                    self._save_telegram()
+                if hasattr(self, "sec_status") and self.sec_status.winfo_exists():
+                    self.sec_status.configure(
+                        text=("✅ " if chat_id else "⚠️ ") + msg,
+                        text_color=(Theme.STATUS_ONLINE if chat_id else Theme.STATUS_WARNING),
+                    )
+            self._ui_call(show)
+        threading.Thread(target=worker, daemon=True, name="MehburAI-ChatIdDetect").start()
+
+    def _test_telegram(self):
+        self._save_telegram()
+        self.sec_status.configure(text="📨 Test mesajı gönderiliyor...", text_color=Theme.TEXT_SECONDARY)
+
+        def worker():
+            ok, msg = TelegramNotifier.test()
+
+            def show():
+                if hasattr(self, "sec_status") and self.sec_status.winfo_exists():
+                    self.sec_status.configure(
+                        text=("✅ " if ok else "❌ ") + msg,
+                        text_color=(Theme.STATUS_ONLINE if ok else Theme.STATUS_OFFLINE),
+                    )
+            self._ui_call(show)
+        threading.Thread(target=worker, daemon=True, name="MehburAI-TelegramTest").start()
+
+    # ── Erişim tespit edilince: şifre ekranı ──
+
+    def _poll_security_queue(self):
+        """Guard thread'inin bildirdiği erişimleri ana thread'de işler."""
+        try:
+            while True:
+                path = self._security_queue.get_nowait()
+                self._show_security_challenge(path)
+        except queue.Empty:
+            pass
+        except Exception:
+            pass
+        finally:
+            try:
+                if self.winfo_exists():
+                    self.after(700, self._poll_security_queue)
+            except Exception:
+                pass
+
+    def _show_security_challenge(self, path: str):
+        if path in self._security_dialogs and self._security_dialogs[path].winfo_exists():
+            self._security_dialogs[path].lift()
+            return
+        if not has_security_password():
+            # Şifre yoksa doğrulama yapılamaz — izleyiciyi geri çevir
+            self.security_guard.mark_resolved(path)
+            return
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("🔒 MehburAI Güvenlik Modu")
+        dlg.geometry("460x300")
+        dlg.resizable(False, False)
+        dlg.configure(fg_color=Theme.BG_DARK)
+        dlg.transient(self)
+        dlg.attributes("-topmost", True)
+        try:
+            dlg.after(120, dlg.grab_set)
+        except Exception:
+            pass
+        self._security_dialogs[path] = dlg
+        state = {"alerted": False}
+
+        ctk.CTkLabel(
+            dlg, text="🔒 Bu konum korumalı", text_color=Theme.STATUS_OFFLINE,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=18, weight="bold"),
+        ).pack(pady=(22, 4))
+        ctk.CTkLabel(
+            dlg, text=os.path.basename(path.rstrip("\\/")) or path, text_color=Theme.TEXT_SECONDARY,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11),
+        ).pack(pady=(0, 12))
+
+        entry = ctk.CTkEntry(
+            dlg, placeholder_text="Güvenlik şifresini girin", show="•", width=320, height=40,
+            fg_color=Theme.BG_INPUT, border_color=Theme.CYAN_DARK,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=13),
+        )
+        entry.pack(pady=(0, 10))
+        entry.after(250, entry.focus_force)
+
+        info = ctk.CTkLabel(
+            dlg, text="", justify="center", wraplength=400,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold"),
+        )
+        info.pack(pady=(2, 8))
+
+        def do_verify():
+            if verify_security_password(entry.get()):
+                self.security_guard.mark_passed(path)
+                self._close_security_dialog(path)
+            else:
+                info.configure(
+                    text="⚠️ Hatalı şifre. Fotoğrafınız çekildi ve cihaz sahibine iletildi.",
+                    text_color=Theme.STATUS_OFFLINE,
+                )
+                if not state["alerted"]:
+                    state["alerted"] = True
+                    self._fire_intruder_alert("Yanlış şifre girildi")
+
+        def on_x():
+            info.configure(
+                text="⚠️ Doğrulama yapılmadı. Fotoğrafınız çekildi ve cihaz sahibine iletildi.",
+                text_color=Theme.STATUS_OFFLINE,
+            )
+            if not state["alerted"]:
+                state["alerted"] = True
+                self._fire_intruder_alert("Şifre ekranı kapatıldı")
+            self.after(2500, lambda: self._close_security_dialog(path))
+
+        entry.bind("<Return>", lambda e: do_verify())
+        btns = ctk.CTkFrame(dlg, fg_color="transparent")
+        btns.pack(pady=(4, 0))
+        ctk.CTkButton(
+            btns, text="Doğrula", width=140, height=38,
+            font=ctk.CTkFont(size=13, weight="bold"), fg_color=Theme.CYAN_PRIMARY,
+            text_color=Theme.BG_DARKEST, hover_color=Theme.CYAN_GLOW, command=do_verify,
+        ).pack(side="left", padx=6)
+        ctk.CTkButton(
+            btns, text="Kapat", width=100, height=38, font=ctk.CTkFont(size=13),
+            fg_color=Theme.BG_CARD_HOVER, hover_color="#44111E", text_color="#FF8888",
+            command=on_x,
+        ).pack(side="left", padx=6)
+        dlg.protocol("WM_DELETE_WINDOW", on_x)
+
+    def _close_security_dialog(self, path: str):
+        dlg = self._security_dialogs.pop(path, None)
+        if dlg is not None:
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+        self.security_guard.mark_resolved(path)
+
+    def _ui_call(self, fn):
+        """Arka plan thread'inden UI'ı güvenle günceller (pencere kapandıysa yut)."""
+        try:
+            if self.winfo_exists():
+                self.after(0, fn)
+        except Exception:
+            pass
+
+    def _fire_intruder_alert(self, reason: str):
+        """Kamera + Telegram işini arka planda yapar (UI donmasın)."""
+        def worker():
+            result = trigger_intruder_alert(reason)
+
+            def show():
+                if hasattr(self, "sec_status") and self.sec_status.winfo_exists():
+                    self.sec_status.configure(
+                        text=f"🚨 Uyarı gönderildi: {result['detail']}",
+                        text_color=Theme.STATUS_OFFLINE,
+                    )
+            self._ui_call(show)
+        threading.Thread(target=worker, daemon=True, name="MehburAI-IntruderAlert").start()
 
     def _save_api_key(self):
         """API anahtarını kaydeder."""
@@ -994,6 +1486,10 @@ class MehburApp(ctk.CTk):
     def _on_close(self):
         """Pencere kapatıldığında servisleri güvenle sonlandırır."""
         self.network.stop()
+        try:
+            self.security_guard.stop()
+        except Exception:
+            pass
         self.destroy()
 
 

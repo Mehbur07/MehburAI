@@ -276,3 +276,81 @@ def remove_api_key() -> None:
             conn.commit()
     except Exception:
         pass
+
+
+# ─────────────────────────────────────────────
+# 🛡️ Güvenlik Modu (Yetkisiz Erişim Alarmı)
+# ─────────────────────────────────────────────
+# Kullanıcı ayarlardan korumalı yol(lar), bir şifre ve Telegram bilgileri girer.
+# Korunan yol açıldığında MehburAI şifre sorar; şifre yanlışsa / ekran kapatılırsa
+# kameradan fotoğraf çekilip cihaz sahibine Telegram'dan gönderilir ve ekranda
+# "fotoğrafınız çekildi ve cihaz sahibine iletildi" uyarısı gösterilir.
+# Bu ayarlar yalnızca yerel `data/config.json` içinde tutulur (repoya girmez).
+
+SECURITY_DEFAULTS = {
+    "security_enabled": False,
+    "security_watch_paths": [],       # ["C:\\Users\\...\\Gizli", "D:\\bir.exe"]
+    "security_password_hash": "",     # sha256(salt + parola)
+    "security_password_salt": "",
+    "telegram_bot_token": "",         # BotFather'dan alınır ("MehburAI (Telegram)" botu)
+    "telegram_chat_id": "",           # cihaz sahibinin sohbet ID'si
+}
+
+
+def get_security_config() -> dict:
+    """Kayıtlı güvenlik modu ayarlarını (varsayılanlarla birleştirilmiş) döndürür."""
+    config = load_config()
+    result = dict(SECURITY_DEFAULTS)
+    for key in SECURITY_DEFAULTS:
+        if key in config and config[key] not in (None, ""):
+            result[key] = config[key]
+    if not isinstance(result["security_watch_paths"], list):
+        result["security_watch_paths"] = []
+    return result
+
+
+def update_security_config(**changes) -> None:
+    """Verilen güvenlik ayarı anahtarlarını kaydeder (parola hariç)."""
+    config = load_config()
+    for key, value in changes.items():
+        if key not in SECURITY_DEFAULTS or key.startswith("security_password"):
+            continue
+        config[key] = value
+    save_config(config)
+
+
+def set_security_password(plaintext: str) -> None:
+    """Güvenlik modu parolasını tuzlu SHA-256 özeti olarak kaydeder (düz metin saklanmaz)."""
+    import hashlib
+    import secrets
+
+    config = load_config()
+    plaintext = (plaintext or "").strip()
+    if not plaintext:
+        config["security_password_hash"] = ""
+        config["security_password_salt"] = ""
+    else:
+        salt = secrets.token_hex(16)
+        digest = hashlib.sha256((salt + plaintext).encode("utf-8")).hexdigest()
+        config["security_password_hash"] = digest
+        config["security_password_salt"] = salt
+    save_config(config)
+
+
+def verify_security_password(plaintext: str) -> bool:
+    """Girilen parolanın kayıtlı özetle eşleşip eşleşmediğini kontrol eder."""
+    import hashlib
+    import hmac
+
+    cfg = get_security_config()
+    stored = cfg.get("security_password_hash") or ""
+    salt = cfg.get("security_password_salt") or ""
+    if not stored or not salt:
+        return False
+    digest = hashlib.sha256((salt + (plaintext or "")).encode("utf-8")).hexdigest()
+    return hmac.compare_digest(digest, stored)
+
+
+def has_security_password() -> bool:
+    cfg = get_security_config()
+    return bool(cfg.get("security_password_hash") and cfg.get("security_password_salt"))

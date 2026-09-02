@@ -20,6 +20,7 @@
 - ⚡ **Neon Cyan & Siyah Masaüstü Arayüzü:** CustomTkinter ile donmayan asenkron arka plan thread mimarisi.
 - 💻 **Gerçek Bilgisayar Erişimi:** Sadece sabit birkaç uygulama değil — *herhangi bir programı* adından bulup açar (Spotify, Word, Chrome, Ayarlar, Kamera…), klasör açar, dosya arar, klasör/dosya oluşturur, **ses / parlaklık** ayarlar, ekranı kilitler, uyku moduna alır, **ekran görüntüsü** alır ve (onaylı, iptal edilebilir) **kapatma / yeniden başlatma** komutlarını çalıştırır.
 - 🤬 **Yazım Hatası Toleranslı Küfür Filtresi:** `orospo`, `aptl`, `çomarr` gibi bilerek/yanlışlıkla bozuk yazılmış hakaretleri de yakalar; `solak`, `yürek`, `sülük` gibi masum kelimelere bulaşmaz.
+- 🛡️ **Güvenlik Modu (Yetkisiz Erişim Alarmı):** Ayarlardan korumalı klasör/program yolları, bir şifre ve Telegram bilgileri girilir. Korunan yol açıldığında MehburAI **şifre sorar**; şifre yanlış girilir ya da ekran kapatılırsa web kameradan fotoğraf çekilip cihaz sahibine **Telegram'dan** (`MehburAI (Telegram)` botu) gönderilir ve kişiye *"fotoğrafınız çekildi ve cihaz sahibine iletildi"* uyarısı gösterilir. *(Gizli izleme değildir — şifre ekranı ve uyarı açıkça görünür.)*
 - 😈 **Özel İsim Yanıtı:** *"Adın ne?"*, *"Kimsin?"* gibi sorulara *"Merhaba, ben MehburAI dünyayı ele geçireceğim"* şeklinde özel yanıt verir.
 - 🔑 **Güvenli Ayarlar Paneli:** Gemini API anahtarınızı arayüz üzerinden kolayca ekleyebilir, güncelleyebilir veya silebilirsiniz.
 
@@ -57,6 +58,7 @@ MehburAI/
 ├── memory_engine.py      # SQLite + Türkçe Morfolojik Semantik Bellek
 ├── ai_engine.py          # Wikipedia + Gemini REST (streamGenerateContent) + Karar Motoru + Küfür Filtresi
 ├── system_tools.py       # Program açma, dosya/klasör, ses/parlaklık, kilit/uyku, ekran görüntüsü, güç
+├── security_guard.py     # 🛡️ Güvenlik Modu: korumalı yol izleme + kamera + Telegram alarmı
 ├── gui_app.py            # CustomTkinter Neon Cyan & Siyah Masaüstü GUI
 ├── requirements.txt      # Bağımlılıklar
 ├── run_mehbur.py         # Ana başlatıcı

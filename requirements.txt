@@ -5,8 +5,12 @@
 customtkinter>=5.2.0
 Pillow>=10.0.0
 
-# HTTP istekleri — Gemini REST API + Wikipedia
+# HTTP istekleri — Gemini REST API + Wikipedia + Telegram bildirimi
 requests>=2.31.0
+
+# 🛡️ Güvenlik Modu — web kameradan fotoğraf yakalama
+# (opsiyonel: kurulu değilse güvenlik modu yalnızca Telegram metin uyarısı gönderir)
+opencv-python>=4.9.0
 
 # ─────────────────────────────────────────────
 # NOT: Eski `google-generativeai` paketi Google tarafından kullanımdan
