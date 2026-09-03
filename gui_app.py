@@ -1526,6 +1526,18 @@ class MehburApp(ctk.CTk):
         count = self.memory.get_memory_count()
         self.memory_badge.configure(text=f"🧠 {count} Bilgi Hafızada")
 
+    def report_callback_exception(self, exc, val, tb):
+        """Arayüz geri çağrısındaki hataları data/last_error.log'a yazar (uygulama çökmesin)."""
+        import traceback
+        try:
+            with open(os.path.join(os.path.dirname(__file__), "data", "last_error.log"),
+                      "a", encoding="utf-8") as f:
+                import datetime
+                f.write(f"\n[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] callback exception:\n")
+                traceback.print_exception(exc, val, tb, file=f)
+        except Exception:
+            pass
+
     def _on_close(self):
         """Pencere kapatıldığında servisleri güvenle sonlandırır."""
         self.network.stop()

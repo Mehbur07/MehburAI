@@ -34,7 +34,7 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo.
 echo  [3/4] Masaustune MehburAI kisayolu olusturuluyor...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$WshShell = New-Object -comObject WScript.Shell; $Desktop = [Environment]::GetFolderPath('Desktop'); $Shortcut = $WshShell.CreateShortcut(\"$Desktop\MehburAI.lnk\"); $Shortcut.TargetPath = 'python.exe'; $Shortcut.Arguments = '\"%~dp0run_mehbur.py\"'; $Shortcut.WorkingDirectory = '%~dp0'; $Shortcut.Description = 'MehburAI - Hibrit Akilli Asistan'; $Shortcut.Save();"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$py = (Get-Command pythonw.exe -EA SilentlyContinue).Source; if (-not $py) { $py = (Get-Command python.exe -EA SilentlyContinue).Source }; if (-not $py) { $py = 'pythonw.exe' }; $W = New-Object -comObject WScript.Shell; $S = $W.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) 'MehburAI.lnk')); $S.TargetPath = $py; $S.Arguments = 'run_mehbur.py'; $S.WorkingDirectory = '%~dp0'; $S.Description = 'MehburAI - Hibrit Akilli Asistan'; $S.Save();"
 echo  [OK] Masaustu kisayolu olusturuldu: MehburAI.lnk
 
 echo.

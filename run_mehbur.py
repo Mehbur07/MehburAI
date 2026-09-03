@@ -42,5 +42,24 @@ def main():
     launch_gui()
 
 
+def _log_crash(exc: BaseException) -> None:
+    """Beklenmeyen hatayı data/last_error.log dosyasına yazar (konsolsuz başlatmada bile görülsün)."""
+    import traceback
+    try:
+        base = os.path.dirname(os.path.abspath(__file__))
+        log_dir = os.path.join(base, "data")
+        os.makedirs(log_dir, exist_ok=True)
+        with open(os.path.join(log_dir, "last_error.log"), "w", encoding="utf-8") as f:
+            import datetime
+            f.write(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}]\n")
+            traceback.print_exception(type(exc), exc, exc.__traceback__, file=f)
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException as _exc:  # noqa: BLE001 — başlatma hatasını kaydet ve yeniden fırlat
+        _log_crash(_exc)
+        raise
