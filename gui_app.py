@@ -68,6 +68,7 @@ class MehburApp(ctk.CTk):
         # Durum Değişkenleri
         self._is_processing = False
         self._security_dialogs = {}   # path -> Toplevel (aynı yol için tek ekran)
+        self._security_backdrops = {}  # path -> tam ekran perde Toplevel
         self._security_queue = queue.Queue()   # guard thread -> UI thread köprüsü
 
         # 🛡️ Güvenlik Modu izleyicisi
@@ -1315,46 +1316,78 @@ class MehburApp(ctk.CTk):
             self._security_dialogs[path].lift()
             return
         if not has_security_password():
-            # Şifre yoksa doğrulama yapılamaz — izleyiciyi geri çevir
             self.security_guard.mark_resolved(path)
             return
 
+        # 1) Tüm ekranı kaplayan koyu perde — açılan şey görünmesin / kullanılamasın
+        backdrop = ctk.CTkToplevel(self)
+        backdrop.configure(fg_color="#05050A")
+        try:
+            backdrop.overrideredirect(True)
+        except Exception:
+            pass
+        try:
+            sw, sh = backdrop.winfo_screenwidth(), backdrop.winfo_screenheight()
+            backdrop.geometry(f"{sw}x{sh}+0+0")
+        except Exception:
+            pass
+        backdrop.attributes("-topmost", True)
+        try:
+            backdrop.attributes("-alpha", 0.95)
+        except Exception:
+            pass
+        ctk.CTkLabel(
+            backdrop, text="🛡️  MehburAI Güvenlik Modu",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=26, weight="bold"),
+            text_color=Theme.CYAN_DIM,
+        ).place(relx=0.5, rely=0.12, anchor="center")
+        backdrop.lift()
+
+        # 2) Şifre ekranı (perdenin üstünde)
         dlg = ctk.CTkToplevel(self)
         dlg.title("🔒 MehburAI Güvenlik Modu")
-        dlg.geometry("460x300")
+        dlg.geometry("480x360")
         dlg.resizable(False, False)
         dlg.configure(fg_color=Theme.BG_DARK)
         dlg.transient(self)
         dlg.attributes("-topmost", True)
         try:
-            dlg.after(120, dlg.grab_set)
+            dlg.after(150, dlg.grab_set)
         except Exception:
             pass
         self._security_dialogs[path] = dlg
         state = {"alerted": False}
+        dlg.after(200, dlg.lift)
+        dlg.after(450, dlg.lift)
 
         ctk.CTkLabel(
             dlg, text="🔒 Bu konum korumalı", text_color=Theme.STATUS_OFFLINE,
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=18, weight="bold"),
-        ).pack(pady=(22, 4))
+        ).pack(pady=(20, 2))
         ctk.CTkLabel(
             dlg, text=os.path.basename(path.rstrip("\\/")) or path, text_color=Theme.TEXT_SECONDARY,
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11),
-        ).pack(pady=(0, 12))
+        ).pack(pady=(0, 6))
+        ctk.CTkLabel(
+            dlg, justify="center", wraplength=420,
+            text="📸 Bilgisayarın sahibine fotoğrafınız gönderilecek.\nKameraya bakın, gülümseyin :D",
+            text_color=Theme.STATUS_WARNING,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold"),
+        ).pack(pady=(0, 10))
 
         entry = ctk.CTkEntry(
             dlg, placeholder_text="Güvenlik şifresini girin", show="•", width=320, height=40,
             fg_color=Theme.BG_INPUT, border_color=Theme.CYAN_DARK,
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=13),
         )
-        entry.pack(pady=(0, 10))
+        entry.pack(pady=(0, 8))
         entry.after(250, entry.focus_force)
 
         info = ctk.CTkLabel(
-            dlg, text="", justify="center", wraplength=400,
+            dlg, text="", justify="center", wraplength=420,
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold"),
         )
-        info.pack(pady=(2, 8))
+        info.pack(pady=(2, 6))
 
         def do_verify():
             if verify_security_password(entry.get()):
@@ -1362,22 +1395,25 @@ class MehburApp(ctk.CTk):
                 self._close_security_dialog(path)
             else:
                 info.configure(
-                    text="⚠️ Hatalı şifre. Fotoğrafınız çekildi ve cihaz sahibine iletildi.",
+                    text="⚠️ Hatalı şifre. Fotoğrafınız çekildi, cihaz sahibine iletildi "
+                         "ve açtığınız şey kapatılıyor.",
                     text_color=Theme.STATUS_OFFLINE,
                 )
                 if not state["alerted"]:
                     state["alerted"] = True
-                    self._fire_intruder_alert("Yanlış şifre girildi")
+                    self._fire_intruder_alert("Yanlış şifre girildi", close_path=path)
+                self.after(3000, lambda: self._close_security_dialog(path))
 
         def on_x():
             info.configure(
-                text="⚠️ Doğrulama yapılmadı. Fotoğrafınız çekildi ve cihaz sahibine iletildi.",
+                text="⚠️ Doğrulama yapılmadı. Fotoğrafınız çekildi, cihaz sahibine iletildi "
+                     "ve açtığınız şey kapatılıyor.",
                 text_color=Theme.STATUS_OFFLINE,
             )
             if not state["alerted"]:
                 state["alerted"] = True
-                self._fire_intruder_alert("Şifre ekranı kapatıldı")
-            self.after(2500, lambda: self._close_security_dialog(path))
+                self._fire_intruder_alert("Şifre ekranı kapatıldı", close_path=path)
+            self.after(3000, lambda: self._close_security_dialog(path))
 
         entry.bind("<Return>", lambda e: do_verify())
         btns = ctk.CTkFrame(dlg, fg_color="transparent")
@@ -1393,6 +1429,7 @@ class MehburApp(ctk.CTk):
             command=on_x,
         ).pack(side="left", padx=6)
         dlg.protocol("WM_DELETE_WINDOW", on_x)
+        self._security_backdrops[path] = backdrop
 
     def _close_security_dialog(self, path: str):
         dlg = self._security_dialogs.pop(path, None)
@@ -1405,6 +1442,12 @@ class MehburApp(ctk.CTk):
                 dlg.destroy()
             except Exception:
                 pass
+        backdrop = self._security_backdrops.pop(path, None)
+        if backdrop is not None:
+            try:
+                backdrop.destroy()
+            except Exception:
+                pass
         self.security_guard.mark_resolved(path)
 
     def _ui_call(self, fn):
@@ -1415,10 +1458,10 @@ class MehburApp(ctk.CTk):
         except Exception:
             pass
 
-    def _fire_intruder_alert(self, reason: str):
-        """Kamera + Telegram işini arka planda yapar (UI donmasın)."""
+    def _fire_intruder_alert(self, reason: str, close_path: Optional[str] = None):
+        """Hedefi kapat + kamera + Telegram işini arka planda yapar (UI donmasın)."""
         def worker():
-            result = trigger_intruder_alert(reason)
+            result = trigger_intruder_alert(reason, close_path=close_path)
 
             def show():
                 if hasattr(self, "sec_status") and self.sec_status.winfo_exists():

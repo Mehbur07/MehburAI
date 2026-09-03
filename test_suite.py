@@ -305,53 +305,67 @@ def run_full_validation():
     assert _cfg.get_security_config()["security_password_hash"] != "EZILDI"
     print("  • Parola alanı ayar güncellemesiyle ezilemiyor ✓")
 
-    # 10c. Yol izleyici SADECE "kapalı → açık" geçişinde tetikler (edge)
+    # 10c. Klasör izleme: sadece "kapalı → açık" geçişinde sorar
     fired = []
     guard = _sg.SecurityGuard(on_access=lambda p: fired.append(p))
     giz = _sg.SecurityGuard._norm(r"C:\Test\Gizli")
-    _scan_state = {"explorer": [], "exes": []}
+    _state = {"explorer": [], "exes": []}
     _sg.SecurityGuard._scan = classmethod(
-        lambda cls: (list(_scan_state["explorer"]), list(_scan_state["exes"]))
+        lambda cls: (list(_state["explorer"]), list(_state["exes"]))
     )
+    _sg._foreground_exe_path = lambda: (_state["exes"][0] if _state["exes"] else None)
 
-    # İlk tarama (priming): program zaten çalışıyor → SORMAMALI
-    _scan_state["exes"] = [r"D:\a\b.exe"]
+    guard._check_once()                                   # priming
+    assert fired == []
+    _state["explorer"] = [r"C:\Test\Gizli\ic"]
     guard._check_once()
-    assert fired == [], "başlangıçta zaten açık olan program için sorulmamalı"
-
-    # Program hâlâ açık, ikinci tarama → yine SORMAMALI
+    assert fired == [giz], f"yeni açılan klasör: {fired}"
+    fired.clear(); guard.mark_passed(r"C:\Test\Gizli"); guard._cooldown.clear()
     guard._check_once()
-    assert fired == [], "açık kalan program tekrar tekrar sormamalı"
+    assert fired == [], "doğrulama sonrası açıkken sormamalı"
+    _state["explorer"] = []; guard._check_once(); guard._cooldown.clear()
+    _state["explorer"] = [r"C:\Test\Gizli"]; guard._check_once()
+    assert fired == [giz], f"kapanıp tekrar açılınca: {fired}"
+    print("  • Klasör izleme yalnızca 'kapalı→açık' geçişinde soruyor ✓")
 
-    # Şimdi korumalı klasör YENİ açılıyor → SORMALI
-    _scan_state["explorer"] = [r"C:\Test\Gizli\ic"]
-    guard._check_once()
-    assert fired == [giz], f"yeni açılan klasör için sorulmalı: {fired}"
-
-    # Doğru şifre girildi; klasör açık kalıyor → tekrar SORMAMALI
+    # 10c-2. Tepsi (tray) programı: kapatıp tekrar odağa gelince yeniden sorar
+    _cfg.update_security_config(
+        security_enabled=True,
+        security_watch_paths=[r"C:\Test\Gizli", r"C:\Apps\Telegram.exe"],
+    )
     fired.clear()
-    guard.mark_passed(r"C:\Test\Gizli")
-    guard._cooldown.clear()
-    guard._check_once()
-    assert fired == [], "doğrulama sonrası, hedef açıkken tekrar sormamalı"
+    g2 = _sg.SecurityGuard(on_access=lambda p: fired.append(p))
+    tg = _sg.SecurityGuard._norm(r"C:\Apps\Telegram.exe")
+    _state["explorer"] = []
+    _state["exes"] = []
+    _sg._foreground_exe_path = lambda: _state.get("fg")
+    _state["fg"] = None
+    g2._check_once()                                      # priming: telegram kapalı
+    _state["exes"] = [r"C:\Apps\Telegram.exe"]; _state["fg"] = r"C:\Apps\Telegram.exe"
+    g2._check_once()
+    assert fired == [tg], f"telegram açılınca sormalı: {fired}"
+    fired.clear(); g2.mark_passed(r"C:\Apps\Telegram.exe"); g2._cooldown.clear()
+    _state["fg"] = None; g2._check_once()                 # tepsiye indi (hâlâ çalışıyor)
+    _state["fg"] = r"C:\Apps\Telegram.exe"; g2._check_once()   # tepsiden geri açıldı
+    assert fired == [], "aynı oturumda tekrar odağa gelince sormamalı (passed)"
+    # gerçekten kapandı, sonra tekrar açıldı
+    _state["exes"] = []; _state["fg"] = None; g2._check_once(); g2._cooldown.clear()
+    _state["exes"] = [r"C:\Apps\Telegram.exe"]; _state["fg"] = r"C:\Apps\Telegram.exe"
+    g2._check_once()
+    assert fired == [tg], f"tam kapatıp açınca yeniden sormalı: {fired}"
+    print("  • Tepsi programı kapatılıp tekrar açılınca yeniden soruyor ✓")
 
-    # Klasör kapandı, sonra tekrar açıldı → yeniden SORMALI
-    _scan_state["explorer"] = []
-    guard._check_once()
-    guard._cooldown.clear()
-    _scan_state["explorer"] = [r"C:\Test\Gizli"]
-    guard._check_once()
-    assert fired == [giz], f"kapanıp tekrar açılınca yeniden sorulmalı: {fired}"
-    print("  • Yol izleyici yalnızca 'kapalı→açık' geçişinde soruyor ✓")
-
-    # 10d. Alarm akışı: kamera yoksa Telegram metin uyarısına düşüyor
+    # 10d. Alarm akışı: hedefi kapatır + kamera yoksa Telegram metnine düşer
     _sg.CameraCapture.snapshot = staticmethod(lambda save_dir=None: None)
     _sg.TelegramNotifier.is_configured = classmethod(lambda cls: True)
     _sg.TelegramNotifier.send_message = classmethod(lambda cls, t: True)
     _sg.TelegramNotifier.send_photo = classmethod(lambda cls, p, caption="": False)
-    res = _sg.trigger_intruder_alert("yanlış şifre (test)")
-    assert res["telegram"] is True and res["photo"] is None
-    print(f"  • Alarm akışı: {res['detail']} ✓")
+    _closed = []
+    _sg.close_target = lambda p: (_closed.append(p) or True)
+    res = _sg.trigger_intruder_alert("yanlış şifre (test)", close_path=r"C:\Apps\Telegram.exe")
+    assert res["telegram"] is True and res["photo"] is None and res["closed"] is True
+    assert _closed == [r"C:\Apps\Telegram.exe"]
+    print(f"  • Alarm akışı (hedef kapatma dahil): {res['detail']} ✓")
 
     # Ayarları eski haline getir
     try:

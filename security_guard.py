@@ -45,6 +45,75 @@ def _run_ps(script: str, timeout: float = 8.0) -> str:
         return ""
 
 
+def _foreground_exe_path() -> Optional[str]:
+    """Şu an odakta (foreground) olan pencerenin çalıştırılabilir dosya yolu — hızlı, ctypes."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return None
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return None
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if not h:
+            return None
+        try:
+            buf = ctypes.create_unicode_buffer(4096)
+            size = wintypes.DWORD(4096)
+            if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                return buf.value
+        finally:
+            kernel32.CloseHandle(h)
+    except Exception:
+        return None
+    return None
+
+
+def close_target(path: str) -> bool:
+    """
+    Yetkisiz erişimde açılan hedefi kapatır:
+      • program → o süreci (yol veya isim eşleşmesi) sonlandırır
+      • klasör  → o yolu gösteren Dosya Gezgini penceresini kapatır
+    """
+    p = path.strip().strip('"')
+    if not p:
+        return False
+    p_esc = p.replace("'", "''")
+    base = os.path.basename(p)
+    is_prog = p.lower().endswith((".exe", ".com", ".bat", ".lnk")) or (
+        not os.path.isdir(p) and "." in base
+    )
+    try:
+        if is_prog:
+            stem = os.path.splitext(base)[0].replace("'", "''")
+            _run_ps(
+                "$ErrorActionPreference='SilentlyContinue';"
+                f"Get-Process | Where-Object {{ $_.Path -eq '{p_esc}' -or "
+                f"$_.ProcessName -eq '{stem}' }} | Stop-Process -Force",
+                timeout=10,
+            )
+        else:
+            _run_ps(
+                "$ErrorActionPreference='SilentlyContinue';"
+                "(New-Object -ComObject Shell.Application).Windows() | "
+                f"Where-Object {{ try {{ $_.Document.Folder.Self.Path -eq '{p_esc}' }} "
+                "catch { $false } } | ForEach-Object { $_.Quit() }",
+                timeout=10,
+            )
+        return True
+    except Exception:
+        return False
+
+
 # ─────────────────────────────────────────────
 # Telegram Bildirimi
 # ─────────────────────────────────────────────
@@ -194,7 +263,7 @@ class SecurityGuard:
     Erişim tespit edilince `on_access(path)` çağrılır (arayüz şifre ekranı gösterir).
     """
 
-    POLL_INTERVAL = 2.0          # saniye
+    POLL_INTERVAL = 1.5          # saniye
     DEBOUNCE = 8.0               # ekran kapandıktan sonra kısa süre tekrar sormaz (sn)
 
     def __init__(self, on_access: Callable[[str], None]):
@@ -202,8 +271,10 @@ class SecurityGuard:
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._lock = threading.Lock()
-        # Kenar (edge) tespiti: yalnızca "kapalı → açık" geçişinde şifre sorulur.
-        self._active = set()        # şu an açık/çalışan korumalı hedefler
+        # Kenar (edge) tespiti
+        self._run_prev = set()      # geçen taramada çalışan/açık korumalı hedefler
+        self._fg_prev = None        # geçen taramada odakta olan korumalı hedef
+        self._passed = set()        # şifresi doğru girilmiş hedefler (gerçekten kapanınca temizlenir)
         self._pending = set()       # şifre ekranı açık olanlar
         self._cooldown = {}         # path -> ts (kısa debounce)
         self._primed = False        # ilk tarama mevcut durumu sessizce kaydeder
@@ -214,8 +285,10 @@ class SecurityGuard:
             return
         self._running = True
         with self._lock:
-            self._primed = False    # zaten açık olan programlar için sorma
-            self._active.clear()
+            self._primed = False
+            self._run_prev.clear()
+            self._fg_prev = None
+            self._passed.clear()
         self._thread = threading.Thread(target=self._loop, name="MehburAI-SecurityGuard", daemon=True)
         self._thread.start()
 
@@ -227,24 +300,34 @@ class SecurityGuard:
 
     # ── doğrulama sonrası ─────────────────────
     def mark_passed(self, path: str) -> None:
+        """Şifre doğru girildi — hedef gerçekten kapanana kadar tekrar sorma."""
         p = self._norm(path)
         with self._lock:
             self._pending.discard(p)
-            self._active.add(p)     # hâlâ açık — kapanıp tekrar açılmadıkça sorma
+            self._passed.add(p)
             self._cooldown[p] = time.time() + self.DEBOUNCE
 
     def mark_resolved(self, path: str) -> None:
-        """Ekran kapandı (doğru/yanlış fark etmez) — hedef hâlâ açıksa yeniden sorma."""
+        """Ekran kapandı (yanlış şifre / iptal). Kısa debounce; 'passed' sayılmaz."""
         p = self._norm(path)
         with self._lock:
             self._pending.discard(p)
-            self._active.add(p)
             self._cooldown[p] = time.time() + self.DEBOUNCE
 
     # ── iç mekanizma ──────────────────────────
     @staticmethod
     def _norm(p: str) -> str:
         return os.path.normcase(os.path.normpath(p.strip().strip('"')))
+
+    @staticmethod
+    def _base(p: str) -> str:
+        return os.path.basename(p).lower()
+
+    @classmethod
+    def _is_program(cls, target: str) -> bool:
+        return target.lower().endswith((".exe", ".com", ".bat", ".lnk")) or (
+            not os.path.isdir(target) and "." in os.path.basename(target)
+        )
 
     def _watch_list(self) -> List[str]:
         cfg = get_security_config()
@@ -323,36 +406,50 @@ class SecurityGuard:
         watch = self._watch_list()
         if not watch:
             with self._lock:
-                self._active.clear()
+                self._run_prev.clear()
+                self._fg_prev = None
+                self._passed.clear()
             return
 
         raw_explorer, raw_exes = self._scan()
         explorer = [self._norm(p) for p in raw_explorer]
-        exes = set(self._norm(p) for p in raw_exes)
+        exe_bases = set(self._base(p) for p in raw_exes)
+        fg_path = _foreground_exe_path()
+        fg_base = self._base(fg_path) if fg_path else ""
 
-        # Şu an açık/çalışan korumalı hedefler
-        now_active = set()
+        # Şu an "açık" korumalı hedefler + odaktaki korumalı hedef
+        run_now, fg_now = set(), None
         for target in watch:
-            is_open = target in exes or any(
-                op == target or op.startswith(target + os.sep) for op in explorer
-            )
-            if is_open:
-                now_active.add(target)
+            if self._is_program(target):
+                if self._base(target) in exe_bases:
+                    run_now.add(target)
+                if fg_base and self._base(target) == fg_base:
+                    fg_now = target
+            else:  # klasör
+                if any(op == target or op.startswith(target + os.sep) for op in explorer):
+                    run_now.add(target)
 
         with self._lock:
-            # İlk tarama: yalnızca mevcut durumu kaydet, şifre sorma
+            now = time.time()
+            # Gerçekten kapanan hedefleri "passed" listesinden düş → tekrar açılırsa sorar
+            for p in list(self._passed):
+                if p not in run_now and p != fg_now:
+                    self._passed.discard(p)
+
             if not self._primed:
-                self._active = now_active
+                self._run_prev = set(run_now)
+                self._fg_prev = fg_now
+                self._passed |= run_now          # başlangıçta zaten açık olanlara güven
                 self._primed = True
                 return
 
-            now = time.time()
-            newly_opened = now_active - self._active - self._pending
-            to_fire = [
-                t for t in newly_opened if now >= self._cooldown.get(t, 0)
-            ]
-            # Açık kalanları + ekranı açık olanları "aktif" say
-            self._active = now_active | self._pending
+            run_edge = run_now - self._run_prev              # yeni başlatıldı / açıldı
+            fg_edge = ({fg_now} if fg_now and fg_now != self._fg_prev else set())  # odağa geldi
+            candidates = (run_edge | fg_edge) - self._passed - self._pending
+            to_fire = [t for t in candidates if now >= self._cooldown.get(t, 0)]
+
+            self._run_prev = run_now | self._pending
+            self._fg_prev = fg_now
             for t in to_fire:
                 self._pending.add(t)
 
@@ -368,13 +465,19 @@ class SecurityGuard:
 # Şifre yanlış → alarm akışı (arayüzden çağrılır)
 # ─────────────────────────────────────────────
 
-def trigger_intruder_alert(reason: str = "Yanlış şifre") -> dict:
+def trigger_intruder_alert(reason: str = "Yanlış şifre", close_path: Optional[str] = None) -> dict:
     """
-    Web kameradan fotoğraf çeker ve Telegram'a gönderir.
-    Arayüz bunu bir arka plan thread'inde çağırmalıdır (ağ + kamera bloklayabilir).
+    Yetkisiz erişim akışı (arayüz bunu bir arka plan thread'inde çağırmalı):
+      1. `close_path` verilmişse açılan hedefi kapatır (program sonlandır / klasör penceresi kapat)
+      2. Web kameradan fotoğraf çeker
+      3. Cihaz sahibinin Telegram'ına gönderir
 
-    Returns: {"photo": path|None, "telegram": bool, "detail": str}
+    Returns: {"photo": path|None, "telegram": bool, "closed": bool, "detail": str}
     """
+    closed = False
+    if close_path:
+        closed = close_target(close_path)
+
     when = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
     host = os.environ.get("COMPUTERNAME", "bilinmeyen-cihaz")
     user = os.environ.get("USERNAME", "?")
@@ -383,7 +486,8 @@ def trigger_intruder_alert(reason: str = "Yanlış şifre") -> dict:
     caption = (
         f"🛡️ MehburAI Güvenlik Uyarısı\n"
         f"Sebep: {reason}\n"
-        f"Cihaz: {host} / kullanıcı: {user}\n"
+        + (f"Kapatılan: {os.path.basename(close_path.rstrip(chr(92)+chr(47)))}\n" if close_path else "")
+        + f"Cihaz: {host} / kullanıcı: {user}\n"
         f"Zaman: {when}"
     )
 
@@ -397,9 +501,11 @@ def trigger_intruder_alert(reason: str = "Yanlış şifre") -> dict:
             )
 
     detail = []
+    if close_path:
+        detail.append("hedef kapatıldı" if closed else "hedef kapatılamadı")
     detail.append("fotoğraf çekildi" if photo else "kamera alınamadı")
     detail.append("Telegram'a gönderildi" if tg_ok else "Telegram gönderilemedi")
-    return {"photo": photo, "telegram": tg_ok, "detail": ", ".join(detail)}
+    return {"photo": photo, "telegram": tg_ok, "closed": closed, "detail": ", ".join(detail)}
 
 
 # ─────────────────────────────────────────────
