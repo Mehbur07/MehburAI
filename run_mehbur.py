@@ -38,8 +38,16 @@ def main():
     print("  [Baslatma] Neon Cyan & Siyah Masaustu Arayuzu yukleniyor...")
     print()
 
+    # Tek örnek: zaten çalışıyorsa mevcut pencereyi öne getirip çık
+    from background import SingleInstance
+    singleton = SingleInstance()
+    if not singleton.acquire():
+        print("  MehburAI zaten çalışıyor — mevcut pencere öne getirildi.")
+        return
+
+    start_hidden = "--tray" in sys.argv
     from gui_app import launch_gui
-    launch_gui()
+    launch_gui(start_hidden=start_hidden, singleton=singleton)
 
 
 def _log_crash(exc: BaseException) -> None:

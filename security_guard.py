@@ -391,8 +391,22 @@ class SecurityGuard:
             apps.append((name, path))
         return sorted(apps, key=lambda a: a[0].lower())
 
+    WAKE_GAP = 40.0   # iki poll arası bu kadar saniye geçtiyse = uyku/hazırda bekletme
+
     def _loop(self) -> None:
+        last = time.monotonic()
         while self._running:
+            gap = time.monotonic() - last
+            last = time.monotonic()
+            if gap > self.WAKE_GAP:
+                # Bilgisayar uyudu ve yeni uyandı → o an açık olan her şey için
+                # şifre sormamak adına durumu sıfırla, bir tur bekle, sonra devam et.
+                with self._lock:
+                    self._primed = False
+                    self._run_prev.clear()
+                    self._fg_prev = None
+                time.sleep(2.0)
+                continue
             try:
                 self._check_once()
             except Exception:

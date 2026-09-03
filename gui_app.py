@@ -41,6 +41,7 @@ from config import (
 from memory_engine import MemoryEngine
 from network_manager import NetworkMonitor
 from security_guard import SecurityGuard, TelegramNotifier, trigger_intruder_alert
+from background import SingleInstance, is_autostart_enabled, set_autostart
 
 
 # CustomTkinter Genel Tema Ayarları
@@ -51,7 +52,7 @@ ctk.set_default_color_theme("blue")
 class MehburApp(ctk.CTk):
     """MehburAI Ana Masaüstü Penceresi."""
 
-    def __init__(self):
+    def __init__(self, start_hidden: bool = False, singleton=None):
         super().__init__()
 
         # Pencere Başlığı ve Boyutları
@@ -70,9 +71,18 @@ class MehburApp(ctk.CTk):
         self._security_dialogs = {}   # path -> Toplevel (aynı yol için tek ekran)
         self._security_backdrops = {}  # path -> tam ekran perde Toplevel
         self._security_queue = queue.Queue()   # guard thread -> UI thread köprüsü
+        self._tray = None
+        self._tray_notified = False
+        self._quitting = False
 
         # 🛡️ Güvenlik Modu izleyicisi
         self.security_guard = SecurityGuard(on_access=self._security_queue.put)
+
+        # Tek örnek kilidi — ikinci açılış mevcut pencereyi öne getirir
+        self._singleton = singleton or SingleInstance()
+        self._singleton.set_on_show(lambda: self.after(0, self._restore_window))
+        if singleton is None:
+            self._singleton.acquire()
 
         # UI Bileşenlerini İnşa Et
         self._build_ui()
@@ -80,9 +90,10 @@ class MehburApp(ctk.CTk):
         # Ağ İzleyiciyi Başlat
         self.network.start()
 
-        # Güvenlik Modu etkinse izlemeyi başlat
+        # Güvenlik Modu etkinse izlemeyi başlat + tepsi ikonunu hazırla
         if get_security_config().get("security_enabled"):
             self.security_guard.start()
+            self._setup_tray()
 
         # Güvenlik kuyruğunu düzenli aralıkla ana thread'de kontrol et
         self.after(700, self._poll_security_queue)
@@ -91,7 +102,20 @@ class MehburApp(ctk.CTk):
         self._send_welcome_message()
 
         # Pencere Kapanış Olayı
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Bazı Windows kurulumlarında kısayoldan açılışın hemen ardından, pencere
+        # ilk çizilirken art arda SAHTE WM_DELETE_WINDOW mesajları gelebiliyor.
+        # Çözüm: ilk ~18 sn tüm kapatma isteklerini yut; sonrasında X tuşu
+        # uygulamayı KAPATMAZ, sadece sistem tepsisine gizler. Tamamen çıkış
+        # yalnızca tepsi menüsünden veya "Çıkış" düğmesinden yapılır.
+        self._close_armed = False
+        self.protocol("WM_DELETE_WINDOW", self._on_close_request)
+        self.after(18000, self._arm_close)
+        # Tepsi ikonunu her zaman hazırla (kapatınca geri dönüş + Çıkış için)
+        self.after(1500, self._setup_tray)
+
+        # --tray ile (Windows açılışında) başlatıldıysa gizli aç
+        if start_hidden and get_security_config().get("security_enabled"):
+            self.after(200, self.withdraw)
 
     # ─────────────────────────────────────────
     # Arayüz İskeleti (UI Layout)
@@ -401,6 +425,18 @@ class MehburApp(ctk.CTk):
             command=self._clear_chat_display,
         )
         btn_clear_chat.pack(side="right")
+
+        btn_quit = ctk.CTkButton(
+            quick_frame,
+            text="⏻ Çıkış",
+            font=ctk.CTkFont(size=11),
+            fg_color=Theme.BG_CARD,
+            text_color="#FF8888",
+            hover_color="#44111E",
+            height=26,
+            command=self._confirm_quit,
+        )
+        btn_quit.pack(side="right", padx=(0, 6))
 
     def _insert_quick_query(self, text: str):
         """Hızlı örnek soruyu giriş kutusuna yazar."""
@@ -1013,6 +1049,20 @@ class MehburApp(ctk.CTk):
             ),
         ).pack(anchor="w", padx=16, pady=(0, 10))
 
+        # — Arka planda / açılışta çalışma —
+        self.sec_autostart_switch = ctk.CTkSwitch(
+            card, text="Windows açılışında otomatik başlat (arka planda çalışır)",
+            command=self._toggle_autostart, progress_color=Theme.STATUS_ONLINE,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+        )
+        self.sec_autostart_switch.pack(anchor="w", padx=16, pady=(0, 4))
+        if is_autostart_enabled():
+            self.sec_autostart_switch.select()
+        ctk.CTkLabel(
+            card, text="Pencereyi kapatsan bile güvenlik modu sistem tepsisinde çalışmaya devam eder.",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11), text_color=Theme.TEXT_DARK,
+        ).pack(anchor="w", padx=16, pady=(0, 12))
+
         # — Korumalı yollar —
         ctk.CTkLabel(
             card, text="📁 Korumalı yollar (her satıra bir tane — klasör veya .exe):",
@@ -1026,6 +1076,10 @@ class MehburApp(ctk.CTk):
         )
         self.sec_paths_box.pack(fill="x", padx=16, pady=(0, 6))
         self.sec_paths_box.insert("1.0", "\n".join(cfg.get("security_watch_paths", [])))
+        # Odaktan çıkınca / her tuşta (gecikmeli) otomatik kaydet — buton unutulsa da kaybolmaz
+        _inner = getattr(self.sec_paths_box, "_textbox", self.sec_paths_box)
+        _inner.bind("<FocusOut>", self._save_security_paths, add=True)
+        _inner.bind("<KeyRelease>", self._schedule_paths_save, add=True)
 
         paths_btns = ctk.CTkFrame(card, fg_color="transparent")
         paths_btns.pack(anchor="w", padx=16, pady=(0, 12))
@@ -1158,18 +1212,48 @@ class MehburApp(ctk.CTk):
         update_security_config(security_enabled=enabled)
         if enabled:
             self.security_guard.start()
+            self._setup_tray()
+            # Güvenlik açılınca Windows açılışında otomatik başlatmayı da aç
+            if not is_autostart_enabled() and set_autostart(True):
+                if hasattr(self, "sec_autostart_switch"):
+                    self.sec_autostart_switch.select()
         else:
             self.security_guard.stop()
         self._refresh_security_status()
 
-    def _save_security_paths(self):
+    def _toggle_autostart(self):
+        want = bool(self.sec_autostart_switch.get())
+        ok = set_autostart(want)
+        if not ok:
+            (self.sec_autostart_switch.deselect if want else self.sec_autostart_switch.select)()
+            self.sec_status.configure(
+                text="⚠️ Otomatik başlatma ayarlanamadı.", text_color=Theme.STATUS_WARNING
+            )
+        else:
+            self.sec_status.configure(
+                text=("✅ Windows açılışında otomatik başlayacak." if want
+                      else "Otomatik başlatma kapatıldı."),
+                text_color=Theme.STATUS_ONLINE if want else Theme.TEXT_SECONDARY,
+            )
+
+    def _schedule_paths_save(self, *_a):
+        if getattr(self, "_paths_save_job", None):
+            try:
+                self.after_cancel(self._paths_save_job)
+            except Exception:
+                pass
+        self._paths_save_job = self.after(1200, self._save_security_paths)
+
+    def _save_security_paths(self, *_a):
+        self._paths_save_job = None
         raw = self.sec_paths_box.get("1.0", "end")
         paths = [ln.strip().strip('"') for ln in raw.splitlines() if ln.strip()]
         update_security_config(security_watch_paths=paths)
-        self.sec_status.configure(
-            text=f"✅ {len(paths)} korumalı yol kaydedildi.", text_color=Theme.STATUS_ONLINE
-        )
-        self.after(1800, self._refresh_security_status)
+        if hasattr(self, "sec_status"):
+            self.sec_status.configure(
+                text=f"✅ {len(paths)} korumalı yol kaydedildi.", text_color=Theme.STATUS_ONLINE
+            )
+            self.after(1800, self._refresh_security_status)
 
     def _add_watch_path(self, path: str):
         cur = [ln.strip() for ln in self.sec_paths_box.get("1.0", "end").splitlines() if ln.strip()]
@@ -1538,22 +1622,169 @@ class MehburApp(ctk.CTk):
         except Exception:
             pass
 
-    def _on_close(self):
-        """Pencere kapatıldığında servisleri güvenle sonlandırır."""
+    # ── Sistem tepsisi (arka planda çalışma) ──
+
+    def _setup_tray(self):
+        """Güvenlik modu açıkken pencere kapatılsa bile uygulama tepside çalışmaya devam eder."""
+        if self._tray is not None:
+            return
+        try:
+            import pystray
+            from PIL import Image, ImageDraw
+        except Exception:
+            self._tray = None
+            return
+
+        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        d.ellipse([4, 4, 60, 60], fill=(0, 240, 255, 255))
+        d.ellipse([20, 22, 30, 32], fill=(7, 7, 11, 255))
+        d.ellipse([34, 22, 44, 32], fill=(7, 7, 11, 255))
+
+        menu = pystray.Menu(
+            pystray.MenuItem("MehburAI'yi Aç", lambda *_: self.after(0, self._restore_window), default=True),
+            pystray.MenuItem(
+                "🛡️ Güvenlik Modu",
+                lambda *_: self.after(0, self._tray_toggle_security),
+                checked=lambda _i: bool(get_security_config().get("security_enabled")),
+            ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Tamamen Çıkış", lambda *_: self.after(0, self._real_quit)),
+        )
+        self._tray = pystray.Icon("MehburAI", img, "MehburAI — Güvenlik Modu", menu)
+        threading.Thread(target=self._tray.run, daemon=True, name="MehburAI-Tray").start()
+
+    def _restore_window(self):
+        try:
+            self.deiconify()
+            self.state("normal")
+            self.lift()
+            self.focus_force()
+        except Exception:
+            pass
+
+    def _tray_toggle_security(self):
+        cur = bool(get_security_config().get("security_enabled"))
+        if not cur and not has_security_password():
+            self._restore_window()
+            self.switch_tab("settings")
+            return
+        update_security_config(security_enabled=not cur)
+        if not cur:
+            self.security_guard.start()
+        else:
+            self.security_guard.stop()
+        if hasattr(self, "sec_enable_switch"):
+            (self.sec_enable_switch.select if not cur else self.sec_enable_switch.deselect)()
+        self._refresh_security_status()
+
+    def _persist_all_settings(self):
+        """Kapanmadan önce ayarların diske yazıldığından emin ol (yollar kaybolmasın)."""
+        try:
+            if hasattr(self, "sec_paths_box"):
+                self._save_security_paths()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "sec_tg_token"):
+                self._save_telegram()
+        except Exception:
+            pass
+
+    def _real_quit(self):
+        """Uygulamayı tamamen kapatır (tepsi dahil)."""
+        self._quitting = True
+        self._persist_all_settings()
         self.network.stop()
         try:
             self.security_guard.stop()
         except Exception:
             pass
+        try:
+            self._singleton.release()
+        except Exception:
+            pass
+        if self._tray is not None:
+            try:
+                self._tray.stop()
+            except Exception:
+                pass
         self.destroy()
+
+    def _arm_close(self, *_a):
+        self._close_armed = True
+
+    def _on_close_request(self):
+        """
+        WM_DELETE_WINDOW: ilk ~18 sn'deki sahte kapatmaları yut, sonrasında
+        uygulamayı KAPATMA — sadece tepsiye gizle.
+        """
+        if not self._close_armed or self._quitting:
+            return
+        self._hide_to_tray()
+
+    def _confirm_quit(self):
+        """'Çıkış' düğmesi — güvenlik modu açıksa uyar, değilse direkt kapat."""
+        if get_security_config().get("security_enabled"):
+            dlg = ctk.CTkToplevel(self)
+            dlg.title("Çıkış")
+            dlg.geometry("420x180")
+            dlg.transient(self)
+            dlg.attributes("-topmost", True)
+            dlg.after(120, dlg.grab_set)
+            ctk.CTkLabel(
+                dlg, wraplength=380, justify="center",
+                text="🛡️ Güvenlik modu açık. Tamamen çıkarsan yetkisiz erişim "
+                     "koruması da durur.\n\nNe yapmak istersin?",
+                font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+            ).pack(padx=16, pady=(18, 12))
+            row = ctk.CTkFrame(dlg, fg_color="transparent")
+            row.pack()
+            ctk.CTkButton(
+                row, text="Tepsiye gizle", width=130, fg_color=Theme.CYAN_PRIMARY,
+                text_color=Theme.BG_DARKEST,
+                command=lambda: (dlg.destroy(), self._hide_to_tray()),
+            ).pack(side="left", padx=6)
+            ctk.CTkButton(
+                row, text="Tamamen çık", width=130, fg_color="#44111E", text_color="#FF8888",
+                command=lambda: (dlg.destroy(), self._real_quit()),
+            ).pack(side="left", padx=6)
+        else:
+            self._real_quit()
+
+    def _hide_to_tray(self):
+        """Pencereyi sistem tepsisine gizler — uygulama (ve güvenlik modu) çalışmaya devam eder."""
+        self._persist_all_settings()
+        self._setup_tray()
+        if self._tray is not None:
+            self.withdraw()
+            if not self._tray_notified:
+                self._tray_notified = True
+                msg = ("Güvenlik modu arka planda çalışıyor. "
+                       if get_security_config().get("security_enabled")
+                       else "MehburAI tepside çalışıyor. ")
+                try:
+                    self._tray.notify(msg + "Açmak için tepsi simgesine çift tıkla.", "MehburAI")
+                except Exception:
+                    pass
+        else:
+            # pystray yoksa: güvenlik açıksa gizle, değilse tamamen çık
+            if get_security_config().get("security_enabled"):
+                self.iconify()
+            else:
+                self._real_quit()
+
+    # Geriye dönük uyum
+    def _on_close(self):
+        self._hide_to_tray()
 
 
 # ─────────────────────────────────────────────
 # Başlatma
 # ─────────────────────────────────────────────
-def launch_gui():
+def launch_gui(start_hidden: bool = False, singleton=None):
     """Masaüstü uygulamasını başlatır."""
-    app = MehburApp()
+    app = MehburApp(start_hidden=start_hidden, singleton=singleton)
     app.mainloop()
 
 

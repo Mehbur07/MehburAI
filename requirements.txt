@@ -12,6 +12,10 @@ requests>=2.31.0
 # (opsiyonel: kurulu değilse güvenlik modu yalnızca Telegram metin uyarısı gönderir)
 opencv-python>=4.9.0
 
+# 🛡️ Güvenlik Modu — sistem tepsisi (pencere kapatılınca arka planda çalışma)
+# (opsiyonel: kurulu değilse pencere kapatınca simge durumuna küçülür)
+pystray>=0.19.0
+
 # ─────────────────────────────────────────────
 # NOT: Eski `google-generativeai` paketi Google tarafından kullanımdan
 # kaldırıldı ve MehburAI artık Gemini'ye doğrudan REST (streamGenerateContent)
