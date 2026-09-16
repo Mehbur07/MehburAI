@@ -24,8 +24,10 @@ try:
 except Exception:
     pass
 
-# Proje kök dizinini Python yoluna ekle
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Proje kök dizinini Python yoluna ekle (yalnızca geliştirme ortamında gerekli;
+# .exe'ye paketlenmişse PyInstaller modülleri zaten kendisi bulur)
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 def main():
@@ -54,7 +56,10 @@ def _log_crash(exc: BaseException) -> None:
     """Beklenmeyen hatayı data/last_error.log dosyasına yazar (konsolsuz başlatmada bile görülsün)."""
     import traceback
     try:
-        base = os.path.dirname(os.path.abspath(__file__))
+        # .exe'ye paketlenmişse (PyInstaller) günlük .exe'nin yanına, geliştirme
+        # ortamında bu betiğin kendi klasörüne yazılır.
+        base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
+            else os.path.dirname(os.path.abspath(__file__))
         log_dir = os.path.join(base, "data")
         os.makedirs(log_dir, exist_ok=True)
         with open(os.path.join(log_dir, "last_error.log"), "w", encoding="utf-8") as f:

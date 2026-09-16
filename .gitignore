@@ -56,3 +56,20 @@ data/*.db
 
 # Güvenlik modu — kameradan çekilen kareler (kişisel, repoya girmez)
 data/security_snapshots/
+
+# Güvenlik modu — korumalı dosyaların gizli yedekleri (kişisel, repoya girmez)
+data/security_backups/
+
+# Telegram uzaktan kontrol — geçici ekran görüntüleri (kişisel, repoya girmez)
+data/remote_captures/
+
+# Sesli sohbet — indirilen Vosk Türkçe modeli (~35 MB, ilk açılışta iner)
+data/models/
+
+# Uygulama ikonu — assets/logo.png'den otomatik üretilir
+assets/logo.ico
+
+# .exe paketleme (PyInstaller) çıktıları — MehburAI.spec ile yeniden üretilir,
+# repoya girmez (yüzlerce MB ikili dosya)
+build/
+dist/

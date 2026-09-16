@@ -420,6 +420,108 @@ class SystemTools:
         except Exception as e:
             return f"⚠️ Oluşturulamadı: {e}"
 
+    # Arama sırasında atlanacak (çok kalabalık / anlamsız) klasör adları
+    _SEARCH_SKIP_DIRS = {
+        "node_modules", ".git", ".venv", "venv", "env", "__pycache__", ".idea",
+        ".vscode", "site-packages", "obj", "bin", "build", "dist",
+        ".cache", "cache", ".next", ".gradle", "target",
+        # AppData gürültüsü
+        "code cache", "gpucache", "cachestorage", "service worker", "indexeddb",
+        "crashpad", "blob_storage", "logs", "dawncache", "shadercache",
+        "component_crx_cache", "grshadercache", "webcache", "inetcache",
+    }
+
+    _SEARCH_ROOTS_KEYS = ("masaüstü", "belgeler", "indirilenler", "resimler", "videolar", "müzik")
+
+    @staticmethod
+    def locate_files(term: str, limit: int = 8, files_only: bool = True,
+                     max_depth: int = 4, time_budget: float = 6.0,
+                     include_appdata: bool = False) -> list:
+        """Yaygın kullanıcı klasörlerinde ada göre DOSYA ve/veya KLASÖR arar; eşleşen tam
+        yolları döndürür. node_modules/.git gibi kalabalık klasörleri atlar, derinlik +
+        süre sınırlıdır (büyük ağaçlarda donmayı önlemek için).
+        `files_only=False` → klasörler de dahil. `include_appdata=True` → Roaming +
+        Local AppData da (daha sığ) taranır."""
+        term = (term or "").strip().lower()
+        if len(term) < 2:
+            return []
+        roots = [(KNOWN_FOLDERS[k], max_depth) for k in SystemTools._SEARCH_ROOTS_KEYS]
+        if include_appdata:
+            for env in ("APPDATA", "LOCALAPPDATA"):
+                p = os.environ.get(env, "")
+                if p and os.path.isdir(p):
+                    roots.append((p, 3))   # AppData çok kalabalık → daha sığ tara
+        deadline = time.time() + time_budget
+        hits, seen = [], set()
+
+        def _add(full: str) -> bool:
+            low = full.lower()
+            if low in seen:
+                return False
+            seen.add(low)
+            hits.append(full)
+            return len(hits) >= limit
+
+        for root, rmax in roots:
+            if not os.path.isdir(root):
+                continue
+            root_depth = root.rstrip("\\/").count(os.sep)
+            for dirpath, dirnames, filenames in os.walk(root):
+                if time.time() > deadline or len(hits) >= limit:
+                    return hits[:limit]
+                depth = dirpath.count(os.sep) - root_depth
+                if depth >= rmax:
+                    dirnames[:] = []
+                else:
+                    dirnames[:] = [d for d in dirnames
+                                   if d.lower() not in SystemTools._SEARCH_SKIP_DIRS
+                                   and not d.startswith(".")]
+                if not files_only:
+                    for name in dirnames:
+                        if term in name.lower() and _add(os.path.join(dirpath, name)):
+                            return hits
+                for name in filenames:
+                    if term in name.lower() and _add(os.path.join(dirpath, name)):
+                        return hits
+        return hits
+
+    @classmethod
+    def zip_folder(cls, folder: str, max_bytes: int = 45 * 1024 * 1024):
+        """Bir klasörü (gürültülü alt klasörleri atlayarak) geçici bir .zip'e sıkıştırır.
+        Returns: (zip_yolu|None, mesaj)"""
+        import tempfile
+        import zipfile
+
+        if not os.path.isdir(folder):
+            return None, "Klasör bulunamadı."
+
+        files, total = [], 0
+        for dirpath, dirnames, filenames in os.walk(folder):
+            dirnames[:] = [d for d in dirnames
+                           if d.lower() not in cls._SEARCH_SKIP_DIRS and not d.startswith(".")]
+            for name in filenames:
+                fp = os.path.join(dirpath, name)
+                try:
+                    total += os.path.getsize(fp)
+                except OSError:
+                    continue
+                files.append(fp)
+                if total > max_bytes:
+                    mb = max_bytes // (1024 * 1024)
+                    return None, (f"Klasör {mb} MB'tan büyük (gürültülü alt klasörler hariç). "
+                                  "İçinden belirli bir dosya iste.")
+
+        base = os.path.basename(folder.rstrip("\\/")) or "klasor"
+        zpath = os.path.join(tempfile.gettempdir(),
+                             f"mehbur_{base}_{int(time.time())}.zip")
+        try:
+            with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+                for fp in files:
+                    z.write(fp, os.path.relpath(fp, os.path.dirname(folder)))
+        except Exception as e:
+            return None, f"Sıkıştırma hatası: {e}"
+        return zpath, f"{len(files)} dosya sıkıştırıldı"
+
     @classmethod
     def search_files(cls, key: str, original: str) -> Optional[str]:
         """Kullanıcı profilindeki yaygın klasörlerde dosya adına göre arama yapar."""
@@ -547,19 +649,31 @@ class SystemTools:
         return None
 
     @staticmethod
-    def take_screenshot() -> str:
+    def save_screenshot(dest_dir: Optional[str] = None) -> Optional[str]:
+        """Ekran görüntüsü alır ve kaydeder; kaydedilen dosyanın tam yolunu döndürür.
+        Pillow yoksa ya da hata olursa None döner."""
         try:
             from PIL import ImageGrab
         except Exception:
-            return "⚠️ Ekran görüntüsü için Pillow kütüphanesi gerekli (pip install Pillow)."
+            return None
         try:
             img = ImageGrab.grab()
             fname = f"MehburAI_ekran_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-            path = os.path.join(KNOWN_FOLDERS["masaüstü"], fname)
+            target_dir = dest_dir or KNOWN_FOLDERS["masaüstü"]
+            os.makedirs(target_dir, exist_ok=True)
+            path = os.path.join(target_dir, fname)
             img.save(path)
-            return f"📸 Ekran görüntüsü kaydedildi:\n`{path}`"
-        except Exception as e:
-            return f"⚠️ Ekran görüntüsü alınamadı: {e}"
+            return path if os.path.isfile(path) else None
+        except Exception:
+            return None
+
+    @classmethod
+    def take_screenshot(cls) -> str:
+        path = cls.save_screenshot()
+        if not path:
+            return ("⚠️ Ekran görüntüsü alınamadı "
+                    "(Pillow kütüphanesi gerekebilir: pip install Pillow).")
+        return f"📸 Ekran görüntüsü kaydedildi:\n`{path}`"
 
     # ─────────────────────────────────────────
     # GÜÇ KOMUTLARI (gecikmeli + iptal edilebilir)

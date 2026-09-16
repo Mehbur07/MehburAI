@@ -3,9 +3,13 @@
 MehburAI - 🛡️ Güvenlik Modu (Yetkisiz Erişim Alarmı)
 =====================================================
 Kullanıcının ayarlardan belirlediği korumalı yol(lar)ı arka planda izler.
-Korunan bir klasör Dosya Gezgini'nde açıldığında veya korunan bir program
-çalıştırıldığında `on_access(path)` geri çağrısını tetikler; arayüz de bir
-şifre ekranı gösterir.
+Korunan bir klasör Dosya Gezgini'nde açıldığında, korunan bir program
+çalıştırıldığında ya da korunan bir dosya/klasör SİLİNDİĞİNDE
+`on_access(path, event)` geri çağrısını tetikler; arayüz de bir şifre ekranı
+gösterir. (`event`: "access" veya "delete")
+
+Korumalı yolların gizli bir yedeği tutulur; yetkisiz silme tespit edilirse
+(yanlış şifre / ekran kapatıldı) dosya bu yedekten otomatik geri yüklenir.
 
 Şifre yanlış girilir ya da ekran kapatılırsa:
   • Web kameradan bir kare çekilir,
@@ -17,7 +21,9 @@ kişi fotoğrafının çekildiğini bilir. Yalnızca cihaz sahibinin kendi
 bilgisayarında yetkisiz erişimi fark etmesi için tasarlanmıştır.
 """
 
+import hashlib
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -254,6 +260,119 @@ class CameraCapture:
 
 
 # ─────────────────────────────────────────────
+# Korumalı Dosya Yedeği (yetkisiz silmeye karşı geri yükleme)
+# ─────────────────────────────────────────────
+
+class FileBackup:
+    """
+    Korumalı dosya/klasörlerin gizli bir kopyasını `data/security_backups/`
+    altında tutar. Yetkisiz silme tespit edilince orijinal yol bu kopyadan
+    geri yüklenir. (Şifre doğru girilirse yedek `discard()` ile atılır.)
+    """
+
+    DIR = os.path.join(DATA_DIR, "security_backups")
+
+    # Yedek boyut sınırları — bunları aşan yollar için silme yine tespit edilir
+    # (fotoğraf + Telegram + kapatma) ama otomatik geri yükleme yapılmaz.
+    MAX_BYTES = 200 * 1024 * 1024     # 200 MB
+    MAX_FILES = 4000
+
+    @classmethod
+    def _slot(cls, path: str) -> str:
+        norm = os.path.normcase(os.path.abspath(path.strip().strip('"')))
+        tag = hashlib.sha1(norm.encode("utf-8", "replace")).hexdigest()[:16]
+        base = os.path.basename(path.rstrip("\\/")) or "kok"
+        return os.path.join(cls.DIR, f"{tag}__{base}")
+
+    @classmethod
+    def has(cls, path: str) -> bool:
+        slot = cls._slot(path)
+        return os.path.isfile(slot) or os.path.isdir(slot)
+
+    @classmethod
+    def _too_big(cls, path: str) -> bool:
+        """Klasör yedeklenemeyecek kadar büyük mü? (hızlı, erken çıkışlı tarama)"""
+        total, count = 0, 0
+        try:
+            for root, _dirs, files in os.walk(path):
+                for name in files:
+                    count += 1
+                    if count > cls.MAX_FILES:
+                        return True
+                    try:
+                        total += os.path.getsize(os.path.join(root, name))
+                    except OSError:
+                        pass
+                    if total > cls.MAX_BYTES:
+                        return True
+        except Exception:
+            return True
+        return False
+
+    @classmethod
+    def sync(cls, path: str) -> None:
+        """Yol hâlâ varsa ve sınırların altındaysa gizli yedeği tazeler."""
+        try:
+            slot = cls._slot(path)
+            if os.path.isdir(path):
+                if cls._too_big(path):
+                    # Çok büyük — eski yedeği (varsa) at, geri yükleme devre dışı
+                    if os.path.isdir(slot):
+                        shutil.rmtree(slot, ignore_errors=True)
+                    return
+                os.makedirs(cls.DIR, exist_ok=True)
+                if os.path.isdir(slot):
+                    shutil.rmtree(slot, ignore_errors=True)
+                elif os.path.isfile(slot):
+                    os.remove(slot)
+                shutil.copytree(path, slot)
+            elif os.path.isfile(path):
+                try:
+                    if os.path.getsize(path) > cls.MAX_BYTES:
+                        return
+                except OSError:
+                    return
+                os.makedirs(cls.DIR, exist_ok=True)
+                if os.path.isdir(slot):
+                    shutil.rmtree(slot, ignore_errors=True)
+                shutil.copy2(path, slot)
+        except Exception:
+            pass
+
+    @classmethod
+    def restore(cls, path: str) -> bool:
+        """Silinen korumalı yolu yedekten eski yerine koyar."""
+        try:
+            slot = cls._slot(path)
+            if os.path.exists(path):
+                return True
+            if os.path.isdir(slot):
+                shutil.copytree(slot, path)
+                return True
+            if os.path.isfile(slot):
+                parent = os.path.dirname(path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                shutil.copy2(slot, path)
+                return True
+        except Exception:
+            pass
+        return False
+
+    @classmethod
+    def discard(cls, path: str) -> None:
+        """Yedeği sil (silme işlemi yetkiyle onaylandı)."""
+        try:
+            slot = cls._slot(path)
+            if os.path.isdir(slot):
+                shutil.rmtree(slot, ignore_errors=True)
+            elif os.path.isfile(slot):
+                os.remove(slot)
+        except Exception:
+            pass
+
+
+# ─────────────────────────────────────────────
 # Korumalı Yol İzleyici
 # ─────────────────────────────────────────────
 
@@ -266,7 +385,10 @@ class SecurityGuard:
     POLL_INTERVAL = 1.5          # saniye
     DEBOUNCE = 8.0               # ekran kapandıktan sonra kısa süre tekrar sormaz (sn)
 
-    def __init__(self, on_access: Callable[[str], None]):
+    BACKUP_EVERY = 30.0         # korumalı yol yedeği en fazla bu sıklıkla tazelenir (sn)
+
+    def __init__(self, on_access: Callable[..., None]):
+        # on_access(path) veya on_access(path, event) — event: "access" | "delete"
         self._on_access = on_access
         self._thread: Optional[threading.Thread] = None
         self._running = False
@@ -278,6 +400,26 @@ class SecurityGuard:
         self._pending = set()       # şifre ekranı açık olanlar
         self._cooldown = {}         # path -> ts (kısa debounce)
         self._primed = False        # ilk tarama mevcut durumu sessizce kaydeder
+        # Silme (delete) tespiti
+        self._exists_prev = {}      # path -> geçen taramada var mıydı
+        self._del_fired = set()     # silme ekranı tetiklenmiş hedefler (yol geri gelince temizlenir)
+        self._backup_at = {}        # path -> son yedekleme ts
+
+    @staticmethod
+    def _reappears(target: str, tries: int = 3, gap: float = 0.4) -> bool:
+        """Kısa aralıklarla tekrar bakar; yol geri gelirse True (yanlış alarm)."""
+        for _ in range(tries):
+            time.sleep(gap)
+            if os.path.exists(target):
+                return True
+        return False
+
+    def _notify(self, path: str, event: str) -> None:
+        """on_access geri çağrısını hem tek hem çift argümanlı imzayla dener."""
+        try:
+            self._on_access(path, event)
+        except TypeError:
+            self._on_access(path)
 
     # ── yaşam döngüsü ──────────────────────────
     def start(self) -> None:
@@ -289,6 +431,8 @@ class SecurityGuard:
             self._run_prev.clear()
             self._fg_prev = None
             self._passed.clear()
+            self._exists_prev.clear()
+            self._del_fired.clear()
         self._thread = threading.Thread(target=self._loop, name="MehburAI-SecurityGuard", daemon=True)
         self._thread.start()
 
@@ -405,6 +549,8 @@ class SecurityGuard:
                     self._primed = False
                     self._run_prev.clear()
                     self._fg_prev = None
+                    self._exists_prev.clear()
+                    self._del_fired.clear()
                 time.sleep(2.0)
                 continue
             try:
@@ -423,7 +569,60 @@ class SecurityGuard:
                 self._run_prev.clear()
                 self._fg_prev = None
                 self._passed.clear()
+                self._exists_prev.clear()
+                self._del_fired.clear()
             return
+
+        # ── Korumalı yol SİLME tespiti (Explorer taramasından bağımsız) ──
+        del_to_fire = []
+        to_backup = []
+        with self._lock:
+            now = time.time()
+            watch_set = set(watch)
+            for target in list(self._exists_prev):
+                if target not in watch_set:
+                    self._exists_prev.pop(target, None)
+                    self._del_fired.discard(target)
+                    self._backup_at.pop(target, None)
+
+            for target in watch:
+                exists = os.path.exists(target)
+                had = self._exists_prev.get(target, exists)
+                self._exists_prev[target] = exists
+
+                if exists:
+                    self._del_fired.discard(target)
+                    # Gizli yedeği periyodik tazele (yalnızca doğrulama ekranı açık değilken).
+                    # Priming turunda da alınır — mümkün olan en erken yedek.
+                    if (target not in self._pending
+                            and now - self._backup_at.get(target, 0) > self.BACKUP_EVERY):
+                        self._backup_at[target] = now
+                        to_backup.append(target)
+                elif (had and self._primed and target not in self._del_fired
+                        and now >= self._cooldown.get(target, 0)
+                        and os.path.isdir(os.path.dirname(target) or target)):
+                    # Vardı, artık yok (ama üst klasör duruyor) → silinmiş / taşınmış
+                    # Üst klasör de yoksa: sürücü çıkarılmış olabilir, alarm verme.
+                    self._del_fired.add(target)
+                    self._cooldown[target] = now + self.DEBOUNCE
+                    del_to_fire.append(target)
+
+        # Yedekleme + geri çağrı kilit dışında (büyük klasörler UI'ı bloklamasın)
+        for target in to_backup:
+            FileBackup.sync(target)
+
+        for target in del_to_fire:
+            # Yanlış pozitifi ele: bazı editörler kaydederken dosyayı anlık siler/yeniden
+            # oluşturur. Bildirmeden önce kısa aralıklarla birkaç kez doğrula.
+            if self._reappears(target):
+                with self._lock:
+                    self._del_fired.discard(target)
+                continue
+            try:
+                self._notify(target, "delete")
+            except Exception:
+                with self._lock:
+                    self._del_fired.discard(target)
 
         raw_explorer, raw_exes = self._scan()
         explorer = [self._norm(p) for p in raw_explorer]
@@ -469,7 +668,7 @@ class SecurityGuard:
 
         for target in to_fire:
             try:
-                self._on_access(target)
+                self._notify(target, "access")
             except Exception:
                 with self._lock:
                     self._pending.discard(target)
@@ -479,28 +678,36 @@ class SecurityGuard:
 # Şifre yanlış → alarm akışı (arayüzden çağrılır)
 # ─────────────────────────────────────────────
 
-def trigger_intruder_alert(reason: str = "Yanlış şifre", close_path: Optional[str] = None) -> dict:
+def trigger_intruder_alert(reason: str = "Yanlış şifre", close_path: Optional[str] = None,
+                           restore_path: Optional[str] = None) -> dict:
     """
     Yetkisiz erişim akışı (arayüz bunu bir arka plan thread'inde çağırmalı):
       1. `close_path` verilmişse açılan hedefi kapatır (program sonlandır / klasör penceresi kapat)
-      2. Web kameradan fotoğraf çeker
-      3. Cihaz sahibinin Telegram'ına gönderir
+      2. `restore_path` verilmişse silinen korumalı yolu gizli yedekten geri yükler
+      3. Web kameradan fotoğraf çeker
+      4. Cihaz sahibinin Telegram'ına gönderir
 
-    Returns: {"photo": path|None, "telegram": bool, "closed": bool, "detail": str}
+    Returns: {"photo": path|None, "telegram": bool, "closed": bool, "restored": bool, "detail": str}
     """
     closed = False
     if close_path:
         closed = close_target(close_path)
+
+    restored = False
+    if restore_path:
+        restored = FileBackup.restore(restore_path)
 
     when = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
     host = os.environ.get("COMPUTERNAME", "bilinmeyen-cihaz")
     user = os.environ.get("USERNAME", "?")
 
     photo = CameraCapture.snapshot()
+    _hit = close_path or restore_path
     caption = (
         f"🛡️ MehburAI Güvenlik Uyarısı\n"
         f"Sebep: {reason}\n"
-        + (f"Kapatılan: {os.path.basename(close_path.rstrip(chr(92)+chr(47)))}\n" if close_path else "")
+        + (f"Hedef: {os.path.basename(_hit.rstrip(chr(92)+chr(47)))}\n" if _hit else "")
+        + (f"Geri yükleme: {'başarılı' if restored else 'başarısız'}\n" if restore_path else "")
         + f"Cihaz: {host} / kullanıcı: {user}\n"
         f"Zaman: {when}"
     )
@@ -517,9 +724,12 @@ def trigger_intruder_alert(reason: str = "Yanlış şifre", close_path: Optional
     detail = []
     if close_path:
         detail.append("hedef kapatıldı" if closed else "hedef kapatılamadı")
+    if restore_path:
+        detail.append("dosya geri yüklendi" if restored else "dosya geri yüklenemedi")
     detail.append("fotoğraf çekildi" if photo else "kamera alınamadı")
     detail.append("Telegram'a gönderildi" if tg_ok else "Telegram gönderilemedi")
-    return {"photo": photo, "telegram": tg_ok, "closed": closed, "detail": ", ".join(detail)}
+    return {"photo": photo, "telegram": tg_ok, "closed": closed, "restored": restored,
+            "detail": ", ".join(detail)}
 
 
 # ─────────────────────────────────────────────

@@ -8,17 +8,71 @@ ve API anahtarı yönetim fonksiyonları bu modülde tanımlanır.
 
 import os
 import json
+import sys
+
+# ─────────────────────────────────────────────
+# Uygulama Sürümü
+# ─────────────────────────────────────────────
+# Kullanıcı Claude'a MehburAI'a yeni bir özellik/değişiklik ekletirken bu sürüm
+# İKİ KATMANLI ilerler:
+#   • BÜYÜK ekleme (yeni özellik/sekme/yetenek)      → ORTA basamak artar: 1.1 → 1.2 → ... → 1.9 → 2.0 (2.1, ...)
+#   • KÜÇÜK ekleme (ince ayar, küçük düzeltme/iyileştirme) → SON basamak artar: 1.2 → 1.2.1 → 1.2.2 → ...
+#     (bir sonraki BÜYÜK eklemede üçüncü basamak sıfırlanıp ORTA basamak artar, örn. 1.2.3 → 1.3)
+# (Elle güncellenir — kod her eklemede otomatik saymaz.)
+APP_VERSION = "1.2"
 
 # ─────────────────────────────────────────────
 # Proje Yolları
 # ─────────────────────────────────────────────
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# PyInstaller ile .exe'ye paketlendiğinde (`sys.frozen`) kod, geçici bir açılış
+# klasörüne çıkarılır — data/assets ORAYA değil, .exe'nin YANINDAKİ klasöre
+# yazılmalı (yoksa her açılışta ayarlar/hafıza sıfırlanır). Geliştirme ortamında
+# (sys.frozen yok) eskisi gibi bu dosyanın bulunduğu klasör kullanılır.
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 DB_PATH = os.path.join(DATA_DIR, "mehbur_memory.db")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 
-# data/ klasörünün var olduğundan emin ol
+# assets/ — uygulama logosu ve ikonları
+ASSETS_DIR = os.path.join(BASE_DIR, "assets")
+LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")   # ana logo (kullanıcı buraya koyar)
+ICON_PATH = os.path.join(ASSETS_DIR, "logo.ico")   # logo.png'den otomatik üretilir
+
+# Gerekli klasörlerin var olduğundan emin ol
 os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(ASSETS_DIR, exist_ok=True)
+
+
+def get_logo_path():
+    """Uygulama logosu (assets/logo.png) varsa yolunu, yoksa None döndürür."""
+    return LOGO_PATH if os.path.isfile(LOGO_PATH) else None
+
+
+def ensure_app_icon():
+    """
+    assets/logo.png'den Windows pencere ikonu (.ico) üretir — yoksa ya da
+    logo.png güncellenmişse yeniden oluşturur. Üretilen .ico yolunu döndürür;
+    logo.png yoksa veya Pillow kurulu değilse None döner.
+    """
+    if not os.path.isfile(LOGO_PATH):
+        return ICON_PATH if os.path.isfile(ICON_PATH) else None
+    try:
+        stale = (
+            not os.path.isfile(ICON_PATH)
+            or os.path.getmtime(ICON_PATH) < os.path.getmtime(LOGO_PATH)
+        )
+        if stale:
+            from PIL import Image
+            img = Image.open(LOGO_PATH).convert("RGBA")
+            side = min(img.size)
+            sizes = [(s, s) for s in (16, 24, 32, 48, 64, 128, 256) if s <= side]
+            img.save(ICON_PATH, format="ICO", sizes=sizes or [(min(side, 64),) * 2])
+    except Exception:
+        return ICON_PATH if os.path.isfile(ICON_PATH) else None
+    return ICON_PATH
 
 # ─────────────────────────────────────────────
 # Neon Cyan & Siyah Tema Renkleri
@@ -43,6 +97,13 @@ class Theme:
     STATUS_ONLINE = "#00FF88"    # Yeşil — İnternet bağlı
     STATUS_OFFLINE = "#FF3366"   # Kırmızı — İnternet yok
     STATUS_WARNING = "#FFB800"   # Sarı — Uyarı
+
+    # Tehlike / silme (neon kırmızı)
+    NEON_RED = "#FF2A4D"         # "Bu Sohbeti Sil" vb.
+    NEON_RED_HOVER = "#7A1526"
+
+    # Yanıt yazma animasyonu (harf harf) — harf başına gecikme (ms); 0 = anında
+    TYPEWRITER_MS = 14
 
     # Metin renkleri
     TEXT_PRIMARY = "#E8E8EC"     # Ana metin
@@ -109,6 +170,11 @@ class GeminiConfig:
     MAX_OUTPUT_TOKENS = 2048
     TEMPERATURE = 0.7
 
+    # 🎨 Görsel üretim/düzenleme (metinden görsel + var olan görseli düzenleme).
+    # Hesapta hangisi aktifse sırayla denenir; hiçbiri yoksa "Görsel Stüdyosu"
+    # nazikçe devre dışı kalır.
+    IMAGE_MODELS = ["gemini-2.5-flash-image", "gemini-2.0-flash-preview-image-generation"]
+
     # REST akış (SSE) uç noktası ayarları
     API_BASE = "https://generativelanguage.googleapis.com/v1beta"
     CONNECT_TIMEOUT = 10.0
@@ -168,6 +234,13 @@ GREETING_RESPONSES = {
 # Küfür & Hakaret Filtresi Yanıtı
 # ─────────────────────────────────────────────
 PROFANITY_RESPONSE = "Sana böyle laflar yakışıyor mu?"
+
+# Misilleme modu açıkken (varsayılan) MehburAI küfrü aynen iade eder:
+# "Bu laflar bana yakışıyorsa sana da yakışır" — küfür edene "asıl sen / asıl ben"
+# kalıbıyla karşılık verir. Kapatılırsa yukarıdaki nazik uyarıya döner.
+PROFANITY_DEFAULTS = {
+    "profanity_comeback_enabled": True,
+}
 
 
 # ─────────────────────────────────────────────
@@ -287,18 +360,26 @@ def remove_api_key() -> None:
 # "fotoğrafınız çekildi ve cihaz sahibine iletildi" uyarısı gösterilir.
 # Bu ayarlar yalnızca yerel `data/config.json` içinde tutulur (repoya girmez).
 
+# ─── Cihaz sahibinin Telegram ID'si — KODDA SABİT ───
+# Bot yalnızca bu ID'ye sahip kişiden komut alır. Ayarlar dosyası (config.json)
+# bozulsa/silinse/değiştirilse bile bu ID her zaman geçerlidir; başkası bu ID'yi
+# ele geçirmeden botu kullanamaz. Sahibi değiştirmek isterse burayı düzenler.
+OWNER_TELEGRAM_ID = "6865337684"
+
 SECURITY_DEFAULTS = {
     "security_enabled": False,
     "security_watch_paths": [],       # ["C:\\Users\\...\\Gizli", "D:\\bir.exe"]
     "security_password_hash": "",     # sha256(salt + parola)
     "security_password_salt": "",
     "telegram_bot_token": "",         # BotFather'dan alınır ("MehburAI (Telegram)" botu)
-    "telegram_chat_id": "",           # cihaz sahibinin sohbet ID'si
+    "telegram_chat_id": OWNER_TELEGRAM_ID,  # cihaz sahibinin sohbet ID'si (kodda sabit)
+    "telegram_remote_enabled": False, # bota yazarak MehburAI'ı uzaktan yönetme
 }
 
 
 def get_security_config() -> dict:
     """Kayıtlı güvenlik modu ayarlarını (varsayılanlarla birleştirilmiş) döndürür."""
+    import re
     config = load_config()
     result = dict(SECURITY_DEFAULTS)
     for key in SECURITY_DEFAULTS:
@@ -306,7 +387,17 @@ def get_security_config() -> dict:
             result[key] = config[key]
     if not isinstance(result["security_watch_paths"], list):
         result["security_watch_paths"] = []
+    # Chat ID her zaman geçerli bir Telegram ID olmalı; değilse koddaki sabite dön
+    if not re.fullmatch(r"-?\d{5,}", str(result.get("telegram_chat_id", "")).strip()):
+        result["telegram_chat_id"] = OWNER_TELEGRAM_ID
     return result
+
+
+def is_valid_bot_token(token: str) -> bool:
+    """Telegram bot token biçimini doğrular: '<rakamlar>:<en az 30 karakter>'.
+    (Maskeli/bozuk değerlerin — örn. '••••' — kaydedilmesini engellemek için.)"""
+    import re
+    return bool(re.fullmatch(r"\d{5,}:[A-Za-z0-9_-]{30,}", (token or "").strip()))
 
 
 def update_security_config(**changes) -> None:
@@ -315,7 +406,78 @@ def update_security_config(**changes) -> None:
     for key, value in changes.items():
         if key not in SECURITY_DEFAULTS or key.startswith("security_password"):
             continue
+        # Bot token: yalnızca GEÇERLİ biçimde bir token yazılabilir.
+        # Boş / maskeli / bozuk değerler yok sayılır (mevcut token korunur) —
+        # böylece maskeli alanın kapanışta gerçek token'ı ezmesi engellenir.
+        if key == "telegram_bot_token":
+            if not is_valid_bot_token(value):
+                continue
+            value = value.strip()
         config[key] = value
+    save_config(config)
+
+
+# ─────────────────────────────────────────────
+# 🎙️ Sesli Sohbet (yalnız bu bilgisayarda)
+# ─────────────────────────────────────────────
+# "Mehbur" / "Hey Mehbur" uyandırma sözcüğü + doğal Türkçe seslendirme.
+# Yalnızca yerel makinede çalışır; Telegram tarafı sesli mesajı yazıya çevirir.
+
+VOICE_DEFAULTS = {
+    "voice_enabled": False,               # yerel sesli asistan (mikrofonu dinler)
+    "voice_tts_voice": "tr-TR-EmelNeural",  # tr-TR-EmelNeural (kadın) / tr-TR-AhmetNeural (erkek)
+    "telegram_voice_enabled": True,       # Telegram'daki sesli mesajları yazıya çevirip yanıtla
+    "voice_overlay_enabled": True,        # uyandırınca JARVIS tarzı tam ekran nokta küresi
+}
+
+_VOICE_CHOICES = {"tr-TR-EmelNeural", "tr-TR-AhmetNeural"}
+
+
+def get_voice_config() -> dict:
+    """Kayıtlı sesli sohbet ayarlarını (varsayılanlarla) döndürür."""
+    config = load_config()
+    result = dict(VOICE_DEFAULTS)
+    for key in VOICE_DEFAULTS:
+        if key in config and config[key] not in (None, ""):
+            result[key] = config[key]
+    if result["voice_tts_voice"] not in _VOICE_CHOICES:
+        result["voice_tts_voice"] = VOICE_DEFAULTS["voice_tts_voice"]
+    return result
+
+
+def update_voice_config(**changes) -> None:
+    """Verilen sesli sohbet ayarı anahtarlarını kaydeder."""
+    config = load_config()
+    for key, value in changes.items():
+        if key not in VOICE_DEFAULTS:
+            continue
+        if key == "voice_tts_voice" and value not in _VOICE_CHOICES:
+            continue
+        config[key] = value
+    save_config(config)
+
+
+# ─────────────────────────────────────────────
+# 🤬 Küfüre Misilleme Ayarı
+# ─────────────────────────────────────────────
+
+def get_profanity_config() -> dict:
+    """Küfüre misilleme ayarını (varsayılanlarla birleştirilmiş) döndürür."""
+    config = load_config()
+    result = dict(PROFANITY_DEFAULTS)
+    for key in PROFANITY_DEFAULTS:
+        if key in config and config[key] is not None:
+            result[key] = bool(config[key])
+    return result
+
+
+def update_profanity_config(**changes) -> None:
+    """Verilen küfür misilleme ayarı anahtarlarını kaydeder."""
+    config = load_config()
+    for key, value in changes.items():
+        if key not in PROFANITY_DEFAULTS:
+            continue
+        config[key] = bool(value)
     save_config(config)
 
 

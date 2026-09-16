@@ -15,33 +15,62 @@ Neon Cyan & Derin Siyah temalı CustomTkinter masaüstü arayüzü.
   • Mesaj balonları, kaynak rozetleri ve dinamik sayaçlar
 """
 
+import math
 import os
 import queue
 import sys
 import threading
 import tkinter as tk
 from datetime import datetime
+from tkinter import filedialog, messagebox
 from typing import Optional
 
 import customtkinter as ctk
 
 from ai_engine import AIEngine
 from config import (
+    APP_VERSION,
+    DATA_DIR,
     Theme,
+    ensure_app_icon,
     get_api_key,
+    get_logo_path,
     get_security_config,
+    get_voice_config,
     has_security_password,
+    is_valid_bot_token,
     load_config,
     remove_api_key,
     set_api_key,
     set_security_password,
     update_security_config,
+    update_voice_config,
     verify_security_password,
 )
 from memory_engine import MemoryEngine
 from network_manager import NetworkMonitor
-from security_guard import SecurityGuard, TelegramNotifier, trigger_intruder_alert
+from security_guard import (
+    FileBackup,
+    SecurityGuard,
+    TelegramNotifier,
+    trigger_intruder_alert,
+)
+from telegram_bot import TelegramControlBot
 from background import SingleInstance, is_autostart_enabled, set_autostart
+
+try:
+    from voice_engine import (
+        SpeechToText,
+        TextToSpeech,
+        VoiceAssistant,
+        missing_dependencies as voice_missing_deps,
+        voice_dependencies_ok,
+    )
+except Exception:  # ses bağımlılıkları hiç kurulu değilse uygulama yine açılsın
+    VoiceAssistant = None
+    SpeechToText = TextToSpeech = None
+    voice_dependencies_ok = lambda: False          # noqa: E731
+    voice_missing_deps = lambda: ["voice_engine"]  # noqa: E731
 
 
 # CustomTkinter Genel Tema Ayarları
@@ -60,9 +89,15 @@ class MehburApp(ctk.CTk):
         self.geometry(f"{Theme.WINDOW_WIDTH}x{Theme.WINDOW_HEIGHT}")
         self.minsize(Theme.WINDOW_MIN_WIDTH, Theme.WINDOW_MIN_HEIGHT)
         self.configure(fg_color=Theme.BG_DARK)
+        self._apply_window_icon()
 
         # Çekirdek Servisler
         self.memory = MemoryEngine()
+        self.active_conv_id = self.memory.ensure_conversation()
+        self._type_after_id = None
+        self.attached_file_path: Optional[str] = None
+        self.attached_file_kind: Optional[str] = None   # 'text' | 'image'
+        self._chat_images: list = []   # CTkImage referanslarını canlı tutar (GC engeli)
         self.network = NetworkMonitor(on_status_change=self._on_network_status_change)
         self.ai = AIEngine(memory_engine=self.memory, network_monitor=self.network)
 
@@ -76,7 +111,28 @@ class MehburApp(ctk.CTk):
         self._quitting = False
 
         # 🛡️ Güvenlik Modu izleyicisi
-        self.security_guard = SecurityGuard(on_access=self._security_queue.put)
+        self.security_guard = SecurityGuard(
+            on_access=lambda path, event="access": self._security_queue.put((path, event))
+        )
+
+        # 🤖 Telegram'dan uzaktan kontrol (bota yazarak MehburAI'ı yönetme)
+        self._ai_lock = threading.Lock()
+        self.telegram_bot = TelegramControlBot(
+            query_handler=self._telegram_query,
+            security_status=self._security_status_text,
+            security_toggle=self._remote_toggle_security,
+        )
+
+        # 🎙️ Sesli Sohbet (yalnız bu bilgisayarda — uyandırma sözcüğü + doğal ses)
+        self.voice_assistant = (
+            VoiceAssistant(
+                on_command=self._voice_command,
+                on_state=lambda s, t="": self._ui_call(lambda: self._on_voice_state(s, t)),
+            )
+            if VoiceAssistant is not None else None
+        )
+        self._voice_state = "kapalı"
+        self.jarvis = None   # JARVIS overlay — ilk uyandırmada oluşturulur
 
         # Tek örnek kilidi — ikinci açılış mevcut pencereyi öne getirir
         self._singleton = singleton or SingleInstance()
@@ -95,11 +151,22 @@ class MehburApp(ctk.CTk):
             self.security_guard.start()
             self._setup_tray()
 
+        # Telegram'dan uzaktan kontrol etkinse bot dinlemesini başlat
+        if get_security_config().get("telegram_remote_enabled"):
+            if self.telegram_bot.start():
+                self._setup_tray()
+
+        # Sesli sohbet etkinse mikrofon dinlemesini başlat
+        if get_voice_config().get("voice_enabled") and self.voice_assistant is not None:
+            self.after(1500, self._start_voice_async)
+        self._update_mic_button()
+
         # Güvenlik kuyruğunu düzenli aralıkla ana thread'de kontrol et
         self.after(700, self._poll_security_queue)
 
-        # İlk Başlangıç Mesajı
-        self._send_welcome_message()
+        # Sohbet listesi + aktif sohbetin geçmişi
+        self._refresh_conversation_list()
+        self._load_active_conversation()
 
         # Pencere Kapanış Olayı
         # Bazı Windows kurulumlarında kısayoldan açılışın hemen ardından, pencere
@@ -155,6 +222,23 @@ class MehburApp(ctk.CTk):
         # Varsayılan olarak Sohbet panelini göster
         self.switch_tab("chat")
 
+    def _apply_window_icon(self):
+        """Pencere / görev çubuğu ikonunu assets/logo.png'den uygular (varsa)."""
+        try:
+            ico = ensure_app_icon()
+            if ico:
+                self.iconbitmap(ico)
+        except Exception:
+            pass
+        try:
+            logo = get_logo_path()
+            if logo:
+                from PIL import Image, ImageTk
+                self._win_icon_img = ImageTk.PhotoImage(Image.open(logo).convert("RGBA"))
+                self.iconphoto(True, self._win_icon_img)
+        except Exception:
+            pass
+
     def _build_header(self):
         """Üst kısımdaki Neon logo, sekmeler ve durum rozetleri."""
         self.header_frame = ctk.CTkFrame(
@@ -173,6 +257,19 @@ class MehburApp(ctk.CTk):
         logo_frame = ctk.CTkFrame(self.header_frame, fg_color="transparent")
         logo_frame.grid(row=0, column=0, padx=(20, 10), pady=12, sticky="w")
 
+        _logo_path = get_logo_path()
+        if _logo_path:
+            try:
+                from PIL import Image
+                self._header_logo_img = ctk.CTkImage(
+                    Image.open(_logo_path), size=(38, 38)
+                )
+                ctk.CTkLabel(logo_frame, image=self._header_logo_img, text="").pack(
+                    side="left", padx=(0, 10)
+                )
+            except Exception:
+                pass
+
         title_lbl = ctk.CTkLabel(
             logo_frame,
             text="⚡ MEHBUR AI",
@@ -183,7 +280,7 @@ class MehburApp(ctk.CTk):
 
         subtitle_lbl = ctk.CTkLabel(
             logo_frame,
-            text="v1.0",
+            text=f"v{APP_VERSION}",
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11, weight="bold"),
             text_color=Theme.TEXT_SECONDARY,
         )
@@ -324,13 +421,23 @@ class MehburApp(ctk.CTk):
     # ─────────────────────────────────────────
 
     def _build_chat_panel(self):
-        """Sohbet mesajlaşma alanı ve giriş kutusu."""
+        """Sol: Sohbetler kenar çubuğu · Sağ: mesajlaşma alanı ve giriş kutusu."""
         self.panel_chat.grid_rowconfigure(0, weight=1)
-        self.panel_chat.grid_columnconfigure(0, weight=1)
+        self.panel_chat.grid_columnconfigure(0, weight=0, minsize=196)
+        self.panel_chat.grid_columnconfigure(1, weight=1)
+
+        # ── SOL: Sohbetler kenar çubuğu ──
+        self._build_conversation_sidebar()
+
+        # ── SAĞ: Sohbet alanı ──
+        chat_area = ctk.CTkFrame(self.panel_chat, fg_color="transparent")
+        chat_area.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
+        chat_area.grid_rowconfigure(0, weight=1)
+        chat_area.grid_columnconfigure(0, weight=1)
 
         # Mesaj Geçmişi (Scrollable Frame)
         self.chat_history_box = ctk.CTkScrollableFrame(
-            self.panel_chat,
+            chat_area,
             fg_color=Theme.BG_DARKEST,
             corner_radius=10,
             border_width=1,
@@ -339,7 +446,7 @@ class MehburApp(ctk.CTk):
         self.chat_history_box.grid(row=0, column=0, sticky="nsew", padx=0, pady=(0, 10))
 
         # Alt Giriş Paneli
-        input_container = ctk.CTkFrame(self.panel_chat, fg_color="transparent")
+        input_container = ctk.CTkFrame(chat_area, fg_color="transparent")
         input_container.grid(row=1, column=0, sticky="ew", padx=4, pady=0)
         input_container.grid_columnconfigure(0, weight=1)
 
@@ -359,6 +466,40 @@ class MehburApp(ctk.CTk):
         self.query_entry.grid(row=0, column=0, sticky="ew", padx=(0, 10))
         self.query_entry.bind("<Return>", lambda event: self._on_send_clicked())
 
+        # ➕ Dosya Ekle Butonu — bir .txt/.md/.csv/... dosyasını seçip sohbete katar
+        self.attach_btn = ctk.CTkButton(
+            input_container,
+            text="➕",
+            font=ctk.CTkFont(size=17),
+            fg_color=Theme.BG_CARD,
+            text_color=Theme.CYAN_PRIMARY,
+            hover_color=Theme.BG_CARD_HOVER,
+            border_width=2,
+            border_color=Theme.CYAN_DARK,
+            width=48,
+            height=48,
+            corner_radius=10,
+            command=self._pick_attachment,
+        )
+        self.attach_btn.grid(row=0, column=1, sticky="e", padx=(0, 10))
+
+        # 🎤 Mikrofon Butonu — sesli sohbete geç (Ayarlar'daki anahtarla senkron)
+        self.mic_btn = ctk.CTkButton(
+            input_container,
+            text="🎤",
+            font=ctk.CTkFont(size=17),
+            fg_color=Theme.BG_CARD,
+            text_color=Theme.TEXT_DARK,
+            hover_color=Theme.BG_CARD_HOVER,
+            border_width=2,
+            border_color=Theme.TEXT_DARK,
+            width=48,
+            height=48,
+            corner_radius=10,
+            command=self._toggle_voice_from_chat,
+        )
+        self.mic_btn.grid(row=0, column=2, sticky="e", padx=(0, 10))
+
         # Gönder Butonu (Neon Cyan)
         self.send_btn = ctk.CTkButton(
             input_container,
@@ -372,10 +513,26 @@ class MehburApp(ctk.CTk):
             corner_radius=10,
             command=self._on_send_clicked,
         )
-        self.send_btn.grid(row=0, column=1, sticky="e")
+        self.send_btn.grid(row=0, column=3, sticky="e")
+
+        # 📎 Eklenen dosya rozeti — dosya seçilince görünür, tıklayınca kaldırılır
+        self.attachment_lbl = ctk.CTkLabel(
+            input_container,
+            text="",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11, weight="bold"),
+            text_color=Theme.CYAN_PRIMARY,
+            fg_color=Theme.BG_CARD,
+            corner_radius=6,
+            anchor="w",
+            cursor="hand2",
+            height=24,
+        )
+        self.attachment_lbl.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        self.attachment_lbl.bind("<Button-1>", lambda e: self._clear_attachment())
+        self.attachment_lbl.grid_remove()
 
         # Hızlı Yardım & Ayarlar Butonları
-        quick_frame = ctk.CTkFrame(self.panel_chat, fg_color="transparent", height=30)
+        quick_frame = ctk.CTkFrame(chat_area, fg_color="transparent", height=30)
         quick_frame.grid(row=2, column=0, sticky="ew", padx=4, pady=(6, 0))
 
         btn_sample1 = ctk.CTkButton(
@@ -416,7 +573,7 @@ class MehburApp(ctk.CTk):
 
         btn_clear_chat = ctk.CTkButton(
             quick_frame,
-            text="🗑️ Sohbeti Temizle",
+            text="🧹 Mesajları Temizle",
             font=ctk.CTkFont(size=11),
             fg_color=Theme.BG_CARD,
             text_color=Theme.TEXT_SECONDARY,
@@ -438,11 +595,234 @@ class MehburApp(ctk.CTk):
         )
         btn_quit.pack(side="right", padx=(0, 6))
 
+    # ─────────────────────────────────────────
+    # Sohbetler Kenar Çubuğu (Conversation Sidebar)
+    # ─────────────────────────────────────────
+
+    def _build_conversation_sidebar(self):
+        """Sol tarafta sohbet listesi + 'Yeni Sohbet' ve neon kırmızı 'Bu Sohbeti Sil'."""
+        side = ctk.CTkFrame(
+            self.panel_chat,
+            fg_color=Theme.BG_CARD,
+            corner_radius=10,
+            border_width=1,
+            border_color=Theme.BORDER_DEFAULT,
+        )
+        side.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
+        side.grid_rowconfigure(2, weight=1)
+        side.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            side,
+            text="💬 Sohbetler",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold"),
+            text_color=Theme.TEXT_SECONDARY,
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 4))
+
+        ctk.CTkButton(
+            side,
+            text="➕  Yeni Sohbet",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold"),
+            fg_color=Theme.CYAN_PRIMARY,
+            text_color=Theme.BG_DARKEST,
+            hover_color=Theme.CYAN_GLOW,
+            height=32,
+            corner_radius=8,
+            command=self._new_conversation,
+        ).grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
+
+        self.conv_list_box = ctk.CTkScrollableFrame(side, fg_color="transparent")
+        self.conv_list_box.grid(row=2, column=0, sticky="nsew", padx=4, pady=2)
+        self.conv_list_box.grid_columnconfigure(0, weight=1)
+
+        self.btn_delete_conv = ctk.CTkButton(
+            side,
+            text="🗑  Bu Sohbeti Sil",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11, weight="bold"),
+            fg_color="transparent",
+            border_width=1,
+            border_color=Theme.NEON_RED,
+            text_color=Theme.NEON_RED,
+            hover_color=Theme.NEON_RED_HOVER,
+            height=30,
+            corner_radius=8,
+            command=self._delete_active_conversation,
+        )
+        self.btn_delete_conv.grid(row=3, column=0, sticky="ew", padx=8, pady=(6, 10))
+
+    def _refresh_conversation_list(self):
+        """Sohbet listesini yeniden çizer; aktif olan vurgulanır, ruh hali ikonlanır."""
+        if not hasattr(self, "conv_list_box"):
+            return
+        for w in self.conv_list_box.winfo_children():
+            w.destroy()
+
+        mood_icon = {"normal": "", "provoked": "  ⚠️", "rude": "  😠"}
+        for conv in self.memory.list_conversations():
+            cid = conv["id"]
+            active = (cid == self.active_conv_id)
+            title = (conv.get("title") or "Yeni Sohbet").strip()[:20]
+            label = f"{title}{mood_icon.get(conv.get('mood', 'normal'), '')}"
+            ctk.CTkButton(
+                self.conv_list_box,
+                text=label,
+                anchor="w",
+                font=ctk.CTkFont(
+                    family=Theme.FONT_FAMILY, size=12,
+                    weight="bold" if active else "normal",
+                ),
+                fg_color=Theme.CYAN_DARK if active else "transparent",
+                text_color=Theme.CYAN_PRIMARY if active else Theme.TEXT_SECONDARY,
+                hover_color=Theme.BG_CARD_HOVER,
+                height=30,
+                corner_radius=6,
+                command=lambda c=cid: self._select_conversation(c),
+            ).grid(sticky="ew", pady=2, padx=2)
+
+    def _new_conversation(self):
+        """Yeni boş bir sohbet açar ve ona geçer."""
+        if self._is_processing:
+            return
+        self.active_conv_id = self.memory.create_conversation()
+        self._refresh_conversation_list()
+        self._load_active_conversation()
+        self.switch_tab("chat")
+        self.query_entry.focus()
+
+    def _select_conversation(self, conv_id: int):
+        """Listeden bir sohbete geçer, geçmişini yükler."""
+        if self._is_processing or conv_id == self.active_conv_id:
+            return
+        self.active_conv_id = conv_id
+        self._refresh_conversation_list()
+        self._load_active_conversation()
+
+    def _delete_active_conversation(self):
+        """Aktif sohbeti ve tüm mesajlarını kalıcı olarak siler (onaylı)."""
+        if self._is_processing:
+            return
+        if not messagebox.askyesno(
+            "Sohbeti Sil",
+            "Bu sohbet ve içindeki tüm mesajlar kalıcı olarak silinsin mi?",
+            icon="warning",
+            parent=self,
+        ):
+            return
+        self.memory.delete_conversation(self.active_conv_id)
+        self.active_conv_id = self.memory.ensure_conversation()
+        self._refresh_conversation_list()
+        self._load_active_conversation()
+
+    def _load_active_conversation(self):
+        """Aktif sohbetin mesaj geçmişini sohbet alanına yükler (animasyonsuz)."""
+        self._cancel_typewriter()
+        for widget in self.chat_history_box.winfo_children():
+            widget.destroy()
+
+        messages = self.memory.get_conversation_messages(self.active_conv_id)
+        if not messages:
+            self._send_welcome_message()
+            return
+
+        for m in messages:
+            role = m["role"]
+            text = m["message"]
+            if role == "user" and text == "[küfür filtresi]":
+                text = "🚫 (küfürlü mesaj)"
+            self._add_message_bubble(
+                role=role,
+                message=text,
+                source=(m.get("source") if role == "mehbur" else None),
+                is_online=bool(m.get("is_online", 1)),
+                animate=False,
+            )
+        self.after(60, lambda: self.chat_history_box._parent_canvas.yview_moveto(1.0))
+
     def _insert_quick_query(self, text: str):
         """Hızlı örnek soruyu giriş kutusuna yazar."""
         self.query_entry.delete(0, "end")
         self.query_entry.insert(0, text)
         self.query_entry.focus()
+
+    # ─────────────────────────────────────────
+    # ➕ Dosya Ekleme — bir metin dosyasını (içeriği hakkında soru sor) veya bir
+    #    fotoğrafı (🎨 "bunu daha kaliteli yap" gibi düzenleme istekleri için) katar
+    # ─────────────────────────────────────────
+
+    _ATTACH_MAX_BYTES = 5 * 1024 * 1024      # 5 MB üstü dosya kabul edilmez
+    _ATTACH_MAX_CHARS = 40_000               # Gemini'ye gönderilen metin içeriği bu kadarla sınırlı
+    _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
+
+    @staticmethod
+    def _human_file_size(num_bytes: int) -> str:
+        n = float(num_bytes)
+        for unit in ("B", "KB", "MB", "GB"):
+            if n < 1024:
+                return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+            n /= 1024
+        return f"{n:.1f} TB"
+
+    def _validate_attachment(self, path: str):
+        """Dosyanın türünü belirler; okunabilir bir metin/fotoğraf dosyası mı kontrol eder.
+        Döner: (ok, hata_mesajı, tür) — tür: 'text' | 'image'."""
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return False, "Dosya okunamadı.", None
+        if size > self._ATTACH_MAX_BYTES:
+            return False, f"Dosya çok büyük ({self._human_file_size(size)}). 5 MB'tan küçük bir dosya seç.", None
+
+        if os.path.splitext(path)[1].lower() in self._IMAGE_EXTS:
+            return True, "", "image"
+
+        try:
+            with open(path, "rb") as f:
+                sample = f.read(4096)
+            sample.decode("utf-8")
+        except UnicodeDecodeError:
+            return False, (
+                "Bu dosyayı metin olarak okuyamıyorum. Lütfen .txt, .md, .csv, .json, .log "
+                "gibi bir metin dosyası ya da .jpg/.png gibi bir fotoğraf seç."
+            ), None
+        except OSError:
+            return False, "Dosya okunamadı.", None
+        return True, "", "text"
+
+    def _pick_attachment(self):
+        """Dosya seçme penceresini açar; seçilen metin/fotoğraf dosyasını sohbete ekler."""
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="MehburAI'ye Dosya Ekle",
+            filetypes=[
+                ("Metin, kod ve fotoğraflar", "*.txt *.md *.csv *.log *.json *.ini *.py *.js "
+                                                "*.ts *.xml *.yaml *.yml *.cfg *.jpg *.jpeg *.png *.webp *.bmp"),
+                ("Tüm dosyalar", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        ok, err, kind = self._validate_attachment(path)
+        if not ok:
+            messagebox.showwarning("Dosya Eklenemedi", err, parent=self)
+            return
+        self.attached_file_path = path
+        self.attached_file_kind = kind
+        name = os.path.basename(path)
+        size = self._human_file_size(os.path.getsize(path))
+        hint = "bir soru sor" if kind == "text" else "\"bunu daha kaliteli yap\" gibi bir istek yaz"
+        icon = "📎" if kind == "text" else "🖼️"
+        self.attachment_lbl.configure(
+            text=f"{icon} {name} ({size}) — {hint}, göndermeden önce kaldırmak için tıkla ✕"
+        )
+        self.attachment_lbl.grid()
+        self.query_entry.focus()
+
+    def _clear_attachment(self):
+        """Eklenmiş dosyayı kaldırır."""
+        self.attached_file_path = None
+        self.attached_file_kind = None
+        self.attachment_lbl.configure(text="")
+        self.attachment_lbl.grid_remove()
 
     def _send_welcome_message(self):
         """Uygulama açılışında karşılama mesajını ekler."""
@@ -457,7 +837,8 @@ class MehburApp(ctk.CTk):
             role="mehbur",
             message=welcome_text,
             source="Sistem",
-            is_online=self.network.is_online
+            is_online=self.network.is_online,
+            animate=False,
         )
 
     def _on_send_clicked(self):
@@ -466,28 +847,62 @@ class MehburApp(ctk.CTk):
         if not query or self._is_processing:
             return
 
+        # ➕ Ekli dosya varsa AI Engine'e geçilecek bağlamı hazırla (metin/görsel)
+        file_context = None
+        attach_note = ""
+        if self.attached_file_path and self.attached_file_kind:
+            name = os.path.basename(self.attached_file_path)
+            if self.attached_file_kind == "text":
+                try:
+                    with open(self.attached_file_path, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read(self._ATTACH_MAX_CHARS + 1)
+                    truncated = len(content) > self._ATTACH_MAX_CHARS
+                    file_context = {"name": name, "kind": "text", "text": content[:self._ATTACH_MAX_CHARS]}
+                    attach_note = f"\n\n📎 *{name}*" + (" (kısmi — dosya çok büyük)" if truncated else "")
+                except OSError:
+                    file_context = None
+            else:  # 'image'
+                file_context = {"name": name, "kind": "image", "path": self.attached_file_path}
+                attach_note = f"\n\n🖼️ *{name}*"
+            self._clear_attachment()
+
         # Giriş kutusunu temizle ve kilitle
         self.query_entry.delete(0, "end")
         self._set_processing(True)
 
-        # Kullanıcı mesajını sohbet balonuna ekle
-        self._add_message_bubble(role="user", message=query, is_online=self.network.is_online)
+        # Kullanıcı mesajını sohbet balonuna ekle (ekli dosya notuyla)
+        self._add_message_bubble(
+            role="user", message=query + attach_note,
+            is_online=self.network.is_online, animate=False,
+        )
+
+        # İlk kullanıcı mesajından sohbet başlığını türet
+        try:
+            conv = self.memory.get_conversation(self.active_conv_id)
+            if conv and (conv.get("title") or "Yeni Sohbet") == "Yeni Sohbet":
+                title = query.strip().splitlines()[0][:28]
+                self.memory.rename_conversation(self.active_conv_id, title or "Yeni Sohbet")
+                self._refresh_conversation_list()
+        except Exception:
+            pass
 
         # Düşünülüyor / Yükleniyor balonunu ekle
         self._add_loading_bubble()
 
+        conv_id = self.active_conv_id
         # Yanıt üretimini arka plan thread'inde çalıştır (UI donmasın)
         threading.Thread(
             target=self._process_query_async,
-            args=(query,),
+            args=(query, conv_id, file_context),
             daemon=True,
             name="MehburAI-QueryWorker"
         ).start()
 
-    def _process_query_async(self, query: str):
+    def _process_query_async(self, query: str, conv_id: Optional[int] = None, file_context: Optional[dict] = None):
         """Arka planda AI Engine ile soruyu işler."""
         try:
-            result = self.ai.process_query(query)
+            with self._ai_lock:
+                result = self.ai.process_query(query, conversation_id=conv_id, file_context=file_context)
         except Exception as e:
             result = {
                 "answer": f"Bir hata oluştu: {e}",
@@ -515,20 +930,22 @@ class MehburApp(ctk.CTk):
         elif score:
             source_label = f"{source} (%{score*100:.0f} Benzerlik)"
 
-        # Mesajı ekle
+        def _after_typing():
+            self._update_badges()
+            self._refresh_memory_list()
+            self._refresh_conversation_list()   # ruh hali ikonu değişmiş olabilir
+            self._set_processing(False)
+
+        # Mesajı harf harf yazma animasyonuyla ekle (🎨 üretilen/düzenlenen görsel varsa altına eklenir)
         self._add_message_bubble(
             role="mehbur",
             message=answer,
             source=source_label,
-            is_online=is_online
+            is_online=is_online,
+            animate=True,
+            on_done=_after_typing,
+            image_path=result.get("image_path"),
         )
-
-        # Sayaçları ve hafıza listesini güncelle
-        self._update_badges()
-        self._refresh_memory_list()
-
-        # İşlem kilidini kaldır
-        self._set_processing(False)
 
     def _set_processing(self, processing: bool):
         """Soru işlenirken UI butonlarını yönetir."""
@@ -543,8 +960,15 @@ class MehburApp(ctk.CTk):
     # Mesaj Balonları (Chat Bubbles)
     # ─────────────────────────────────────────
 
-    def _add_message_bubble(self, role: str, message: str, source: Optional[str] = None, is_online: bool = True):
-        """Sohbet alanına şık bir mesaj kutucuğu ekler."""
+    def _add_message_bubble(self, role: str, message: str, source: Optional[str] = None,
+                            is_online: bool = True, animate: bool = True, on_done=None,
+                            image_path: Optional[str] = None):
+        """Sohbet alanına şık bir mesaj kutucuğu ekler.
+
+        MehburAI mesajları `animate=True` iken harf harf yazılır; yazım bitince
+        `on_done` çağrılır. `image_path` verilirse (🎨 üretilen/düzenlenen görsel)
+        balonun içine küçük bir önizleme olarak eklenir.
+        """
         bubble_container = ctk.CTkFrame(self.chat_history_box, fg_color="transparent")
         bubble_container.pack(fill="x", padx=8, pady=6)
 
@@ -609,9 +1033,13 @@ class MehburApp(ctk.CTk):
                 )
                 badge_lbl.pack(side="left", padx=6)
 
+            if image_path and os.path.isfile(image_path):
+                self._attach_image_preview(bubble, image_path)
+
+            do_animate = bool(animate) and Theme.TYPEWRITER_MS > 0 and len(message) > 1
             msg_lbl = ctk.CTkLabel(
                 bubble,
-                text=message,
+                text="" if do_animate else message,
                 font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=13),
                 text_color=Theme.TEXT_PRIMARY,
                 wraplength=520,
@@ -619,8 +1047,71 @@ class MehburApp(ctk.CTk):
             )
             msg_lbl.pack(anchor="w", padx=12, pady=(2, 10))
 
+            if do_animate:
+                self._run_typewriter(msg_lbl, message, on_done)
+            elif on_done:
+                self.after(0, on_done)
+
         # Otomatik en aşağı kaydır
         self.after(50, lambda: self.chat_history_box._parent_canvas.yview_moveto(1.0))
+
+    def _attach_image_preview(self, bubble, image_path: str):
+        """🎨 Üretilen/düzenlenen bir görseli mesaj balonunun içine küçük önizleme olarak ekler."""
+        try:
+            from PIL import Image
+            img = Image.open(image_path)
+            img.thumbnail((360, 360))
+            ctk_img = ctk.CTkImage(img, size=img.size)
+            lbl = ctk.CTkLabel(bubble, image=ctk_img, text="", cursor="hand2")
+            lbl.pack(anchor="w", padx=12, pady=(2, 4))
+            lbl.bind("<Button-1>", lambda e, p=image_path: self._open_image_external(p))
+            self._chat_images.append(ctk_img)   # GC'ye kurban gitmesin
+        except Exception:
+            pass
+
+    def _open_image_external(self, path: str):
+        """Görsele tıklanınca varsayılan resim görüntüleyicide açar."""
+        try:
+            os.startfile(path)  # noqa: S606 — yalnızca MehburAI'nin kendi ürettiği yerel dosya
+        except Exception:
+            pass
+
+    def _cancel_typewriter(self):
+        """Süren yazma animasyonunu durdurur."""
+        if getattr(self, "_type_after_id", None):
+            try:
+                self.after_cancel(self._type_after_id)
+            except Exception:
+                pass
+            self._type_after_id = None
+
+    def _run_typewriter(self, label, full_text: str, on_done=None):
+        """Etiket metnini harf harf yazar; süre uzunluktan bağımsız ~sabit kalır."""
+        self._cancel_typewriter()
+        step = max(1, math.ceil(len(full_text) / 110))   # uzun metinde büyük adım
+        state = {"i": 0}
+
+        def tick():
+            i = state["i"]
+            if i >= len(full_text):
+                label.configure(text=full_text)
+                self._type_after_id = None
+                try:
+                    self.chat_history_box._parent_canvas.yview_moveto(1.0)
+                except Exception:
+                    pass
+                if on_done:
+                    on_done()
+                return
+            label.configure(text=full_text[:i])
+            try:
+                self.chat_history_box._parent_canvas.yview_moveto(1.0)
+            except Exception:
+                pass
+            state["i"] = i + step
+            self._type_after_id = self.after(Theme.TYPEWRITER_MS, tick)
+
+        tick()
 
     def _add_loading_bubble(self):
         """Cevap beklenirken dönen yükleniyor balonu."""
@@ -654,10 +1145,15 @@ class MehburApp(ctk.CTk):
             self._loading_frame = None
 
     def _clear_chat_display(self):
-        """Sohbet alanını temizler."""
-        for widget in self.chat_history_box.winfo_children():
-            widget.destroy()
-        self._send_welcome_message()
+        """Aktif sohbetin mesajlarını temizler (sohbet ve başlığı kalır, ruh hali sıfırlanır)."""
+        if self._is_processing:
+            return
+        try:
+            self.memory.clear_conversation_messages(self.active_conv_id)
+        except Exception:
+            pass
+        self._refresh_conversation_list()
+        self._load_active_conversation()
 
     # ─────────────────────────────────────────
     # SEKME 2: HAFIZA YÖNETİMİ (MEMORY PANEL)
@@ -944,6 +1440,9 @@ class MehburApp(ctk.CTk):
         # 2. 🛡️ Güvenlik Modu Kartı
         self._build_security_card(self.settings_scroll)
 
+        # 2b. 🎙️ Sesli Sohbet Kartı
+        self._build_voice_card(self.settings_scroll)
+
         # 3. Ağ Testi & Durum Kartı
         net_card = ctk.CTkFrame(
             self.settings_scroll,
@@ -1007,6 +1506,113 @@ class MehburApp(ctk.CTk):
         about_lbl.pack(anchor="w", padx=16, pady=(0, 14))
 
     # ─────────────────────────────────────────
+    # 🎙️ SESLİ SOHBET KARTI
+    # ─────────────────────────────────────────
+
+    def _build_voice_card(self, parent):
+        """Yerel sesli asistan (uyandırma sözcüğü) + Telegram sesli mesaj ayarları."""
+        vcfg = get_voice_config()
+        deps_ok = voice_dependencies_ok()
+
+        card = ctk.CTkFrame(
+            parent, fg_color=Theme.BG_CARD, corner_radius=12,
+            border_width=1, border_color=Theme.CYAN_DARK,
+        )
+        card.pack(fill="x", padx=0, pady=(0, 12))
+
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.pack(fill="x", padx=16, pady=(16, 4))
+        ctk.CTkLabel(
+            head, text="🎙️ Sesli Sohbet",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=16, weight="bold"),
+            text_color=Theme.CYAN_PRIMARY,
+        ).pack(side="left")
+        self.voice_switch = ctk.CTkSwitch(
+            head, text="Aktif", command=self._toggle_voice,
+            progress_color=Theme.STATUS_ONLINE,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold"),
+        )
+        self.voice_switch.pack(side="right")
+        if vcfg.get("voice_enabled") and deps_ok:
+            self.voice_switch.select()
+
+        ctk.CTkLabel(
+            card, justify="left", wraplength=820,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+            text_color=Theme.TEXT_SECONDARY,
+            text=(
+                "Bu bilgisayarın mikrofonunu dinler. \"Mehbur\" veya \"Hey Mehbur\" "
+                "dediğinde \"Emrinizdeyim efendim\" der ve ardından komutunu bekler "
+                "(soru sor, \"not defteri aç\", \"bilgisayarı kapat\" ...). Yanlış "
+                "duyulan kelimeleri de anlamaya çalışır. Tümüyle çevrimdışı tanıma; "
+                "yanıt sesi çevrimiçi üretilir. İlk açılışta ~35 MB Türkçe ses modeli iner."
+            ),
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(0, 8))
+        ctk.CTkLabel(
+            row, text="Yanıt sesi:", font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+            text_color=Theme.TEXT_PRIMARY,
+        ).pack(side="left", padx=(0, 8))
+        _cur_voice = ("Ahmet (erkek)" if vcfg.get("voice_tts_voice") == "tr-TR-AhmetNeural"
+                      else "Emel (kadın)")
+        self.voice_choice = ctk.CTkOptionMenu(
+            row, values=["Emel (kadın)", "Ahmet (erkek)"], command=self._change_voice,
+            width=150, font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+            fg_color=Theme.BG_INPUT, button_color=Theme.CYAN_DARK,
+        )
+        self.voice_choice.set(_cur_voice)
+        self.voice_choice.pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            row, text="🔊 Sesi Test Et", width=130, height=28,
+            font=ctk.CTkFont(size=12), fg_color=Theme.BG_CARD_HOVER,
+            hover_color=Theme.CYAN_DARK, command=self._test_voice,
+        ).pack(side="left")
+
+        # — JARVIS tam ekran görseli —
+        orow = ctk.CTkFrame(card, fg_color="transparent")
+        orow.pack(fill="x", padx=16, pady=(2, 2))
+        self.jarvis_switch = ctk.CTkSwitch(
+            orow, text="🟦 JARVIS ekranı — uyandırınca tam ekran nokta küresi (Iron Man tarzı)",
+            command=self._toggle_overlay, progress_color=Theme.STATUS_ONLINE,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+        )
+        self.jarvis_switch.pack(side="left")
+        if vcfg.get("voice_overlay_enabled", True):
+            self.jarvis_switch.select()
+        ctk.CTkButton(
+            orow, text="👁️ Önizle", width=90, height=26,
+            font=ctk.CTkFont(size=12), fg_color=Theme.BG_CARD_HOVER,
+            hover_color=Theme.CYAN_DARK, command=self._preview_jarvis,
+        ).pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(
+            card, text="Boşta/yanıt: neon cyan • komut dinlerken: koyu sarı • hata: neon kırmızı  "
+                       "(ESC ile kapanır, iş bitince kendiliğinden kaybolur)",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11), text_color=Theme.TEXT_DARK,
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        self.tg_voice_switch = ctk.CTkSwitch(
+            card, text="Telegram'daki sesli mesajları yazıya çevirip yanıtla",
+            command=self._toggle_telegram_voice, progress_color=Theme.STATUS_ONLINE,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+        )
+        self.tg_voice_switch.pack(anchor="w", padx=16, pady=(2, 8))
+        if vcfg.get("telegram_voice_enabled", True):
+            self.tg_voice_switch.select()
+
+        _lbl, _col = self._VOICE_STATE_LABEL.get(
+            "dinliyor" if (vcfg.get("voice_enabled") and deps_ok) else "kapali"
+        )
+        self.voice_status_lbl = ctk.CTkLabel(
+            card, text=(_lbl if deps_ok else "⚠️ Ses kütüphaneleri kurulu değil: "
+                        + ", ".join(voice_missing_deps())),
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11, weight="bold"),
+            text_color=(_col if deps_ok else Theme.STATUS_OFFLINE),
+        )
+        self.voice_status_lbl.pack(anchor="w", padx=16, pady=(0, 14))
+
+    # ─────────────────────────────────────────
     # 🛡️ GÜVENLİK MODU KARTI
     # ─────────────────────────────────────────
 
@@ -1042,10 +1648,12 @@ class MehburApp(ctk.CTk):
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
             text_color=Theme.TEXT_SECONDARY,
             text=(
-                "Korunan bir klasör Dosya Gezgini'nde açıldığında veya korunan bir program "
-                "çalıştırıldığında MehburAI şifre sorar. Şifre yanlış girilir ya da ekran "
-                "kapatılırsa: web kameradan fotoğraf çekilir, Telegram'dan size gönderilir ve "
-                "kişiye \"fotoğrafınız çekildi ve cihaz sahibine iletildi\" uyarısı gösterilir."
+                "Korunan bir klasör Dosya Gezgini'nde açıldığında, korunan bir program "
+                "çalıştırıldığında ya da korunan bir dosya/klasör silinmeye çalışıldığında "
+                "MehburAI şifre sorar. Şifre yanlış girilir ya da ekran kapatılırsa: web "
+                "kameradan fotoğraf çekilir, Telegram'dan size gönderilir ve kişiye "
+                "\"fotoğrafınız çekildi ve cihaz sahibine iletildi\" uyarısı gösterilir. "
+                "Silme girişiminde dosya gizli yedekten otomatik geri yüklenir."
             ),
         ).pack(anchor="w", padx=16, pady=(0, 10))
 
@@ -1136,14 +1744,18 @@ class MehburApp(ctk.CTk):
             ),
         ).pack(anchor="w", padx=16, pady=(0, 6))
 
+        # Token'ı ASLA alana geri yazma (maskeli değer kaydedilip gerçek token'ı ezebiliyor).
+        # Kayıtlıysa alanı boş bırak, placeholder ile durumu belirt; boş bırakılırsa değişmez.
+        _tok_saved = is_valid_bot_token(cfg.get("telegram_bot_token", ""))
         self.sec_tg_token = ctk.CTkEntry(
-            card, placeholder_text="Bot Token (123456:ABC-DEF...)", show="•", height=36,
+            card,
+            placeholder_text=("✅ Token kayıtlı — değiştirmek için yeni token yapıştır"
+                              if _tok_saved else "Bot Token (123456:ABC-DEF...)"),
+            show="•", height=36,
             fg_color=Theme.BG_INPUT, border_color=Theme.CYAN_DARK,
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12), corner_radius=8,
         )
         self.sec_tg_token.pack(fill="x", padx=16, pady=(0, 6))
-        if cfg.get("telegram_bot_token"):
-            self.sec_tg_token.insert(0, cfg["telegram_bot_token"])
 
         chat_row = ctk.CTkFrame(card, fg_color="transparent")
         chat_row.pack(fill="x", padx=16, pady=(0, 8))
@@ -1175,6 +1787,26 @@ class MehburApp(ctk.CTk):
             hover_color=Theme.CYAN_DARK, command=self._test_telegram,
         ).pack(side="left")
 
+        # — Telegram'dan uzaktan kontrol —
+        self.sec_remote_switch = ctk.CTkSwitch(
+            card,
+            text="🤖 Telegram'dan uzaktan kontrol (bota yazarak MehburAI'ı yönet)",
+            command=self._toggle_remote, progress_color=Theme.STATUS_ONLINE,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+        )
+        self.sec_remote_switch.pack(anchor="w", padx=16, pady=(2, 2))
+        if cfg.get("telegram_remote_enabled"):
+            self.sec_remote_switch.select()
+        ctk.CTkLabel(
+            card, justify="left", wraplength=820,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11), text_color=Theme.TEXT_DARK,
+            text=(
+                "Açıkken yalnızca yukarıdaki Chat ID (cihaz sahibi) bota komut verebilir; "
+                "diğer herkes yok sayılır. Bota normal mesaj yaz (soru sor, \"not defteri aç\", "
+                "\"sesi kıs\"...) ya da /ekran, /foto, /durum, /guvenlik ac komutlarını kullan."
+            ),
+        ).pack(anchor="w", padx=16, pady=(0, 12))
+
         self.sec_status = ctk.CTkLabel(
             card, text=self._security_status_text(),
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11, weight="bold"),
@@ -1189,6 +1821,7 @@ class MehburApp(ctk.CTk):
         parts.append(f"{len(cfg.get('security_watch_paths', []))} korumalı yol")
         parts.append("Telegram ✓" if TelegramNotifier.is_configured() else "Telegram ✗")
         parts.append("Şifre ✓" if has_security_password() else "Şifre ✗")
+        parts.append("Uzaktan kontrol ✓" if self.telegram_bot.is_running() else "Uzaktan kontrol ✗")
         return "  •  ".join(parts)
 
     def _refresh_security_status(self):
@@ -1328,17 +1961,40 @@ class MehburApp(ctk.CTk):
         self.sec_pass_status.configure(text="✅ Şifre kaydedildi", text_color=Theme.STATUS_ONLINE)
 
     def _save_telegram(self):
-        update_security_config(
-            telegram_bot_token=self.sec_tg_token.get().strip(),
-            telegram_chat_id=self.sec_tg_chat.get().strip(),
-        )
+        changes = {"telegram_chat_id": self.sec_tg_chat.get().strip()}
+
+        raw_token = self.sec_tg_token.get().strip()
+        # Boş alan = "token'a dokunma". Sadece alanda gerçek bir token varsa yaz.
+        if raw_token and not all(ch == "•" for ch in raw_token):
+            if is_valid_bot_token(raw_token):
+                changes["telegram_bot_token"] = raw_token
+                self.sec_tg_token.delete(0, "end")   # sırrı ekranda / bellekte tutma
+                self.sec_tg_token.configure(
+                    placeholder_text="✅ Token kayıtlı — değiştirmek için yeni token yapıştır"
+                )
+            else:
+                self.sec_status.configure(
+                    text="⚠️ Bot Token biçimi geçersiz (ör. 123456789:AA...). Token kaydedilmedi.",
+                    text_color=Theme.STATUS_WARNING,
+                )
+                update_security_config(**changes)   # yine de Chat ID'yi kaydet
+                return
+
+        update_security_config(**changes)
         self.sec_status.configure(text="✅ Telegram bilgileri kaydedildi.", text_color=Theme.STATUS_ONLINE)
+        # Uzaktan kontrol açık ama bot henüz çalışmıyorsa (bilgiler yeni girildi) başlat.
+        # Zaten çalışıyorsa döngü yeni token/chat ID'yi bir sonraki turda kendiliğinden kullanır.
+        if get_security_config().get("telegram_remote_enabled") and not self.telegram_bot.is_running():
+            self.telegram_bot.start()
         self.after(1800, self._refresh_security_status)
 
     def _autodetect_chat_id(self):
         token = self.sec_tg_token.get().strip()
-        if not token:
-            self.sec_status.configure(text="⚠️ Önce Bot Token gir.", text_color=Theme.STATUS_WARNING)
+        if not token or all(ch == "•" for ch in token):
+            token = get_security_config().get("telegram_bot_token", "").strip()
+        if not is_valid_bot_token(token):
+            self.sec_status.configure(text="⚠️ Önce geçerli bir Bot Token kaydet.",
+                                      text_color=Theme.STATUS_WARNING)
             return
         self.sec_status.configure(
             text="🔎 Bota yazdığın mesaj aranıyor...", text_color=Theme.TEXT_SECONDARY
@@ -1382,8 +2038,12 @@ class MehburApp(ctk.CTk):
         """Guard thread'inin bildirdiği erişimleri ana thread'de işler."""
         try:
             while True:
-                path = self._security_queue.get_nowait()
-                self._show_security_challenge(path)
+                item = self._security_queue.get_nowait()
+                if isinstance(item, tuple):
+                    path, event = item
+                else:
+                    path, event = item, "access"
+                self._show_security_challenge(path, event)
         except queue.Empty:
             pass
         except Exception:
@@ -1395,7 +2055,8 @@ class MehburApp(ctk.CTk):
             except Exception:
                 pass
 
-    def _show_security_challenge(self, path: str):
+    def _show_security_challenge(self, path: str, event: str = "access"):
+        is_delete = (event == "delete")
         if path in self._security_dialogs and self._security_dialogs[path].winfo_exists():
             self._security_dialogs[path].lift()
             return
@@ -1445,13 +2106,23 @@ class MehburApp(ctk.CTk):
         dlg.after(450, dlg.lift)
 
         ctk.CTkLabel(
-            dlg, text="🔒 Bu konum korumalı", text_color=Theme.STATUS_OFFLINE,
+            dlg,
+            text="🗑️ Bu korumalı dosya siliniyor" if is_delete else "🔒 Bu konum korumalı",
+            text_color=Theme.STATUS_OFFLINE,
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=18, weight="bold"),
         ).pack(pady=(20, 2))
         ctk.CTkLabel(
             dlg, text=os.path.basename(path.rstrip("\\/")) or path, text_color=Theme.TEXT_SECONDARY,
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11),
         ).pack(pady=(0, 6))
+        if is_delete:
+            ctk.CTkLabel(
+                dlg, justify="center", wraplength=420,
+                text="Silme işlemi için güvenlik şifresi gerekli.\n"
+                     "Şifre girilmezse dosya gizli yedekten geri yüklenecek.",
+                text_color=Theme.TEXT_SECONDARY,
+                font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11),
+            ).pack(pady=(0, 4))
         ctk.CTkLabel(
             dlg, justify="center", wraplength=420,
             text="📸 Bilgisayarın sahibine fotoğrafınız gönderilecek.\nKameraya bakın, gülümseyin :D",
@@ -1473,31 +2144,41 @@ class MehburApp(ctk.CTk):
         )
         info.pack(pady=(2, 6))
 
-        def do_verify():
-            if verify_security_password(entry.get()):
-                self.security_guard.mark_passed(path)
-                self._close_security_dialog(path)
+        def _deny(reason: str):
+            if is_delete:
+                info.configure(
+                    text="⚠️ " + reason + " Fotoğrafınız çekildi, cihaz sahibine iletildi "
+                         "ve dosya geri yükleniyor.",
+                    text_color=Theme.STATUS_OFFLINE,
+                )
             else:
                 info.configure(
-                    text="⚠️ Hatalı şifre. Fotoğrafınız çekildi, cihaz sahibine iletildi "
+                    text="⚠️ " + reason + " Fotoğrafınız çekildi, cihaz sahibine iletildi "
                          "ve açtığınız şey kapatılıyor.",
                     text_color=Theme.STATUS_OFFLINE,
                 )
-                if not state["alerted"]:
-                    state["alerted"] = True
-                    self._fire_intruder_alert("Yanlış şifre girildi", close_path=path)
-                self.after(3000, lambda: self._close_security_dialog(path))
-
-        def on_x():
-            info.configure(
-                text="⚠️ Doğrulama yapılmadı. Fotoğrafınız çekildi, cihaz sahibine iletildi "
-                     "ve açtığınız şey kapatılıyor.",
-                text_color=Theme.STATUS_OFFLINE,
-            )
             if not state["alerted"]:
                 state["alerted"] = True
-                self._fire_intruder_alert("Şifre ekranı kapatıldı", close_path=path)
+                if is_delete:
+                    self._fire_intruder_alert(
+                        "Korumalı dosya izinsiz silinmeye çalışıldı", restore_path=path
+                    )
+                else:
+                    self._fire_intruder_alert(reason.rstrip("."), close_path=path)
             self.after(3000, lambda: self._close_security_dialog(path))
+
+        def do_verify():
+            if verify_security_password(entry.get()):
+                if is_delete:
+                    # Silme yetkiyle onaylandı — yedeği at, dosyanın silinmesine izin ver
+                    FileBackup.discard(path)
+                self.security_guard.mark_passed(path)
+                self._close_security_dialog(path)
+            else:
+                _deny("Hatalı şifre.")
+
+        def on_x():
+            _deny("Doğrulama yapılmadı.")
 
         entry.bind("<Return>", lambda e: do_verify())
         btns = ctk.CTkFrame(dlg, fg_color="transparent")
@@ -1542,10 +2223,11 @@ class MehburApp(ctk.CTk):
         except Exception:
             pass
 
-    def _fire_intruder_alert(self, reason: str, close_path: Optional[str] = None):
-        """Hedefi kapat + kamera + Telegram işini arka planda yapar (UI donmasın)."""
+    def _fire_intruder_alert(self, reason: str, close_path: Optional[str] = None,
+                             restore_path: Optional[str] = None):
+        """Hedefi kapat / dosyayı geri yükle + kamera + Telegram işini arka planda yapar (UI donmasın)."""
         def worker():
-            result = trigger_intruder_alert(reason, close_path=close_path)
+            result = trigger_intruder_alert(reason, close_path=close_path, restore_path=restore_path)
 
             def show():
                 if hasattr(self, "sec_status") and self.sec_status.winfo_exists():
@@ -1555,6 +2237,247 @@ class MehburApp(ctk.CTk):
                     )
             self._ui_call(show)
         threading.Thread(target=worker, daemon=True, name="MehburAI-IntruderAlert").start()
+
+    # ── Telegram'dan uzaktan kontrol ──
+
+    def _telegram_query(self, text: str):
+        """Telegram botundan gelen mesajı MehburAI zeka motoruna verir, yanıtı döndürür.
+        (Bot kendi thread'inde çağırır — GUI thread'ini bloklamaz.)
+        🎨 Görsel üretildi/düzenlendiyse (metin, görsel_yolu) tuple'ı döner —
+        bot bunu fotoğraf olarak gönderir."""
+        with self._ai_lock:
+            result = self.ai.process_query(text)
+        answer = (result or {}).get("answer", "") or "(boş yanıt)"
+        src = (result or {}).get("source", "")
+        full = f"{answer}\n\n— {src}" if src else answer
+        image_path = (result or {}).get("image_path")
+        return (full, image_path) if image_path else full
+
+    # ── 🎙️ Sesli Sohbet (yalnız bilgisayarda) ──
+
+    def _voice_command(self, text: str) -> str:
+        """Sesli asistandan gelen komutu zeka motoruna verir (sistem araçları dahil)."""
+        with self._ai_lock:
+            result = self.ai.process_query(text)
+        return (result or {}).get("answer", "") or "Yanıt üretemedim efendim."
+
+    _MIC_STATE_COLOR = {
+        "dinliyor": Theme.STATUS_ONLINE,
+        "uyandi": Theme.CYAN_PRIMARY,
+        "komut_dinliyor": Theme.STATUS_WARNING,
+        "islemde": Theme.STATUS_WARNING,
+        "yanit": Theme.CYAN_PRIMARY,
+        "model_indiriliyor": Theme.STATUS_WARNING,
+        "model_yok": Theme.STATUS_OFFLINE,
+        "mikrofon_hatasi": Theme.STATUS_OFFLINE,
+        "kapali": Theme.TEXT_DARK,
+        "kapalı": Theme.TEXT_DARK,
+    }
+
+    _VOICE_STATE_LABEL = {
+        "dinliyor": ("🟢 Dinliyor — 'Hey Mehbur' de", Theme.STATUS_ONLINE),
+        "uyandi": ("👂 Emrinizdeyim...", Theme.CYAN_PRIMARY),
+        "komut_dinliyor": ("🎤 Komutu dinliyor...", Theme.STATUS_WARNING),
+        "islemde": ("⚙️ İşleniyor...", Theme.STATUS_WARNING),
+        "yanit": ("💬 Yanıtlıyor...", Theme.CYAN_PRIMARY),
+        "model_indiriliyor": ("⬇️ Türkçe ses modeli indiriliyor (~35 MB)...", Theme.STATUS_WARNING),
+        "model_yok": ("⚠️ Ses modeli yüklenemedi (internet?)", Theme.STATUS_OFFLINE),
+        "mikrofon_hatasi": ("⚠️ Mikrofona erişilemedi", Theme.STATUS_OFFLINE),
+        "kapali": ("🔴 Kapalı", Theme.TEXT_SECONDARY),
+        "kapalı": ("🔴 Kapalı", Theme.TEXT_SECONDARY),
+    }
+
+    def _on_voice_state(self, state: str, text: str = ""):
+        self._voice_state = state
+        if hasattr(self, "voice_status_lbl") and self.voice_status_lbl.winfo_exists():
+            txt, col = self._VOICE_STATE_LABEL.get(state, (f"• {state}", Theme.TEXT_SECONDARY))
+            self.voice_status_lbl.configure(text=txt, text_color=col)
+        self._update_mic_button(state)
+
+    def _update_mic_button(self, state: Optional[str] = None):
+        """Sohbet kutusundaki 🎤 butonunu sesli sohbet durumuna göre renklendirir."""
+        if not hasattr(self, "mic_btn") or not self.mic_btn.winfo_exists():
+            return
+        if state is None:
+            active = bool(get_voice_config().get("voice_enabled")) and voice_dependencies_ok()
+            state = "dinliyor" if active else "kapali"
+        color = self._MIC_STATE_COLOR.get(state, Theme.TEXT_DARK)
+        self.mic_btn.configure(text_color=color, border_color=color)
+
+    def _toggle_voice_from_chat(self):
+        """Sohbet kutusundaki 🎤 butonu — sesli sohbeti Ayarlar'daki anahtarla senkron açar/kapar."""
+        if not voice_dependencies_ok():
+            messagebox.showwarning(
+                "Sesli Sohbet",
+                "Eksik kütüphane: " + ", ".join(voice_missing_deps()),
+                parent=self,
+            )
+            return
+        want = not bool(get_voice_config().get("voice_enabled"))
+        if hasattr(self, "voice_switch"):
+            if want:
+                self.voice_switch.select()
+            else:
+                self.voice_switch.deselect()
+        self._toggle_voice()
+        self._update_mic_button()
+        self._drive_jarvis(state, text)
+
+    def _drive_jarvis(self, state: str, text: str = ""):
+        """Sesli asistan durumunu JARVIS tam ekran görseline aktarır."""
+        if not get_voice_config().get("voice_overlay_enabled", True):
+            return
+        if self.jarvis is None:
+            try:
+                from jarvis_overlay import JarvisOverlay
+                self.jarvis = JarvisOverlay(self)
+            except Exception:
+                self.jarvis = None
+                return
+        j = self.jarvis
+        try:
+            if state == "uyandi":
+                j.show(mode="idle", title="Emrinizdeyim efendim", subtitle="")
+            elif state == "komut_dinliyor":
+                j.show(mode="listen", title="Dinliyorum…", subtitle="")
+            elif state == "islemde":
+                j.show(mode="think", title="Düşünüyorum…", subtitle=text)
+            elif state == "yanit":
+                j.show(mode="idle", title="", subtitle=text)
+                j.hide(delay_ms=8000)
+            elif state == "mikrofon_hatasi":
+                j.show(mode="error", title="Bir hata oluştu", subtitle="Mikrofona erişilemedi")
+                j.hide(delay_ms=5000)
+            elif state == "model_yok":
+                if j.visible:
+                    j.set_state(mode="error", title="Bir hata oluştu",
+                                subtitle="Ses modeli yüklenemedi")
+                    j.hide(delay_ms=5000)
+            elif state == "dinliyor":
+                if j.visible:
+                    j.hide(delay_ms=2500)
+            elif state == "kapali":
+                j.hide()
+        except Exception:
+            pass
+
+    def _preview_jarvis(self):
+        """Ayarlardaki '👁️ Önizle' — JARVIS ekranını kısa bir demo ile gösterir."""
+        if self.jarvis is None:
+            try:
+                from jarvis_overlay import JarvisOverlay
+                self.jarvis = JarvisOverlay(self)
+            except Exception:
+                return
+        seq = [
+            (0, "idle", "Emrinizdeyim efendim", ""),
+            (2600, "listen", "Dinliyorum…", ""),
+            (5200, "think", "Düşünüyorum…", "saat kaç"),
+            (7800, "idle", "", "Şu an saat 22:15."),
+        ]
+        for ms, m, t, s in seq:
+            self.after(ms, lambda m=m, t=t, s=s: self.jarvis.show(m, t, s))
+        self.after(12500, self.jarvis.hide)
+
+    def _start_voice_async(self):
+        """Modeli (gerekiyorsa) indirip sesli asistanı arka planda başlatır."""
+        if self.voice_assistant is None:
+            return
+        self._on_voice_state("model_indiriliyor" if not SpeechToText.model_present() else "dinliyor")
+
+        def worker():
+            SpeechToText.ensure_model()
+            ok = self.voice_assistant.start()
+            if not ok:
+                self._ui_call(lambda: self._on_voice_state("model_yok"))
+        threading.Thread(target=worker, daemon=True, name="MehburAI-VoiceStart").start()
+
+    def _toggle_voice(self):
+        want = bool(self.voice_switch.get())
+        if want and not voice_dependencies_ok():
+            self.voice_switch.deselect()
+            self._on_voice_state("kapali")
+            self.voice_status_lbl.configure(
+                text="⚠️ Eksik kütüphane: " + ", ".join(voice_missing_deps()),
+                text_color=Theme.STATUS_OFFLINE,
+            )
+            return
+        update_voice_config(voice_enabled=want)
+        if want:
+            self._setup_tray()
+            self._start_voice_async()
+        else:
+            if self.voice_assistant is not None:
+                self.voice_assistant.stop()
+            self._on_voice_state("kapali")
+
+    def _change_voice(self, choice: str):
+        mapping = {"Emel (kadın)": "tr-TR-EmelNeural", "Ahmet (erkek)": "tr-TR-AhmetNeural"}
+        update_voice_config(voice_tts_voice=mapping.get(choice, "tr-TR-EmelNeural"))
+
+    def _test_voice(self):
+        if TextToSpeech is None:
+            return
+        threading.Thread(
+            target=lambda: TextToSpeech.speak("Emrinizdeyim efendim. Ben MehburAI."),
+            daemon=True, name="MehburAI-VoiceTest",
+        ).start()
+
+    def _toggle_telegram_voice(self):
+        update_voice_config(telegram_voice_enabled=bool(self.tg_voice_switch.get()))
+
+    def _toggle_overlay(self):
+        want = bool(self.jarvis_switch.get())
+        update_voice_config(voice_overlay_enabled=want)
+        if not want and self.jarvis is not None:
+            self.jarvis.hide()
+
+    def _remote_toggle_security(self, want: bool) -> str:
+        """Bot '/guvenlik ac|kapat' komutu — güvenlik modunu uzaktan değiştirir."""
+        if want and not has_security_password():
+            return "⚠️ Önce MehburAI arayüzünden bir güvenlik şifresi belirlemelisin."
+        if bool(get_security_config().get("security_enabled")) == want:
+            return f"🛡️ Güvenlik modu zaten {'açık' if want else 'kapalı'}."
+        self.after(0, lambda: self._apply_security_enabled(want))
+        return f"🛡️ Güvenlik modu {'açılıyor' if want else 'kapatılıyor'}..."
+
+    def _apply_security_enabled(self, want: bool):
+        """Güvenlik modunu programatik olarak aç/kapat (GUI thread'inde çağrılmalı)."""
+        update_security_config(security_enabled=want)
+        if want:
+            self.security_guard.start()
+            self._setup_tray()
+        else:
+            self.security_guard.stop()
+        if hasattr(self, "sec_enable_switch"):
+            (self.sec_enable_switch.select if want else self.sec_enable_switch.deselect)()
+        self._refresh_security_status()
+
+    def _toggle_remote(self):
+        """Ayarlardaki '🤖 Telegram'dan uzaktan kontrol' anahtarı."""
+        want = bool(self.sec_remote_switch.get())
+        if want and not self.telegram_bot.is_configured():
+            self.sec_remote_switch.deselect()
+            self.sec_status.configure(
+                text="⚠️ Önce Telegram Bot Token + Chat ID kaydet.",
+                text_color=Theme.STATUS_WARNING,
+            )
+            return
+        update_security_config(telegram_remote_enabled=want)
+        if want:
+            started = self.telegram_bot.start()
+            self._setup_tray()
+            self.sec_status.configure(
+                text=("✅ Telegram uzaktan kontrol açık — bota /yardim yaz." if started
+                      else "⚠️ Bot başlatılamadı (Telegram bilgileri eksik)."),
+                text_color=Theme.STATUS_ONLINE if started else Theme.STATUS_WARNING,
+            )
+        else:
+            self.telegram_bot.stop()
+            self.sec_status.configure(
+                text="Telegram uzaktan kontrol kapatıldı.", text_color=Theme.TEXT_SECONDARY
+            )
+        self.after(1800, self._refresh_security_status)
 
     def _save_api_key(self):
         """API anahtarını kaydeder."""
@@ -1614,7 +2537,7 @@ class MehburApp(ctk.CTk):
         """Arayüz geri çağrısındaki hataları data/last_error.log'a yazar (uygulama çökmesin)."""
         import traceback
         try:
-            with open(os.path.join(os.path.dirname(__file__), "data", "last_error.log"),
+            with open(os.path.join(DATA_DIR, "last_error.log"),
                       "a", encoding="utf-8") as f:
                 import datetime
                 f.write(f"\n[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] callback exception:\n")
@@ -1635,11 +2558,20 @@ class MehburApp(ctk.CTk):
             self._tray = None
             return
 
-        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-        d = ImageDraw.Draw(img)
-        d.ellipse([4, 4, 60, 60], fill=(0, 240, 255, 255))
-        d.ellipse([20, 22, 30, 32], fill=(7, 7, 11, 255))
-        d.ellipse([34, 22, 44, 32], fill=(7, 7, 11, 255))
+        img = None
+        try:
+            _logo = get_logo_path()
+            if _logo:
+                img = Image.open(_logo).convert("RGBA")
+        except Exception:
+            img = None
+
+        if img is None:
+            img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)
+            d.ellipse([4, 4, 60, 60], fill=(0, 240, 255, 255))
+            d.ellipse([20, 22, 30, 32], fill=(7, 7, 11, 255))
+            d.ellipse([34, 22, 44, 32], fill=(7, 7, 11, 255))
 
         menu = pystray.Menu(
             pystray.MenuItem("MehburAI'yi Aç", lambda *_: self.after(0, self._restore_window), default=True),
@@ -1698,6 +2630,20 @@ class MehburApp(ctk.CTk):
         self.network.stop()
         try:
             self.security_guard.stop()
+        except Exception:
+            pass
+        try:
+            self.telegram_bot.stop()
+        except Exception:
+            pass
+        try:
+            if self.voice_assistant is not None:
+                self.voice_assistant.stop()
+        except Exception:
+            pass
+        try:
+            if self.jarvis is not None:
+                self.jarvis.destroy()
         except Exception:
             pass
         try:

@@ -13,7 +13,10 @@ import sys
 import threading
 from typing import Callable, Optional
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# .exe'ye paketlenmişse (PyInstaller) çalışma klasörü .exe'nin kendi yanı,
+# geliştirme ortamında bu betiğin bulunduğu klasördür.
+BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
+    else os.path.dirname(os.path.abspath(__file__))
 _SINGLETON_PORT = 50507          # localhost — sadece bu makinede
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -59,14 +62,18 @@ def set_autostart(enabled: bool) -> bool:
             return False
 
     # Kısayolu oluştur — GÖRELİ argüman + WorkingDirectory (mutlak yol pencereyi kapatıyor)
+    if getattr(sys, "frozen", False):
+        target, args = sys.executable, "--tray"
+    else:
+        target, args = pythonw_path(), "run_mehbur.py --tray"
     lnk_esc = lnk.replace("'", "''")
     proj_esc = BASE_DIR.replace("'", "''")
-    pyw_esc = pythonw_path().replace("'", "''")
+    target_esc = target.replace("'", "''")
     ps = (
         "$W = New-Object -ComObject WScript.Shell;"
         f"$S = $W.CreateShortcut('{lnk_esc}');"
-        f"$S.TargetPath = '{pyw_esc}';"
-        "$S.Arguments = 'run_mehbur.py --tray';"
+        f"$S.TargetPath = '{target_esc}';"
+        f"$S.Arguments = '{args}';"
         f"$S.WorkingDirectory = '{proj_esc}';"
         "$S.Description = 'MehburAI - Guvenlik Modu (arka plan)';"
         "$S.Save()"

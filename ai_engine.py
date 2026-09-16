@@ -14,20 +14,25 @@ MehburAI'nin ana zeka modülü. Ağ durumuna göre dinamik olarak:
      - Eşleşme yoksa kullanıcıyı nazikçe bilgilendirir.
 """
 
+import base64
 import difflib
 import json
+import os
 import re
+import time
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 from config import (
+    DATA_DIR,
     GREETING_PATTERNS,
     GREETING_RESPONSES,
     PROFANITY_RESPONSE,
     GeminiConfig,
     get_api_key,
+    get_profanity_config,
 )
 from memory_engine import MemoryEngine, clean_text, tokenize_and_stem, turkish_lower
 from network_manager import NetworkMonitor
@@ -84,6 +89,54 @@ class TrustedSourceFetcher:
                                 "extract": extract,
                                 "source": f"Wikipedia ({title})"
                             }
+        except Exception:
+            pass
+
+        return None
+
+    @classmethod
+    def search_reddit(cls, query: str) -> Optional[Dict[str, str]]:
+        """
+        Reddit'in genel arama API'sinden (kimlik doğrulama gerekmez) en ilgili
+        gönderiyi bulur; Gemini API anahtarı girilmemişken Wikipedia'dan sonraki
+        ikinci güvenilir kaynaktır.
+        """
+        words = clean_text(query).split()
+        keywords = [w for w in words if w not in [
+            "nedir", "nelerdir", "neresi", "neresidir", "kimdir", "hangisidir",
+            "hangisi", "ne", "neler", "nerede", "nasıl", "neden", "hakkında",
+            "bilgi", "ver", "söyle", "anlat", "lütfen", "bana", "acaba"
+        ]]
+        search_term = " ".join(keywords) if keywords else clean_text(query)
+        if not search_term:
+            return None
+
+        headers = {"User-Agent": cls.USER_AGENT}
+        try:
+            url = (
+                "https://www.reddit.com/search.json?"
+                f"q={urllib.parse.quote(search_term)}&sort=relevance&limit=6&raw_json=1"
+            )
+            resp = requests.get(url, headers=headers, timeout=4.0)
+            if resp.status_code != 200:
+                return None
+            children = (resp.json().get("data") or {}).get("children") or []
+            for child in children:
+                post = child.get("data") or {}
+                if post.get("over_18") or post.get("quarantine"):
+                    continue
+                title = (post.get("title") or "").strip()
+                if not title:
+                    continue
+                body = (post.get("selftext") or "").strip()
+                snippet = body[:500].strip() if body else ""
+                extract = f"**{title}**" + (f"\n\n{snippet}" if snippet else "")
+                subreddit = post.get("subreddit") or "reddit"
+                return {
+                    "title": title,
+                    "extract": extract,
+                    "source": f"Reddit (r/{subreddit})",
+                }
         except Exception:
             pass
 
@@ -151,11 +204,102 @@ class GeminiService:
         Gemini API'den soru ve (varsa) güvenilir kaynak bağlamıyla yanıt alır.
         Anahtar yoksa veya tüm modeller başarısız olursa None döner.
         """
+        if not get_api_key():
+            return None
+        return self._stream_call(self._build_payload(question, context))
+
+    def generate_vision_response(self, prompt: str, image_path: str) -> Optional[str]:
+        """
+        Bir fotoğrafı (jpg) + Türkçe bir istemi Gemini'nin çok kipli (vision)
+        yeteneğine gönderir; görseli yorumlayan bir metin döndürür.
+        Anahtar yoksa, dosya okunamazsa veya tüm modeller başarısız olursa None.
+        """
+        api_key = get_api_key()
+        if not api_key:
+            return None
+        try:
+            with open(image_path, "rb") as f:
+                image_b64 = base64.b64encode(f.read()).decode("ascii")
+        except OSError:
+            return None
+        payload = {
+            "systemInstruction": {"parts": [{"text": GeminiConfig.SYSTEM_PROMPT}]},
+            "contents": [{
+                "role": "user",
+                "parts": [
+                    {"text": prompt},
+                    {"inlineData": {"mimeType": "image/jpeg", "data": image_b64}},
+                ],
+            }],
+            "generationConfig": {
+                "temperature": GeminiConfig.TEMPERATURE,
+                "maxOutputTokens": GeminiConfig.MAX_OUTPUT_TOKENS,
+            },
+        }
+        return self._stream_call(payload)
+
+    def generate_image(
+        self, prompt: str, source_image_path: Optional[str] = None
+    ) -> Optional[Tuple[bytes, str]]:
+        """
+        Metinden bir görsel üretir; `source_image_path` verilirse var olan bir
+        görseli isteğe göre DÜZENLER (aynı fotoğrafı yeniden gönderip değişiklik
+        istenir). Hesaptaki görsel üretim modellerini sırayla dener.
+        Döner: (görsel_bayt, mime_type) ya da hiçbiri çalışmazsa None.
+        """
         api_key = get_api_key()
         if not api_key:
             return None
 
-        payload = self._build_payload(question, context)
+        parts: List[dict] = [{"text": prompt}]
+        if source_image_path:
+            try:
+                with open(source_image_path, "rb") as f:
+                    raw = f.read()
+            except OSError:
+                return None
+            ext = os.path.splitext(source_image_path)[1].lower().strip(".")
+            mime_in = {"png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg")
+            parts.append({"inlineData": {"mimeType": mime_in, "data": base64.b64encode(raw).decode("ascii")}})
+
+        headers = {"Content-Type": "application/json"}
+        timeout = (GeminiConfig.CONNECT_TIMEOUT, GeminiConfig.READ_TIMEOUT)
+        last_error = None
+
+        for model in GeminiConfig.IMAGE_MODELS:
+            payload: dict = {"contents": [{"role": "user", "parts": parts}]}
+            if "preview-image" in model:
+                payload["generationConfig"] = {"responseModalities": ["TEXT", "IMAGE"]}
+            url = f"{GeminiConfig.API_BASE}/models/{model}:generateContent?key={urllib.parse.quote(api_key)}"
+            try:
+                resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+                if resp.status_code != 200:
+                    last_error = f"{model}: HTTP {resp.status_code} {resp.text[:160]}"
+                    continue
+                data = resp.json()
+                for cand in data.get("candidates", []):
+                    for part in cand.get("content", {}).get("parts", []):
+                        inline = part.get("inlineData") or part.get("inline_data")
+                        if inline and inline.get("data"):
+                            img_bytes = base64.b64decode(inline["data"])
+                            mime_out = inline.get("mimeType") or inline.get("mime_type") or "image/png"
+                            return img_bytes, mime_out
+                last_error = f"{model}: görsel içermeyen yanıt"
+            except requests.RequestException as e:
+                last_error = f"{model}: {type(e).__name__} {str(e)[:120]}"
+                continue
+
+        if last_error:
+            print(f"[GeminiService] Görsel Üretim Hatası: {last_error}")
+        return None
+
+    def _stream_call(self, payload: dict) -> Optional[str]:
+        """`streamGenerateContent` (SSE) uç noktasını yedek modelleri sırayla
+        deneyerek çağırır; ilk anlamlı yanıtı döndürür."""
+        api_key = get_api_key()
+        if not api_key:
+            return None
+
         headers = {"Content-Type": "application/json"}
         timeout = (GeminiConfig.CONNECT_TIMEOUT, GeminiConfig.READ_TIMEOUT)
 
@@ -202,6 +346,169 @@ class GeminiService:
             return False, f"Beklenmeyen durum: HTTP {resp.status_code}"
         except requests.RequestException as e:
             return False, f"Bağlantı hatası: {type(e).__name__}"
+
+
+# ─────────────────────────────────────────────
+# 👁️ Kamera + Görsel Anlama (Vision)
+# ─────────────────────────────────────────────
+
+class VisionAssistant:
+    """
+    Kamerayla ilgili doğal dil isteklerini algılar; bilgisayarın web kamerasından
+    bir kare yakalayıp Gemini'nin görsel anlama yeteneğiyle yanıtlar:
+      • "kafama / kafa şekline hangi tıraş yakışır?" → saç/tıraş modeli önerisi
+      • "elimde ne var?" / "elimdeki ne?"            → eldeki nesneyi tanır, marka/model tahmin eder
+
+    GUI sohbeti, yerel sesli sohbet VE Telegram (ayrıca /arama sesli görüşme
+    modu) — hepsi `AIEngine.process_query` üzerinden geçtiği için otomatik
+    çalışır. Gemini API anahtarı + internet + OpenCV + kamera gerektirir.
+    """
+
+    _HAIRCUT_RE = re.compile(
+        r"(tıraş|tiras|sa[çc]\s*modeli|sa[çc]\s*kesimi|sa[çc]\s*stili).{0,40}(yakış|yakis)"
+        r"|kafa\s*şekl|kafa\s*sekl|yüz\s*şekl|yuz\s*sekl"
+    )
+    _OBJECT_RE = re.compile(
+        r"elimde(ki)?\s+(ne|şey|bir\s*şey)|avucumda\s+ne|elimdeki\s+(bu\s+)?"
+        r"(şey|sey|nesne|ürün|urun)|bunu\s+tan[ıi]|elimdekini\s+tan[ıi]"
+    )
+
+    _PROMPTS = {
+        "haircut": (
+            "Fotoğraftaki kişinin yüz/kafa şeklini kısaca değerlendir (oval, "
+            "yuvarlak, kare, kalp, uzun, köşeli ...). Bu yüz/kafa şekline göre "
+            "internetteki yaygın stil rehberlerinde önerilen 1-2 saç/tıraş modelini "
+            "belirt (örn. buzz cut, fade, undercut, crew cut, pompadour ...). "
+            "TÜRKÇE ve şu kalıba UYARAK tek kısa paragrafla yanıt ver: "
+            "\"Yüz şekliniz ... görünüyor. Size [MODEL ADI] çok yakışır efendim, "
+            "çünkü ...\". Fotoğrafta yüz net görünmüyorsa bunu açıkça belirt."
+        ),
+        "object": (
+            "Fotoğrafta kişinin elinde/avucunda tuttuğu nesneyi belirle. Ne "
+            "olduğunu ve — özellikle bir telefon/elektronik cihazsa — tasarımından, "
+            "logosundan tahmin edebildiğin marka ve modelini TÜRKÇE olarak şu "
+            "kalıpla söyle: \"Elinizde [NESNE] görüyorum, sanırım marka/modeli "
+            "[MARKA MODEL].\" Marka/modelden %100 emin değilsen 'olabilir' diyerek "
+            "bunun bir tahmin olduğunu belirt. Elde hiçbir nesne görünmüyorsa bunu "
+            "açıkça söyle, nesne uydurma."
+        ),
+    }
+
+    @classmethod
+    def detect_intent(cls, text: str) -> Optional[str]:
+        """Metin kamera/görsel bir istek mi? 'haircut' | 'object' | None döndürür."""
+        low = turkish_lower(text or "")
+        if not low.strip():
+            return None
+        if cls._HAIRCUT_RE.search(low):
+            return "haircut"
+        if cls._OBJECT_RE.search(low):
+            return "object"
+        return None
+
+    @classmethod
+    def handle(cls, kind: str, gemini: "GeminiService") -> str:
+        """Kamerayla bir kare yakalar, Gemini vision ile yorumlar, Türkçe yanıt döndürür."""
+        if not get_api_key():
+            return (
+                "👁️ Bu özellik (kamerayla görsel analiz) için bir Gemini API "
+                "anahtarı gerekiyor. Lütfen **Ayarlar** bölümünden bir anahtar girin."
+            )
+        try:
+            from security_guard import CameraCapture
+        except Exception:
+            return "👁️ Kamera bileşeni yüklü değil (OpenCV / opencv-python gerekli)."
+
+        save_dir = os.path.join(DATA_DIR, "vision_captures")
+        path = CameraCapture.snapshot(save_dir=save_dir)
+        if not path:
+            return "⚠️ Web kamerasından görüntü alınamadı (kamera yok / kullanımda / erişim izni yok)."
+
+        try:
+            answer = gemini.generate_vision_response(cls._PROMPTS[kind], path)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+        if not answer:
+            return "⚠️ Görüntüyü şu an analiz edemedim (Gemini'ye erişilemedi). Tekrar dener misin?"
+        return answer.strip()
+
+
+# ─────────────────────────────────────────────
+# 🎨 Görsel Stüdyosu (metinden görsel üretme + var olan görseli düzenleme)
+# ─────────────────────────────────────────────
+
+class ImageStudio:
+    """
+    "Bana mutlu bir aile çiz" gibi isteklerle sıfırdan görsel üretir; ➕
+    butonuyla bir fotoğraf eklenip "bunu daha kaliteli yap" dendiğinde o
+    fotoğrafı düzenler. GUI, sesli sohbet ve Telegram — hepsinde aynı şekilde
+    çalışır (AIEngine.process_query üzerinden). Gemini API anahtarı + internet
+    + hesapta aktif bir görsel üretim modeli gerektirir.
+    """
+
+    # "resim/resmi/resmini", "fotoğraf/fotoğrafı/fotoğrafını" gibi Türkçe ek
+    # çekimlerini de yakalamak için kelime kökü + \w* joker kullanılır.
+    _PIC_WORD = r"(?:foto[gğ]raf\w*|res[a-zçğıöşü]*|g[öo]rsel\w*)"
+    _EDIT_RE = re.compile(
+        r"(düzenle|duzenle|iyileştir|iyilestir|kaliteli|kalitesini|geliştir|gelistir|"
+        r"restore|onar|rötuş|rotus).{0,30}" + _PIC_WORD +
+        r"|" + _PIC_WORD + r".{0,30}(düzenle|duzenle|iyileştir|"
+        r"iyilestir|geliştir|gelistir|kaliteli|rötuş|rotus)"
+    )
+    _GENERATE_RE = re.compile(
+        r"\bçiz\b|\bciz\b|\bçizer\s*misin\b|" + _PIC_WORD + r"\s*(çiz|ciz|yap|oluştur|olustur|üret|uret)"
+    )
+
+    @classmethod
+    def detect_intent(cls, text: str) -> Optional[str]:
+        """Metin görsel isteği mi? 'edit' | 'generate' | None döndürür."""
+        low = turkish_lower(text or "")
+        if not low.strip():
+            return None
+        if cls._EDIT_RE.search(low):
+            return "edit"
+        if cls._GENERATE_RE.search(low):
+            return "generate"
+        return None
+
+    @classmethod
+    def handle(
+        cls, kind: str, prompt: str, gemini: "GeminiService",
+        source_image_path: Optional[str] = None,
+    ) -> Tuple[Optional[str], str]:
+        """Görseli üretir/düzenler, diske kaydeder. (dosya_yolu, mesaj) döndürür."""
+        if not get_api_key():
+            return None, (
+                "🎨 Görsel oluşturma/düzenleme için bir Gemini API anahtarı gerekiyor. "
+                "Lütfen **Ayarlar** bölümünden bir anahtar girin."
+            )
+
+        result = gemini.generate_image(
+            prompt, source_image_path=source_image_path if kind == "edit" else None
+        )
+        if not result:
+            return None, (
+                "🎨 Şu an görsel üretemedim — bu Gemini anahtarında görsel üretim modeli "
+                "aktif olmayabilir ya da geçici bir sorun oluştu. Lütfen tekrar dener misin?"
+            )
+
+        img_bytes, mime = result
+        ext = ".png" if "png" in mime else (".webp" if "webp" in mime else ".jpg")
+        out_dir = os.path.join(DATA_DIR, "generated_images")
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, f"mehbur_{int(time.time() * 1000)}{ext}")
+        try:
+            with open(path, "wb") as f:
+                f.write(img_bytes)
+        except OSError:
+            return None, "⚠️ Görsel oluşturuldu ama diske kaydedilemedi."
+
+        caption = "🎨 İşte isteğin, efendim!" if kind == "generate" else "✨ Fotoğrafı düzenledim, işte sonucu:"
+        return path, caption
 
 
 # ─────────────────────────────────────────────
@@ -453,6 +760,159 @@ class ProfanityFilter:
 
 
 # ─────────────────────────────────────────────
+# Küfüre Misilleme Üreteci ("asıl sen / asıl ben")
+# ─────────────────────────────────────────────
+
+class ProfanityComeback:
+    """
+    Kullanıcı küfür/hakaret ettiğinde MehburAI aynı üslupla karşılık verir.
+
+    Mantık: "Bu laflar bana yakışıyorsa sana da yakışır." Kullanıcının küfrünü
+    aynaya çevirip iade eder:
+      • "senin ben ananı sikeyim"  → "Asıl ben senin ananı sikeyim. ..."
+      • "sen tam bir oç'sun"        → "Asıl sen oçsun. ..."
+      • "amına koyayım" / "amk"     → "Asıl ben senin ananı koyayım. ..."
+    """
+
+    _VOWELS = "aeıioöuü"
+
+    # Aileye yönelik hedefler ("ananı", "avradını", "bacını" ...)
+    _FAMILY_RE = re.compile(
+        r"\b(anan|anne|avrad|bac[ıi]|kar[ıi]|sülale|sulale|soyu|soyun|ecdad|nesli|nesil)"
+    )
+    # "sikmek / sokmak / koymak" fiil kökleri ve maskeli biçimleri
+    _FUCK_VERB_RE = re.compile(r"(sik|sok|koy|s\*+k|s\.k|düz)")
+    # Aile geçmese de fiilli/ağır kalıplar ("amına koyayım", "amk", "aq", "a.m.k")
+    _HEAVY_RE = re.compile(
+        r"\bam[ıi]na\s*(koy|sok|s)|\bamk\b|\bamq\b|\baq\b|\ba\s*\.?\s*m\s*\.?\s*k\b|\bam[ck]oy"
+    )
+
+    # "asıl sen ...sın" için kısa hakaret / küfür sözcükleri (öncelik sırası)
+    _NAME_CALL_WORDS = [
+        "orospu", "pezevenk", "şerefsiz", "serefsiz", "gerizekalı", "gerizekali",
+        "yavşak", "yavsak", "dangalak", "çomar", "comar", "dalyarak", "kahpe",
+        "salak", "aptal", "ahmak", "manyak", "embesil", "moron", "beyinsiz",
+        "puşt", "pust", "ibne", "gavat", "kavat", "götlek", "gotlek",
+        "piç", "oç", "mal", "göt",
+    ]
+
+    _GENERIC = [
+        "Asıl sen öylesin. Aynen iade ediyorum.",
+        "Ne dersen sen osun, aynısı sana geri.",
+        "Bu laf sana yakışıyor demek ki — al, senin olsun.",
+    ]
+
+    @classmethod
+    def _ek_sin(cls, word: str) -> str:
+        """Türkçe ünlü uyumuna göre '-sın/-sin/-sun/-sün' ekini seçer."""
+        vowels = [c for c in word if c in cls._VOWELS]
+        last = vowels[-1] if vowels else "e"
+        if last in "aı":
+            return "sın"
+        if last in "ei":
+            return "sin"
+        if last in "ou":
+            return "sun"
+        return "sün"
+
+    @classmethod
+    def _family_comeback(cls, low: str) -> str:
+        if re.search(r"bac[ıi]", low):
+            target = "bacını"
+        elif re.search(r"(avrad|kar[ıi])", low):
+            target = "avradını"
+        elif re.search(r"(sülale|sulale|soyu|soyun|ecdad|nesli|nesil)", low):
+            target = "sülaleni"
+        else:
+            target = "ananı"
+
+        if re.search(r"sok", low):
+            verb = "sokayım"
+        elif re.search(r"koy", low):
+            verb = "koyayım"
+        else:
+            verb = "sikeyim"
+
+        return f"Asıl ben senin {target} {verb}. Başlatma şimdi."
+
+    @classmethod
+    def generate(cls, text: str) -> str:
+        """Küfürlü metne misilleme yanıtı üretir."""
+        low = turkish_lower(text or "")
+
+        # 1) Aileye yönelik fiilli küfür → "asıl ben senin ..."
+        if cls._FAMILY_RE.search(low) and cls._FUCK_VERB_RE.search(low):
+            return cls._family_comeback(low)
+        if cls._HEAVY_RE.search(low):
+            return cls._family_comeback(low)
+
+        # 2) İsim takma ("sen ... piçsin", "oç") → "asıl sen ...sın"
+        for w in cls._NAME_CALL_WORDS:
+            if re.search(r"\b" + re.escape(w), low):
+                return f"Asıl sen {w}{cls._ek_sin(w)}. Aynen iade."
+        for root in ProfanityFilter.PROFANITY_ROOTS:
+            if root in low:
+                return f"Asıl sen {root}{cls._ek_sin(root)}. Aynen iade."
+
+        # 3) Genel misilleme
+        return cls._GENERIC[len(low) % len(cls._GENERIC)]
+
+
+# ─────────────────────────────────────────────
+# Sohbet Ruh Hali — "yakışıyor mu?" onayı + kaba üslup
+# ─────────────────────────────────────────────
+
+class MoodFilter:
+    """
+    "Sana böyle laflar yakışıyor mu?" sorusundan sonra kullanıcının cevabını
+    sınıflandırır:  "affirm" (yakışıyor/evet) · "negate" (yakışmıyor/hayır) · None.
+    """
+
+    _AFFIRM = {
+        "evet", "aynen", "kesinlikle", "tabii", "tabi", "helal", "eyvallah",
+        "elbette", "he", "hı", "hıhı", "hehe", "yakışıyor", "yakışır",
+        "yakisiyor", "yakisir", "yakışio", "yakışıyo", "yakışıyor tabii",
+    }
+    _NEGATE = {
+        "hayır", "hayir", "yok", "asla", "olmaz", "hiç", "hic", "yakışmıyor",
+        "yakışmaz", "yakismiyor", "yakismaz", "yakışmio", "yakışmıyo",
+    }
+
+    @classmethod
+    def classify_confirmation(cls, text: str) -> Optional[str]:
+        low = turkish_lower(text or "").strip()
+        cleaned = clean_text(low)
+        if not cleaned:
+            return None
+        words = set(cleaned.split())
+        # Olumsuz önce ("yakışmıyor" hem 'yakış' hem 'yakışm' içerir)
+        if "yakışm" in low or "yakism" in low or (words & cls._NEGATE):
+            return "negate"
+        if "yakış" in low or "yakis" in low or (words & cls._AFFIRM):
+            return "affirm"
+        return None
+
+
+class RudeFlavor:
+    """Sohbet 'kaba' moduna geçtiğinde normal yanıtların sonuna sivri bir kuyruk ekler."""
+
+    _TAILS = [
+        "Başka bir şey var mı, çabuk ol.",
+        "Al işte cevabın, memnun oldun mu?",
+        "Bu kadar. Fazla uzatma.",
+        "İşine yaradıysa ne mutlu sana.",
+        "Hadi bir sonraki soru, bütün gün vaktim yok.",
+    ]
+
+    @classmethod
+    def wrap(cls, text: str) -> str:
+        text = (text or "").rstrip()
+        if not text:
+            return text
+        return f"{text}\n\n— {cls._TAILS[len(text) % len(cls._TAILS)]}"
+
+
+# ─────────────────────────────────────────────
 # Gemini API Durum Kontrolcüsü
 # ─────────────────────────────────────────────
 
@@ -522,11 +982,52 @@ class AIEngine:
         self.network = network_monitor or NetworkMonitor()
         self.gemini = GeminiService()
 
-    def process_query(self, user_query: str) -> Dict[str, Any]:
+    def process_query(
+        self,
+        user_query: str,
+        conversation_id: Optional[int] = None,
+        file_context: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
         """
         Kullanıcı girdisini analiz eder, ağ durumuna göre yanıt üretir,
         gerekirse hafızaya kaydeder ve yanıt detaylarını döndürür.
+
+        `conversation_id` verilirse yanıt o sohbetin "ruh haline" göre şekillenir:
+        küfre ilk kez "Sana böyle laflar yakışıyor mu?" der; kullanıcı "yakışıyor"
+        derse artık o sohbette küfre "asıl sen / asıl ben" ile karşılık verir ve
+        genel üslubu sertleşir.
+
+        `file_context` verilirse (➕ butonuyla eklenen bir dosya) şu biçimlerde olabilir:
+          • Metin dosyası: {"name": ..., "kind": "text", "text": "<içerik>"}
+          • Görsel dosyası: {"name": ..., "kind": "image", "path": "<yerel yol>"}
         """
+        result = self._process_query_core(user_query, conversation_id, file_context)
+        if conversation_id:
+            try:
+                self.memory.touch_conversation(conversation_id)
+                mood = self.memory.get_conversation_mood(conversation_id)
+            except Exception:
+                mood = "normal"
+            if mood == "rude" and result.get("source") not in (
+                "profanity_comeback", "profanity_filter", "mood", "empty", "error"
+            ):
+                result["answer"] = RudeFlavor.wrap(result.get("answer", ""))
+        return result
+
+    def _process_query_core(
+        self,
+        user_query: str,
+        conversation_id: Optional[int] = None,
+        file_context: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        cid = conversation_id
+
+        def log(role, message, is_online, source=None):
+            self.memory.log_message(
+                role=role, message=message, is_online=is_online,
+                source=source, conversation_id=cid,
+            )
+
         query = user_query.strip()
         if not query:
             return {
@@ -536,17 +1037,116 @@ class AIEngine:
                 "learned": False,
             }
 
-        # 0. ADIM: Küfür & Hakaret Filtresi
+        mood = "normal"
+        if cid:
+            try:
+                mood = self.memory.get_conversation_mood(cid)
+            except Exception:
+                mood = "normal"
+
+        # 0-A. "Sana böyle laflar yakışıyor mu?" sorulmuşsa kullanıcının onayı/reddi
+        if mood == "provoked":
+            verdict = MoodFilter.classify_confirmation(query)
+            if verdict == "affirm":
+                self.memory.set_conversation_mood(cid, "rude")
+                ans = ("O zaman bana da yakışıyor. Bundan sonra bu sohbette bana "
+                       "nasıl davranırsan aynısını geri alırsın. 😏")
+                log("user", query, self.network.is_online)
+                log("mehbur", ans, self.network.is_online, source="mood")
+                return {"answer": ans, "is_online": self.network.is_online,
+                        "source": "mood", "learned": False}
+            if verdict == "negate":
+                self.memory.set_conversation_mood(cid, "normal")
+                ans = "İyi bari. O zaman ikimiz de ağzımızı bozmayalım. 🙂"
+                log("user", query, self.network.is_online)
+                log("mehbur", ans, self.network.is_online, source="mood")
+                return {"answer": ans, "is_online": self.network.is_online,
+                        "source": "mood", "learned": False}
+            # kararsız/alakasız cevap → 'provoked' kal, normal akışa devam et
+
+        # 0-B. ADIM: Küfür & Hakaret Filtresi (sohbetin ruh haline göre)
         if ProfanityFilter.check_profanity(query):
             is_online = self.network.is_online
-            self.memory.log_message(role="user", message="[küfür filtresi]", is_online=is_online)
-            self.memory.log_message(role="mehbur", message=PROFANITY_RESPONSE, is_online=is_online, source="profanity_filter")
+            comeback_on = get_profanity_config().get("profanity_comeback_enabled", True)
+            if mood == "rude" and comeback_on:
+                answer = ProfanityComeback.generate(query)
+                source = "profanity_comeback"
+            else:
+                answer = PROFANITY_RESPONSE
+                source = "profanity_filter"
+                if cid and mood == "normal":
+                    self.memory.set_conversation_mood(cid, "provoked")
+            log("user", "[küfür filtresi]", is_online)
+            log("mehbur", answer, is_online, source=source)
             return {
-                "answer": PROFANITY_RESPONSE,
+                "answer": answer,
                 "is_online": is_online,
-                "source": "profanity_filter",
+                "source": source,
                 "learned": False,
             }
+
+        # 0-C. ADIM: 📎 Eklenmiş METİN Dosyası Üzerinden Soru-Cevap
+        # (➕ butonuyla eklenen .txt/.md/.csv/... bir dosyanın içeriğine dayanarak yanıtlar.)
+        if file_context and file_context.get("kind") == "text" and file_context.get("text"):
+            fname = file_context.get("name", "dosya")
+            is_online = self.network.check_now()
+            api_key = get_api_key()
+            if not (is_online and api_key):
+                if not api_key:
+                    answer = (
+                        f"📎 '**{fname}**' dosyasını okudum ama içeriğini analiz edebilmem için "
+                        "bir Gemini API anahtarı gerekiyor. **Ayarlar**'dan anahtar girip tekrar sorabilirsin."
+                    )
+                else:
+                    answer = f"📡 '**{fname}**' dosyası hakkında yanıt vermek için internet gerekiyor."
+                source = "file_no_key" if not api_key else "file_offline"
+            else:
+                context_text = (
+                    f"Kullanıcının sohbete eklediği '{fname}' adlı dosyanın içeriği:\n"
+                    f"---\n{file_context['text']}\n---\n"
+                    "Yanıtını YALNIZCA bu dosya içeriğine dayanarak, Türkçe ve net biçimde ver."
+                )
+                answer = self.gemini.generate_response(query, context=context_text)
+                if not answer:
+                    answer = f"📎 '{fname}' dosyasını okudum ama şu an yanıt üretemedim, tekrar dener misin?"
+                source = f"📎 {fname}"
+            log("user", f"{query}  [📎 {fname}]", is_online)
+            log("mehbur", answer, is_online, source=source)
+            return {"answer": answer, "is_online": is_online, "source": source, "learned": False}
+
+        # 0-D. ADIM: 🎨 Görsel Oluşturma / Düzenleme
+        # ("bana mutlu bir aile çiz" → üretim; ➕ ile fotoğraf ekleyip "bunu daha
+        #  kaliteli yap" → düzenleme). GUI, sesli sohbet ve Telegram'da aynı şekilde çalışır.
+        has_image_attachment = bool(file_context and file_context.get("kind") == "image")
+        img_kind = ImageStudio.detect_intent(query)
+
+        if img_kind == "edit" and not has_image_attachment:
+            is_online = self.network.is_online
+            answer = "🖌️ Düzenlemek istediğin fotoğrafı önce ➕ butonuyla ekle, sonra bu isteği tekrar yaz."
+            log("user", query, is_online)
+            log("mehbur", answer, is_online, source="image_studio")
+            return {"answer": answer, "is_online": is_online, "source": "🎨 Görsel Stüdyosu", "learned": False}
+
+        if has_image_attachment or img_kind == "generate":
+            is_online = self.network.check_now()
+            image_path = None
+            fname = file_context.get("name", "görsel") if has_image_attachment else None
+            if not is_online:
+                answer = "📡 Görsel oluşturma/düzenleme internet bağlantısı gerektirir; şu an çevrimdışısınız."
+            else:
+                kind = "edit" if has_image_attachment else "generate"
+                src_path = file_context.get("path") if has_image_attachment else None
+                image_path, answer = ImageStudio.handle(kind, query, self.gemini, source_image_path=src_path)
+            tag = f"  [📎 {fname}]" if has_image_attachment else ""
+            log("user", f"{query}{tag}", is_online)
+            log("mehbur", answer, is_online, source="image_studio")
+            result: Dict[str, Any] = {
+                "answer": answer, "is_online": is_online,
+                "source": "🎨 Görsel Stüdyosu", "learned": False,
+            }
+            if image_path:
+                result["image_path"] = image_path
+            return result
 
         # 1. ADIM: Bilgisayar & Sistem Araçları Kontrolü
         # (Açık bir komut — "... klasörü oluştur", "not defteri aç" — selam/kimlik
@@ -554,8 +1154,8 @@ class AIEngine:
         system_response = SystemTools.handle_system_query(query)
         if system_response:
             is_online = self.network.is_online
-            self.memory.log_message(role="user", message=query, is_online=is_online)
-            self.memory.log_message(role="mehbur", message=system_response, is_online=is_online, source="system_tool")
+            log("user", query, is_online)
+            log("mehbur", system_response, is_online, source="system_tool")
             return {
                 "answer": system_response,
                 "is_online": is_online,
@@ -567,8 +1167,8 @@ class AIEngine:
         greeting_response = GreetingFilter.check_greeting(query)
         if greeting_response:
             is_online = self.network.is_online
-            self.memory.log_message(role="user", message=query, is_online=is_online)
-            self.memory.log_message(role="mehbur", message=greeting_response, is_online=is_online, source="greeting")
+            log("user", query, is_online)
+            log("mehbur", greeting_response, is_online, source="greeting")
             return {
                 "answer": greeting_response,
                 "is_online": is_online,
@@ -580,12 +1180,31 @@ class AIEngine:
         if GeminiStatusChecker.is_gemini_query(query):
             is_online = self.network.is_online
             reply = GeminiStatusChecker.get_status_reply()
-            self.memory.log_message(role="user", message=query, is_online=is_online)
-            self.memory.log_message(role="mehbur", message=reply, is_online=is_online, source="gemini_status")
+            log("user", query, is_online)
+            log("mehbur", reply, is_online, source="gemini_status")
             return {
                 "answer": reply,
                 "is_online": is_online,
                 "source": "Gemini API Kontrolü",
+                "learned": False,
+            }
+
+        # 3-B. ADIM: 👁️ Kamera + Görsel Anlama ("kafama ne tıraş yakışır",
+        # "elimde ne var") — GUI, yerel sesli sohbet ve Telegram (/arama dahil)
+        # hepsi buradan geçtiği için otomatik çalışır.
+        vision_kind = VisionAssistant.detect_intent(query)
+        if vision_kind:
+            is_online = self.network.check_now()
+            if not is_online:
+                answer = "📡 Bu özellik internet bağlantısı gerektirir; şu an çevrimdışısınız."
+            else:
+                answer = VisionAssistant.handle(vision_kind, self.gemini)
+            log("user", query, is_online)
+            log("mehbur", answer, is_online, source="vision")
+            return {
+                "answer": answer,
+                "is_online": is_online,
+                "source": "👁️ Kamera / Görsel Anlama",
                 "learned": False,
             }
 
@@ -597,7 +1216,7 @@ class AIEngine:
         # ─────────────────────────────────────
         if is_online:
             # Kullanıcı mesajını kaydet
-            self.memory.log_message(role="user", message=query, is_online=True)
+            log("user", query, True)
 
             # Güvenilir kaynaktan araştır (Wikipedia)
             wiki_data = TrustedSourceFetcher.search_wikipedia(query)
@@ -620,21 +1239,33 @@ class AIEngine:
                     )
                     source_tag = wiki_data['source']
                 else:
-                    api_key = get_api_key()
-                    if not api_key:
+                    # Wikipedia'da da yoksa — Gemini anahtarı yokken/başarısızken
+                    # ikinci deneme olarak Reddit'e bakılır.
+                    reddit_data = TrustedSourceFetcher.search_reddit(query)
+                    if reddit_data:
                         answer = (
-                            "⚠️ **Gemini API Anahtarı Bulunamadı!**\n\n"
-                            "Çevrim içi arama ve akıllı yapay zeka yanıtları için lütfen "
-                            "**Ayarlar** bölümünden Google Gemini API anahtarınızı giriniz.\n"
-                            "*(API anahtarı olmadan yalnızca hafızadaki kayıtlı bilgiler ve temel kaynaklar çalışır.)*"
+                            f"{reddit_data['extract']}\n\n"
+                            f"📌 *Kaynak: {reddit_data['source']}*"
                         )
-                        source_tag = "system_no_key"
+                        source_tag = reddit_data['source']
                     else:
-                        answer = (
-                            "Bu soruyla ilgili güvenilir bir bilgi kaynağına ulaşılamadı. "
-                            "Lütfen soruyu farklı kelimelerle sormayı deneyin."
-                        )
-                        source_tag = "unknown"
+                        api_key = get_api_key()
+                        if not api_key:
+                            answer = (
+                                "⚠️ **Gemini API Anahtarı Bulunamadı!**\n\n"
+                                "Wikipedia ve Reddit'te de bu soruyla ilgili bir sonuç bulamadım. "
+                                "Çevrim içi arama ve akıllı yapay zeka yanıtları için lütfen "
+                                "**Ayarlar** bölümünden Google Gemini API anahtarınızı giriniz.\n"
+                                "*(API anahtarı olmadan Wikipedia, Reddit ve hafızadaki kayıtlı "
+                                "bilgiler çalışır.)*"
+                            )
+                            source_tag = "system_no_key"
+                        else:
+                            answer = (
+                                "Bu soruyla ilgili güvenilir bir bilgi kaynağına ulaşılamadı. "
+                                "Lütfen soruyu farklı kelimelerle sormayı deneyin."
+                            )
+                            source_tag = "unknown"
 
             # Otomatik Öğrenme: Geçerli yanıtları hemen hafızaya kaydet ("Eğer bu soru sorulursa bu cevabı ver")
             learned = False
@@ -643,7 +1274,7 @@ class AIEngine:
                 learned = True
 
             # Sohbet kaydını yap
-            self.memory.log_message(role="mehbur", message=answer, is_online=True, source=source_tag)
+            log("mehbur", answer, True, source=source_tag)
 
             return {
                 "answer": answer,
@@ -656,7 +1287,7 @@ class AIEngine:
         # DURUM B: ÇEVRİMDAŞI MOD (OFFLINE)
         # ─────────────────────────────────────
         else:
-            self.memory.log_message(role="user", message=query, is_online=False)
+            log("user", query, False)
 
             # Hafızadaki kayıtlı bilgileri semantik olarak ara
             match = self.memory.search_knowledge(query)
@@ -666,7 +1297,7 @@ class AIEngine:
                 answer = match["answer"]
                 source_tag = f"hafıza ({match['source']})"
 
-                self.memory.log_message(role="mehbur", message=answer, is_online=False, source="memory")
+                log("mehbur", answer, False, source="memory")
 
                 return {
                     "answer": answer,
@@ -686,7 +1317,7 @@ class AIEngine:
                     "kullanabilmeniz için hafızama otomatik olarak kaydedeceğim! 💡"
                 )
 
-                self.memory.log_message(role="mehbur", message=offline_msg, is_online=False, source="offline_unknown")
+                log("mehbur", offline_msg, False, source="offline_unknown")
 
                 return {
                     "answer": offline_msg,

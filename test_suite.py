@@ -22,8 +22,22 @@ import sys
 if sys.stdout.encoding != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
-from ai_engine import AIEngine, ProfanityFilter
-from config import PROFANITY_RESPONSE, get_api_key, set_api_key
+from ai_engine import (
+    AIEngine,
+    ImageStudio,
+    ProfanityComeback,
+    ProfanityFilter,
+    TrustedSourceFetcher,
+    VisionAssistant,
+)
+from config import (
+    APP_VERSION,
+    PROFANITY_RESPONSE,
+    get_api_key,
+    get_profanity_config,
+    set_api_key,
+    update_profanity_config,
+)
 from memory_engine import MemoryEngine
 from network_manager import NetworkMonitor
 from system_tools import SystemTools
@@ -34,7 +48,7 @@ def run_full_validation():
     print("  🤖 MEHBUR AI — FAZ 5 ENTEGRASYON VE DOĞRULAMA TESTLERİ")
     print("=" * 65)
     passed_tests = 0
-    total_tests = 10
+    total_tests = 18
 
     memory = MemoryEngine()
     network = NetworkMonitor()
@@ -205,12 +219,14 @@ def run_full_validation():
     if safe_ok:
         print(f"  • {len(safe_sentences)} masum cümle doğru şekilde geçirildi ✓")
 
-    # 8c. process_query entegrasyonu — küfürlü mesaj doğru yanıtı vermeli
+    # 8c. process_query entegrasyonu — misilleme kapalıyken nazik uyarı dönmeli
+    update_profanity_config(profanity_comeback_enabled=False)
     profanity_result = ai.process_query("siktir git")
     assert profanity_result["answer"] == PROFANITY_RESPONSE, \
         f"Beklenen '{PROFANITY_RESPONSE}', gelen '{profanity_result['answer']}'"
     assert profanity_result["source"] == "profanity_filter"
     assert profanity_result["learned"] is False
+    update_profanity_config(profanity_comeback_enabled=True)
     print(f"  • process_query küfür testi: '{profanity_result['answer']}' ✓")
 
     assert prof_pos_ok and safe_ok
@@ -355,6 +371,30 @@ def run_full_validation():
     assert fired == [tg], f"tam kapatıp açınca yeniden sormalı: {fired}"
     print("  • Tepsi programı kapatılıp tekrar açılınca yeniden soruyor ✓")
 
+    # 10c-3. Korumalı dosya silinince "delete" olayı tetiklenir + yedekten geri yüklenir
+    import tempfile as _tf
+    _sdir = _tf.mkdtemp()
+    _sfile = _os.path.join(_sdir, "gizli_belge.txt")
+    open(_sfile, "w", encoding="utf-8").write("cok onemli veri")
+    _cfg.update_security_config(security_enabled=True, security_watch_paths=[_sfile])
+    _sg._foreground_exe_path = lambda: None
+    _sg.SecurityGuard._scan = classmethod(lambda cls: ([], []))
+    _devents = []
+    g3 = _sg.SecurityGuard(on_access=lambda p, e="access": _devents.append((e, p)))
+    g3.BACKUP_EVERY = 0.0
+    g3._check_once()                                      # priming + yedek
+    assert _sg.FileBackup.has(_sfile), "korumalı dosyanın gizli yedeği alınmalı"
+    _os.remove(_sfile)                                    # dosyayı sil
+    g3._check_once()
+    assert _devents == [("delete", _sg.SecurityGuard._norm(_sfile))], f"silme olayı: {_devents}"
+    assert _sg.FileBackup.restore(_sfile) and _os.path.isfile(_sfile), "yedekten geri yüklenmeli"
+    assert open(_sfile, encoding="utf-8").read() == "cok onemli veri"
+    _sg.FileBackup.discard(_sfile)
+    import shutil as _sh
+    _sh.rmtree(_sdir, ignore_errors=True)
+    _sh.rmtree(_sg.FileBackup.DIR, ignore_errors=True)
+    print("  • Korumalı dosya silinince 'delete' sorulur ve yedekten geri yüklenir ✓")
+
     # 10d. Alarm akışı: hedefi kapatır + kamera yoksa Telegram metnine düşer
     _sg.CameraCapture.snapshot = staticmethod(lambda save_dir=None: None)
     _sg.TelegramNotifier.is_configured = classmethod(lambda cls: True)
@@ -375,6 +415,453 @@ def run_full_validation():
     except Exception:
         pass
     print("  ✅ TEST 10 BAŞARILI: Güvenlik modu bileşenleri çalışıyor.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 11: 🤖 Telegram Uzaktan Kontrol
+    # ─────────────────────────────────────────
+    print("\n[TEST 11] 🤖 Telegram Uzaktan Kontrol:")
+    import telegram_bot as _tb
+
+    _out = []
+    _bot = _tb.TelegramControlBot(
+        query_handler=lambda t: f"cevap<{t}>",
+        security_status=lambda: "DURUM-OK",
+        security_toggle=lambda w: f"guvenlik={'ac' if w else 'kapat'}",
+    )
+    _bot._creds = lambda: ("TESTTOKEN", "555")
+    _bot._is_owner = lambda cid: str(cid) == "555"
+    _bot._send = lambda s: _out.append(("send", s))
+    _bot._chat_action = lambda a="typing": None
+    _bot._send_photo = lambda p, c="", cleanup=False: _out.append(("photo", c))
+    _rej = []
+    _bot._send_to = lambda cid, txt: _rej.append((cid, txt))
+    _tb.SystemTools.save_screenshot = staticmethod(lambda dest_dir=None: "ss.png")
+    _tb.CameraCapture.snapshot = staticmethod(lambda save_dir=None: "cam.jpg")
+
+    # 11a. Yetkisiz chat ID: komut İŞLENMEZ ama tek seferlik ret mesajı alır
+    _bot._handle_update({"message": {"chat": {"id": 111}, "text": "merhaba"}})
+    _bot._handle_update({"message": {"chat": {"id": 111}, "text": "hala buradayım"}})
+    assert _out == [], "yetkisiz komut asla işlenmemeli"
+    assert len(_rej) == 1 and str(_rej[0][0]) == "111" and "özel" in _rej[0][1].lower(), _rej
+    print("  • Yetkisiz chat ID engelleniyor + tek ret mesajı gönderiliyor ✓")
+
+    # 11a-2. Kodda sabit OWNER_TELEGRAM_ID her zaman geçerli (config bozulsa bile)
+    _bot2 = _tb.TelegramControlBot(query_handler=lambda t: "ok")
+    assert _bot2._is_owner(_cfg.OWNER_TELEGRAM_ID)
+    assert not _bot2._is_owner("999999999")
+    assert not _bot2._is_owner("")
+    _real_raw = open(_cfg.CONFIG_FILE, "r", encoding="utf-8").read() \
+        if _os.path.exists(_cfg.CONFIG_FILE) else None
+    try:
+        _cfg.save_config({**_cfg.load_config(), "telegram_chat_id": "••••bozuk"})
+        assert _cfg.get_security_config()["telegram_chat_id"] == _cfg.OWNER_TELEGRAM_ID
+        assert _bot2._is_owner(_cfg.OWNER_TELEGRAM_ID)   # hâlâ çalışır
+    finally:
+        if _real_raw is not None:
+            open(_cfg.CONFIG_FILE, "w", encoding="utf-8").write(_real_raw)
+    print("  • Kodda sabit sahip ID'si config bozulsa bile geçerli ✓")
+
+    # 11b. Düz metin → zeka motoruna gider
+    _bot._handle_update({"message": {"chat": {"id": 555}, "text": "einstein kimdir"}})
+    assert any(k == "send" and "cevap<einstein kimdir>" in v for k, v in _out), _out
+    print("  • Düz mesaj MehburAI zeka motoruna yönleniyor ✓")
+
+    # 11c. /ekran ve /foto fotoğraf gönderiyor
+    _out.clear()
+    _bot._handle_update({"message": {"chat": {"id": 555}, "text": "/ekran"}})
+    _bot._handle_update({"message": {"chat": {"id": 555}, "text": "/foto"}})
+    assert sum(1 for k, _ in _out if k == "photo") == 2, _out
+    print("  • /ekran ve /foto komutları görüntü gönderiyor ✓")
+
+    # 11d. /durum ve /guvenlik komutları
+    _out.clear()
+    _bot._handle_update({"message": {"chat": {"id": 555}, "text": "/durum"}})
+    _bot._handle_update({"message": {"chat": {"id": 555}, "text": "/guvenlik kapat"}})
+    assert ("send", "DURUM-OK") in _out and ("send", "guvenlik=kapat") in _out, _out
+    print("  • /durum ve /guvenlik ac|kapat komutları çalışıyor ✓")
+
+    # 11e. Bozuk/maskeli token geçerli token'ı EZEMEZ (regression: '••••' hatası)
+    #      (gerçek config.json'ı bozmamak için dosyayı ham olarak sakla-geri yükle)
+    _cfg_raw = open(_cfg.CONFIG_FILE, "r", encoding="utf-8").read() \
+        if _os.path.exists(_cfg.CONFIG_FILE) else None
+    try:
+        assert _cfg.is_valid_bot_token("123456789:AA" + "x" * 33)
+        assert not _cfg.is_valid_bot_token("•" * 46)
+        _cfg.update_security_config(telegram_bot_token="123456789:AA" + "x" * 33)
+        _good = _cfg.get_security_config()["telegram_bot_token"]
+        _cfg.update_security_config(telegram_bot_token="•" * 46)       # bozuk yazma denemesi
+        assert _cfg.get_security_config()["telegram_bot_token"] == _good, "bozuk token gerçek olanı ezmemeli"
+        _cfg.update_security_config(telegram_bot_token="")            # boş = dokunma
+        assert _cfg.get_security_config()["telegram_bot_token"] == _good
+    finally:
+        if _cfg_raw is not None:
+            open(_cfg.CONFIG_FILE, "w", encoding="utf-8").write(_cfg_raw)
+    print("  • Bozuk/maskeli bot token geçerli token'ı ezemiyor ✓")
+
+    print("  ✅ TEST 11 BAŞARILI: Telegram uzaktan kontrol bileşenleri çalışıyor.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 12: 🎙️ Sesli Sohbet (uyandırma sözcüğü + STT)
+    # ─────────────────────────────────────────
+    print("\n[TEST 12] 🎙️ Sesli Sohbet:")
+    import voice_engine as _ve
+    from telegram_bot import _file_send_query as _fsq
+
+    # 12a. Uyandırma sözcüğü — YALNIZCA "Hey Mehbur" uyandırmalı (yazım/duyum
+    #      hatasına toleranslı); yalın "mehbur"/"mecbur" artık uyandırmamalı
+    #      (kullanıcı geri bildirimi: "mehbur demediğimde bile açılıyordu").
+    for s in ("hey mehbur saat kaç", "he mecbur bilgisayarı kapat",
+              "hey melbur aç", "heymehbur ışıkları aç"):
+        assert _ve.contains_wake_word(s), f"uyandırmalı: {s}"
+    for s in ("mehbur saat kaç", "mecbur bilgisayarı kapat", "melbur aç",
+              "bugün hava nasıl", "mahmut gel", "mehmet nerede", "merhaba"):
+        assert not _ve.contains_wake_word(s), f"uyandırmamalı: {s}"
+    assert _ve.strip_wake_word("hey mehbur saat kaç") == "saat kaç"
+    assert _ve.strip_wake_word("mehbur ai not defteri aç") == "not defteri aç"
+    print("  • Uyandırma sözcüğü artık YALNIZCA 'Hey Mehbur' ile tetikleniyor ✓")
+
+    # 12b. Telegram 'dosya gönder' ifade ayrıştırıcısı
+    assert _fsq("ödev.docx yolla") == "ödev.docx"
+    assert _fsq('"yıllık rapor" dosyasını gönder') == "yıllık rapor"
+    assert _fsq("bugün hava nasıl") == ""
+    assert _fsq("şu dosyayı gönder") in ("", "şu") and _fsq("şu dosyayı gönder") != "şu"
+    print("  • 'dosya gönder' doğal ifadesi doğru ayrışıyor ✓")
+
+    # 12c. Ses ayarları kalıcı + geçersiz ses reddediliyor
+    _vc_raw = open(_cfg.CONFIG_FILE, "r", encoding="utf-8").read() \
+        if _os.path.exists(_cfg.CONFIG_FILE) else None
+    try:
+        _cfg.update_voice_config(voice_tts_voice="tr-TR-AhmetNeural", voice_enabled=True,
+                                 voice_overlay_enabled=False)
+        assert _cfg.get_voice_config()["voice_tts_voice"] == "tr-TR-AhmetNeural"
+        assert _cfg.get_voice_config()["voice_overlay_enabled"] is False
+        _cfg.update_voice_config(voice_tts_voice="hacker-voice")   # geçersiz
+        assert _cfg.get_voice_config()["voice_tts_voice"] == "tr-TR-AhmetNeural"
+    finally:
+        if _vc_raw is not None:
+            open(_cfg.CONFIG_FILE, "w", encoding="utf-8").write(_vc_raw)
+    print("  • Ses ayarları kaydediliyor, geçersiz ses reddediliyor ✓")
+
+    # 12c-2. JARVIS overlay yardımcıları (renk karışımı + durum haritası)
+    import jarvis_overlay as _jv
+    assert set(_jv.COLORS) == {"idle", "listen", "think", "error"}
+    assert _jv.COLORS["listen"].lower() == "#e0a500" and _jv.COLORS["error"].lower() == "#ff2a4d"
+    assert _jv._blend("#000000", "#ffffff", 0.5).lower() in ("#7f7f7f", "#808080")
+    assert len(_jv.JarvisOverlay._fib_sphere(120)) == 120
+    print("  • JARVIS overlay renkleri / küre noktaları doğru ✓")
+
+    # 12d-2. /dosya çok eşleşme → buton listesi; buton seçimi doğru dosyayı gönderir
+    _b3 = _tb.TelegramControlBot(query_handler=lambda t: t)
+    _b3._creds = lambda: ("T", "555")
+    _b3._is_owner = lambda c: str(c) == "555"
+    _b3._chat_action = lambda a="typing": None
+    _b3._send = lambda s: None
+    _kb = []
+    _b3._send_with_keyboard = lambda t, rm: _kb.append(rm)
+    _deliv = []
+    _b3._deliver_path = lambda p: _deliv.append(p)
+    _b3._session = type("S", (), {"post": lambda *a, **k: type("R", (), {"ok": True})()})()
+    _tb.SystemTools.locate_files = staticmethod(
+        lambda *a, **k: [r"C:\X\ayar.json", r"C:\Y\ayar.json"])
+    _b3._send_file_search("ayar")
+    assert _kb and len(_kb[0]["inline_keyboard"]) == 3, _kb          # 2 dosya + vazgeç
+    _cid = list(_b3._pending_choices)[0]
+    _b3._handle_callback({"id": "q", "from": {"id": 555}, "data": f"f|{_cid}|1",
+                          "message": {"message_id": 1, "chat": {"id": 555}}})
+    assert _deliv == [r"C:\Y\ayar.json"], _deliv
+    _b3._handle_callback({"id": "q", "from": {"id": 111}, "data": f"f|{_cid}|0",
+                          "message": {"message_id": 1, "chat": {"id": 111}}})
+    assert _deliv == [r"C:\Y\ayar.json"], "yetkisiz callback dosya göndermemeli"
+    print("  • Çok eşleşmede buton listesi + seçim + yetki kontrolü ✓")
+
+    # 12e. Telegram klasör→zip: büyük klasör reddedilir, küçük klasör sıkıştırılır
+    import tempfile as _tf2
+    _d = _os.path.join(_tf2.mkdtemp(), "mini")
+    _os.makedirs(_os.path.join(_d, "alt"))
+    open(_os.path.join(_d, "a.txt"), "w").write("x" * 50)
+    open(_os.path.join(_d, "alt", "b.txt"), "w").write("y" * 50)
+    _zp, _msg = SystemTools.zip_folder(_d, max_bytes=10 * 1024 * 1024)
+    assert _zp and _os.path.isfile(_zp), _msg
+    _os.remove(_zp)
+    _zp2, _msg2 = SystemTools.zip_folder(_d, max_bytes=10)   # 10 bayt sınır → red
+    assert _zp2 is None and "büyük" in _msg2
+    import shutil as _sh2
+    _sh2.rmtree(_os.path.dirname(_d), ignore_errors=True)
+    print("  • Klasör → .zip sıkıştırma + boyut sınırı çalışıyor ✓")
+
+    # 12f. (opsiyonel) STT döngü testi — model + kütüphaneler varsa
+    if _ve.voice_dependencies_ok() and _ve.SpeechToText.model_present():
+        import asyncio as _aio, tempfile as _tf
+        _p = _os.path.join(_tf.gettempdir(), "mehbur_stt_test.mp3")
+        _aio.run(_ve.edge_tts.Communicate("bilgisayarı kapat", "tr-TR-EmelNeural").save(_p))
+        _txt = _ve.SpeechToText.transcribe_file(_p)
+        _os.remove(_p)
+        assert "kapat" in _txt.lower(), f"STT beklenmedik: {_txt!r}"
+        print(f"  • Çevrimdışı STT çalışıyor (algılanan: '{_txt}') ✓")
+    else:
+        print("  • STT döngü testi atlandı (model/kütüphane yok) — çekirdek mantık doğrulandı")
+
+    print("  ✅ TEST 12 BAŞARILI: Sesli sohbet bileşenleri çalışıyor.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 13: 🤬 Küfüre Misilleme ("asıl sen / asıl ben")
+    # ─────────────────────────────────────────
+    print("\n[TEST 13] Küfüre Misilleme Yanıtı:")
+
+    update_profanity_config(profanity_comeback_enabled=True)
+    assert get_profanity_config()["profanity_comeback_enabled"] is True
+
+    # 13a. Aileye yönelik fiilli küfür → "Asıl ben senin ananı ..."
+    cb_family = ProfanityComeback.generate("senin ben ananı sikeyim")
+    assert cb_family.lower().startswith("asıl ben senin anan"), cb_family
+    assert ProfanityComeback.generate("amına koyayım").lower().startswith("asıl ben senin"), \
+        "maskesiz ağır kalıp aile misillemesine gitmeli"
+    assert ProfanityComeback.generate("amk").lower().startswith("asıl ben senin"), "amk → aile misillemesi"
+
+    # 13b. İsim takma → "Asıl sen ...sın" (ünlü uyumlu ek)
+    cb_oc = ProfanityComeback.generate("sen tam bir oç'sun")
+    assert cb_oc.lower().startswith("asıl sen oç"), cb_oc
+    cb_pic = ProfanityComeback.generate("sen tam bir piçsin")
+    assert "piç" in cb_pic.lower() and cb_pic.lower().startswith("asıl sen"), cb_pic
+    assert ProfanityComeback.generate("aptalsın").lower().startswith("asıl sen aptal"), "ünlü uyumu: aptalsın"
+
+    # 13c. Sohbet bağlamı YOKKEN (conversation_id verilmemiş) küfür → nazik uyarı
+    #      (Misilleme yalnızca sohbet 'kaba' moduna geçtiğinde devreye girer — bkz. TEST 15)
+    res = ai.process_query("sen tam bir oç'sun")
+    assert res["source"] == "profanity_filter", res["source"]
+    assert res["answer"] == PROFANITY_RESPONSE, res["answer"]
+
+    print("  • 'ananı sikeyim' →", cb_family)
+    print("  • \"oç'sun\" →", cb_oc)
+    print("  ✅ TEST 13 BAŞARILI: Küfüre misilleme üreteci çalışıyor.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 14: 🎨 Uygulama Logosu & İkon Üretimi
+    # ─────────────────────────────────────────
+    print("\n[TEST 14] Uygulama Logosu & İkon:")
+    import os as _os2
+    from config import ICON_PATH, LOGO_PATH, ensure_app_icon, get_logo_path
+
+    lp = get_logo_path()
+    assert lp is None or _os2.path.isfile(lp), "get_logo_path geçersiz yol döndürdü"
+
+    made_temp_logo = False
+    if lp is None:
+        try:
+            from PIL import Image as _Img
+            _Img.new("RGBA", (128, 128), (0, 240, 255, 255)).save(LOGO_PATH)
+            made_temp_logo = True
+        except Exception:
+            print("  • Pillow yok — ikon üretimi testi atlandı ✓")
+
+    try:
+        ico = ensure_app_icon()
+        if get_logo_path():
+            assert ico == ICON_PATH and _os2.path.isfile(ICON_PATH), \
+                "logo.png varken .ico üretilmeliydi"
+            print("  • logo.png → logo.ico (çok boyutlu) üretildi ✓")
+        else:
+            assert ico is None
+            print("  • Logo yokken ikon üretimi güvenli şekilde atlandı ✓")
+    finally:
+        if made_temp_logo:
+            for _p in (LOGO_PATH, ICON_PATH):
+                try:
+                    _os2.remove(_p)
+                except OSError:
+                    pass
+
+    print("  ✅ TEST 14 BAŞARILI: Logo / ikon sistemi çalışıyor.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 15: 💬 Sohbetler + Sohbete Özel Ruh Hali (normal→kızgın→kaba)
+    # ─────────────────────────────────────────
+    print("\n[TEST 15] Sohbet Bazlı Ruh Hali Makinesi:")
+    from ai_engine import MoodFilter, RudeFlavor
+
+    # 15a. MoodFilter — "yakışıyor" onay/ret sınıflandırması
+    assert MoodFilter.classify_confirmation("yakışıyor") == "affirm"
+    assert MoodFilter.classify_confirmation("evet tabii") == "affirm"
+    assert MoodFilter.classify_confirmation("yakışmıyor") == "negate"
+    assert MoodFilter.classify_confirmation("hayır") == "negate"
+    assert MoodFilter.classify_confirmation("bugün hava nasıl") is None
+    print("  • MoodFilter onay/ret sınıflandırması ✓")
+
+    # 15b. Sohbet oluştur → mood 'normal'
+    conv_id = memory.create_conversation("Test Sohbeti")
+    assert memory.get_conversation_mood(conv_id) == "normal"
+
+    # 15c. İlk küfür → nazik uyarı + mood 'provoked'
+    r1 = ai.process_query("piç", conversation_id=conv_id)
+    assert r1["answer"] == PROFANITY_RESPONSE, r1["answer"]
+    assert r1["source"] == "profanity_filter"
+    assert memory.get_conversation_mood(conv_id) == "provoked"
+
+    # 15d. "yakışıyor" → "o zaman bana da yakışıyor" + mood 'rude'
+    r2 = ai.process_query("yakışıyor", conversation_id=conv_id)
+    assert r2["source"] == "mood", r2["source"]
+    assert "bana da yakışıyor" in r2["answer"].lower(), r2["answer"]
+    assert memory.get_conversation_mood(conv_id) == "rude"
+
+    # 15e. Artık küfre "asıl sen / asıl ben" ile karşılık verir
+    r3 = ai.process_query("sen tam bir oç'sun", conversation_id=conv_id)
+    assert r3["source"] == "profanity_comeback", r3["source"]
+    assert r3["answer"].lower().startswith("asıl sen"), r3["answer"]
+    r4 = ai.process_query("senin ben ananı sikeyim", conversation_id=conv_id)
+    assert r4["answer"].lower().startswith("asıl ben senin"), r4["answer"]
+
+    # 15f. 'kaba' modda normal yanıtların sonuna sivri kuyruk eklenir
+    assert RudeFlavor.wrap("Cevap bu.").startswith("Cevap bu.")
+    assert "—" in RudeFlavor.wrap("Cevap bu.")
+
+    # 15g. Sohbete özel geçmiş + silme
+    msgs = memory.get_conversation_messages(conv_id)
+    assert len(msgs) >= 8 and any(m["role"] == "mehbur" for m in msgs)
+    other = memory.create_conversation("Diğer")
+    assert memory.get_conversation_messages(other) == []       # geçmiş sohbete özel
+    assert memory.delete_conversation(conv_id) is True
+    assert memory.get_conversation(conv_id) is None
+    assert memory.get_conversation_messages(conv_id) == []      # mesajlar da silindi
+    memory.delete_conversation(other)
+
+    # 15h. Sohbetsiz (conversation_id=None) çağrı hâlâ nazik davranır
+    assert ai.process_query("piç")["answer"] == PROFANITY_RESPONSE
+
+    print("  • normal → küfür → 'yakışıyor mu?' → 'yakışıyor' → misilleme akışı ✓")
+    print("  ✅ TEST 15 BAŞARILI: Sohbet bazlı ruh hali makinesi çalışıyor.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 16: 🔢 Sürüm Numarası + Wikipedia/Reddit Yedeği
+    # ─────────────────────────────────────────
+    print("\n[TEST 16] Sürüm Numarası & Reddit Yedek Kaynağı:")
+    import re as _re16
+
+    assert _re16.fullmatch(r"\d+\.\d+(\.\d+)?", APP_VERSION), f"APP_VERSION biçimi geçersiz: {APP_VERSION!r}"
+    print(f"  • APP_VERSION = '{APP_VERSION}' (X.Y veya X.Y.Z biçiminde) ✓")
+
+    try:
+        reddit_data = TrustedSourceFetcher.search_reddit("python programlama dili")
+    except Exception as e:
+        reddit_data = None
+        print(f"  • Reddit isteği istisna fırlattı (ağ yok olabilir), tolere edildi: {e}")
+    if reddit_data:
+        assert {"title", "extract", "source"} <= set(reddit_data)
+        assert reddit_data["source"].startswith("Reddit (r/")
+        print(f"  • Reddit yedek kaynağı çalışıyor: {reddit_data['source']} ✓")
+    else:
+        print("  • Reddit sonuç döndürmedi (ağ/engel olabilir) — arayüz güvenli şekilde None döndü ✓")
+
+    print("  ✅ TEST 16 BAŞARILI: Sürüm sabiti ve Reddit yedek kaynağı hatasız çalışıyor.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 17: 🎤📞👁️ Mikrofon Butonu · Telegram Sesli Görüşme · Kamera/Görsel Anlama
+    # ─────────────────────────────────────────
+    print("\n[TEST 17] Mikrofon Butonu, Telegram Sesli Görüşme ve Görsel Anlama:")
+    import gui_app as _gui
+    import telegram_bot as _tb17
+
+    # 17a. Sohbet kutusundaki 🎤 mikrofon butonu bileşenleri mevcut
+    for m in ("_toggle_voice_from_chat", "_update_mic_button", "_build_conversation_sidebar"):
+        assert hasattr(_gui.MehburApp, m), f"gui_app.MehburApp.{m} eksik"
+    print("  • Sohbet kutusundaki 🎤 mikrofon butonu bağlı ✓")
+
+    # 17b. Telegram '/arama' sesli görüşme modu (gerçek arama değil — sesli mesajlaşma)
+    _bot17 = _tb17.TelegramControlBot(query_handler=lambda t: f"yanıt: {t}")
+    assert _bot17._call_mode is False
+    _bot17._start_call()
+    assert _bot17._call_mode is True
+    _bot17._end_call()
+    assert _bot17._call_mode is False
+    assert hasattr(_bot17, "_send_voice_note") and hasattr(_bot17, "_reply")
+    print("  • /arama sesli görüşme modu açılıp kapanıyor (metin + sesli yanıt) ✓")
+
+    # 17c. 👁️ Kamera + görsel anlama niyet algılama
+    assert VisionAssistant.detect_intent("benim kafa şeklime hangi tıraş yakışır") == "haircut"
+    assert VisionAssistant.detect_intent("saç modeli olarak ne yakışır bana") == "haircut"
+    assert VisionAssistant.detect_intent("elimde ne var") == "object"
+    assert VisionAssistant.detect_intent("elimdeki şeyi tanıyabilir misin") == "object"
+    assert VisionAssistant.detect_intent("bugün hava nasıl") is None
+
+    # API anahtarı yokken güvenli, açıklayıcı bir mesajla döner (kamerayı ASLA denemez).
+    # Bu makinede gerçek bir anahtar kayıtlı olabileceğinden geçici olarak kaldırılıp
+    # test sonunda geri yüklenir (TEST 7'deki gibi).
+    from config import get_api_key as _get_key17, remove_api_key as _remove_key17, set_api_key as _set_key17
+    _saved_key17 = _get_key17()
+    _remove_key17()
+    try:
+        no_key_msg = VisionAssistant.handle("object", ai.gemini)
+    finally:
+        if _saved_key17:
+            _set_key17(_saved_key17)
+        else:
+            _remove_key17()
+    assert "API anahtarı" in no_key_msg or "Gemini" in no_key_msg, no_key_msg
+    print("  • 'kafama ne tıraş yakışır' / 'elimde ne var' niyetleri doğru algılanıyor ✓")
+
+    print("  ✅ TEST 17 BAŞARILI: Mikrofon butonu, Telegram sesli görüşme ve görsel anlama hazır.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 18: 📎🎨 Dosya Ekleme (metin/görsel) + Görsel Stüdyosu
+    # ─────────────────────────────────────────
+    print("\n[TEST 18] Dosya Ekleme ve Görsel Stüdyosu:")
+
+    # 18a. Görsel isteği niyet algılama
+    assert ImageStudio.detect_intent("bana mutlu bir aile çiz") == "generate"
+    assert ImageStudio.detect_intent("bir kedi resmi oluştur") == "generate"
+    assert ImageStudio.detect_intent("bu fotoğrafı daha kaliteli olacak şekilde düzenle") == "edit"
+    assert ImageStudio.detect_intent("bugün hava nasıl") is None
+    print("  • 'bana ... çiz' → generate, 'fotoğrafı ... düzenle' → edit niyeti doğru ✓")
+
+    # 18b. API anahtarı yokken ImageStudio.handle güvenli mesajla döner (Gemini'ye asla gitmez).
+    # Bu makinede gerçek bir anahtar kayıtlı olabileceğinden geçici olarak kaldırılıp geri yüklenir.
+    from config import get_api_key as _gk18, remove_api_key as _rk18, set_api_key as _sk18
+    _saved18 = _gk18()
+    _rk18()
+    try:
+        img_path, img_msg = ImageStudio.handle("generate", "bir kedi çiz", ai.gemini)
+    finally:
+        (_sk18(_saved18) if _saved18 else _rk18())
+    assert img_path is None and ("API anahtarı" in img_msg or "Gemini" in img_msg), img_msg
+
+    # 18c. process_query — ekli METİN dosyası hakkında soru (anahtar yokken açıklayıcı mesaj)
+    _saved18b = _gk18()
+    _rk18()
+    try:
+        fres = ai.process_query(
+            "bu dosyada ne var", file_context={"name": "not.txt", "kind": "text", "text": "MehburAI test notu."}
+        )
+    finally:
+        (_sk18(_saved18b) if _saved18b else _rk18())
+    assert fres["source"] == "file_no_key", fres["source"]
+    assert "API anahtarı" in fres["answer"]
+
+    # 18d. process_query — ekli görsel OLMADAN "düzenle" isteği → önce ➕ ile ekle der
+    eres = ai.process_query("bu fotoğrafı daha kaliteli yap")
+    assert eres["source"] == "🎨 Görsel Stüdyosu"
+    assert "➕" in eres["answer"]
+    assert "image_path" not in eres
+    print("  • Anahtar yokken/ekli dosya yokken güvenli, açıklayıcı yanıtlar dönüyor (kamera/Gemini asla tetiklenmiyor) ✓")
+
+    # 18e. GUI'de ➕ dosya ekleme bileşenleri mevcut
+    for m in ("_pick_attachment", "_validate_attachment", "_clear_attachment", "_attach_image_preview"):
+        assert hasattr(_gui.MehburApp, m), f"gui_app.MehburApp.{m} eksik"
+
+    # 18f. Telegram: query_handler (metin, 🎨 görsel_yolu) tuple döndürebilir — çökmeden işlenir
+    _bot18 = _tb17.TelegramControlBot(query_handler=lambda t: (f"cevap: {t}", None))
+    _bot18._dispatch("selam")
+    _bot18_img = _tb17.TelegramControlBot(query_handler=lambda t: ("çizdim", "C:/__mehbur_test_yok__.png"))
+    _bot18_img._dispatch("bana bir kedi çiz")   # yol yok → güvenli şekilde metne düşer, çökmez
+    print("  • Telegram (metin, görsel_yolu) tuple yanıtını çökmeden işliyor ✓")
+
+    print("  ✅ TEST 18 BAŞARILI: Dosya ekleme ve görsel stüdyosu güvenli şekilde çalışıyor.")
     passed_tests += 1
 
     # ─────────────────────────────────────────

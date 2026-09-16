@@ -264,8 +264,30 @@ class MemoryEngine:
                     message TEXT NOT NULL,
                     is_online INTEGER NOT NULL,  -- 1=online, 0=offline
                     source TEXT DEFAULT NULL,    -- 'memory' veya 'gemini'
+                    conversation_id INTEGER DEFAULT NULL,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+            """)
+
+            # 3. Sohbetler Tablosu (her sohbetin kendi geçmişi + "ruh hali")
+            #    mood: 'normal' | 'provoked' (yakışıyor mu? soruldu) | 'rude' (küfür serbest)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL DEFAULT 'Yeni Sohbet',
+                    mood TEXT NOT NULL DEFAULT 'normal',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
+            # chat_logs.conversation_id — eski tablolar için güvenli göç
+            existing_cols = {row["name"] for row in cursor.execute("PRAGMA table_info(chat_logs)")}
+            if "conversation_id" not in existing_cols:
+                cursor.execute("ALTER TABLE chat_logs ADD COLUMN conversation_id INTEGER")
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chat_conversation
+                ON chat_logs(conversation_id);
             """)
 
             conn.commit()
@@ -388,16 +410,133 @@ class MemoryEngine:
     # Sohbet Geçmişi İşlemleri
     # ─────────────────────────────────────────
 
-    def log_message(self, role: str, message: str, is_online: bool, source: Optional[str] = None) -> int:
-        """Sohbet mesajını geçmişe kaydeder."""
+    def log_message(
+        self,
+        role: str,
+        message: str,
+        is_online: bool,
+        source: Optional[str] = None,
+        conversation_id: Optional[int] = None,
+    ) -> int:
+        """Sohbet mesajını geçmişe kaydeder (opsiyonel olarak bir sohbete bağlı)."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO chat_logs (role, message, is_online, source)
-                VALUES (?, ?, ?, ?)
-            """, (role, message, 1 if is_online else 0, source))
+                INSERT INTO chat_logs (role, message, is_online, source, conversation_id)
+                VALUES (?, ?, ?, ?, ?)
+            """, (role, message, 1 if is_online else 0, source, conversation_id))
+            if conversation_id:
+                cursor.execute(
+                    "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (conversation_id,),
+                )
             conn.commit()
             return cursor.lastrowid
+
+    # ─────────────────────────────────────────
+    # Sohbetler (Konuşmalar) — her biri kendi geçmişi + ruh hali
+    # ─────────────────────────────────────────
+
+    _MOODS = ("normal", "provoked", "rude")
+
+    def create_conversation(self, title: str = "Yeni Sohbet") -> int:
+        """Yeni bir sohbet oluşturur ve ID'sini döndürür."""
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("INSERT INTO conversations (title) VALUES (?)", (title.strip() or "Yeni Sohbet",))
+            conn.commit()
+            return cur.lastrowid
+
+    def ensure_conversation(self) -> int:
+        """En son sohbeti döndürür; hiç yoksa bir tane oluşturur."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT id FROM conversations ORDER BY updated_at DESC, id DESC LIMIT 1"
+            ).fetchone()
+            if row:
+                return row["id"]
+        return self.create_conversation()
+
+    def list_conversations(self) -> List[Dict[str, Any]]:
+        """Tüm sohbetleri (en son güncellenen üstte) döndürür."""
+        with self._get_connection() as conn:
+            rows = conn.execute("""
+                SELECT c.id, c.title, c.mood, c.updated_at,
+                       (SELECT COUNT(*) FROM chat_logs l WHERE l.conversation_id = c.id) AS message_count
+                FROM conversations c
+                ORDER BY c.updated_at DESC, c.id DESC
+            """).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_conversation(self, conv_id: int) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT id, title, mood, created_at, updated_at FROM conversations WHERE id = ?",
+                (conv_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def rename_conversation(self, conv_id: int, title: str) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                ((title or "").strip()[:60] or "Yeni Sohbet", conv_id),
+            )
+            conn.commit()
+
+    def touch_conversation(self, conv_id: int) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (conv_id,)
+            )
+            conn.commit()
+
+    def delete_conversation(self, conv_id: int) -> bool:
+        """Sohbeti ve ona bağlı tüm mesajları siler."""
+        with self._get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM chat_logs WHERE conversation_id = ?", (conv_id,))
+            cur.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
+            conn.commit()
+            return cur.rowcount > 0
+
+    def clear_conversation_messages(self, conv_id: int) -> None:
+        """Sohbetin mesajlarını siler ama sohbeti (ve başlığını) korur."""
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM chat_logs WHERE conversation_id = ?", (conv_id,))
+            conn.execute(
+                "UPDATE conversations SET mood = 'normal', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (conv_id,),
+            )
+            conn.commit()
+
+    def get_conversation_mood(self, conv_id: Optional[int]) -> str:
+        if not conv_id:
+            return "normal"
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT mood FROM conversations WHERE id = ?", (conv_id,)).fetchone()
+            return row["mood"] if row and row["mood"] in self._MOODS else "normal"
+
+    def set_conversation_mood(self, conv_id: Optional[int], mood: str) -> None:
+        if not conv_id or mood not in self._MOODS:
+            return
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE conversations SET mood = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (mood, conv_id),
+            )
+            conn.commit()
+
+    def get_conversation_messages(self, conv_id: int, limit: int = 500) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute("""
+                SELECT id, role, message, is_online, source, timestamp
+                FROM chat_logs
+                WHERE conversation_id = ?
+                ORDER BY id ASC
+                LIMIT ?
+            """, (conv_id, limit)).fetchall()
+            return [dict(r) for r in rows]
 
     def get_recent_chat(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Son sohbet mesajlarını getirir."""
