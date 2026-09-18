@@ -30,8 +30,50 @@ if not getattr(sys, "frozen", False):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
+def _selftest() -> None:
+    """`MehburAI.exe --selftest` — bağımlılıkları / ses modelini yükleyip data/selftest.txt'ye yazar."""
+    import traceback
+    lines = [f"frozen={getattr(sys, 'frozen', False)}", f"python={sys.version.split()[0]}"]
+
+    def step(name, fn):
+        try:
+            lines.append(f"{name}: {fn()}")
+        except BaseException:
+            lines.append(f"{name}: HATA\n{traceback.format_exc()}")
+
+    def _import(mod):
+        __import__(mod)
+        return "ok"
+
+    for mod in ("numpy", "sounddevice", "soundfile", "vosk", "edge_tts", "customtkinter",
+                "PIL", "cv2", "pystray", "requests"):
+        step(f"import {mod}", lambda m=mod: _import(m))
+
+    def _voice():
+        import voice_engine as ve
+        return f"eksik={ve.missing_dependencies()} model_var={ve.SpeechToText.model_present()}"
+
+    def _model():
+        import voice_engine as ve
+        return "yüklendi" if ve.SpeechToText.get_model() is not None else "YÜKLENEMEDİ"
+
+    def _mics():
+        import sounddevice as sd
+        return [d["name"] for d in sd.query_devices() if d["max_input_channels"] > 0][:6]
+
+    step("voice_engine", _voice)
+    step("vosk modeli", _model)
+    step("mikrofonlar", _mics)
+    from config import DATA_DIR
+    with open(os.path.join(DATA_DIR, "selftest.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def main():
     """MehburAI uygulamasını başlatır."""
+    if "--selftest" in sys.argv:
+        _selftest()
+        return
     print()
     print("  +============================================+")
     print("  |          [*]  M E H B U R A I  [*]         |")

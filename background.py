@@ -88,6 +88,26 @@ def set_autostart(enabled: bool) -> bool:
     return os.path.isfile(lnk)
 
 
+def restart_app() -> bool:
+    """
+    Uygulamayı yeniden başlatacak ayrı bir süreç oluşturur: ~3 sn bekleyip yeniden açar.
+    Çağıran bunun hemen ardından uygulamadan çıkmalıdır (tek-örnek portu boşalsın).
+    """
+    if getattr(sys, "frozen", False):
+        target = f'"{sys.executable}"'
+    else:
+        target = f'"{pythonw_path()}" run_mehbur.py'
+    inner = f'ping -n 4 127.0.0.1 >nul & start "" /D "{BASE_DIR}" {target}'
+    try:
+        subprocess.Popen(
+            f'cmd /c "{inner}"', close_fds=True,
+            creationflags=_NO_WINDOW | 0x00000008,   # CREATE_NO_WINDOW | DETACHED_PROCESS
+        )
+        return True
+    except Exception:
+        return False
+
+
 # ─────────────────────────────────────────────
 # Tek örnek (single instance)
 # ─────────────────────────────────────────────

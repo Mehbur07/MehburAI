@@ -19,7 +19,7 @@ import sys
 #   • KÜÇÜK ekleme (ince ayar, küçük düzeltme/iyileştirme) → SON basamak artar: 1.2 → 1.2.1 → 1.2.2 → ...
 #     (bir sonraki BÜYÜK eklemede üçüncü basamak sıfırlanıp ORTA basamak artar, örn. 1.2.3 → 1.3)
 # (Elle güncellenir — kod her eklemede otomatik saymaz.)
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.3"
 
 # ─────────────────────────────────────────────
 # Proje Yolları
@@ -142,6 +142,90 @@ class Theme:
     WINDOW_HEIGHT = 680
     WINDOW_MIN_WIDTH = 750
     WINDOW_MIN_HEIGHT = 550
+
+
+# ─────────────────────────────────────────────
+# 🎨 Kullanıcı Renk Teması (Ayarlar > Görünüm)
+# ─────────────────────────────────────────────
+# Vurgu rengi + arka plan tonu seçilir; diğer tüm Theme renkleri bunlardan türetilir.
+# CustomTkinter renkleri pencere kurulurken okuduğundan değişiklik yeniden başlatınca
+# uygulanır (ayarlar > "Uygula ve Yeniden Başlat").
+
+THEME_ACCENTS = {
+    "Neon Cyan": "#00F0FF",
+    "Neon Mor": "#B026FF",
+    "Neon Yeşil": "#39FF88",
+    "Neon Kırmızı": "#FF2A4D",
+    "Neon Pembe": "#FF3CAC",
+    "Turuncu": "#FF8A00",
+    "Altın": "#FFC629",
+    "Elektrik Mavi": "#3D8BFF",
+}
+THEME_BACKGROUNDS = {
+    "Siyah": "#0A0A0E",
+    "Lacivert": "#0A0F1E",
+    "Antrasit": "#141416",
+    "Koyu Mor": "#100A1A",
+    "Koyu Yeşil": "#08120E",
+    "Koyu Kırmızı": "#160A0C",
+}
+THEME_DEFAULT_ACCENT = THEME_ACCENTS["Neon Cyan"]
+THEME_DEFAULT_BG = THEME_BACKGROUNDS["Siyah"]
+
+
+def is_valid_hex_color(value) -> bool:
+    import re
+    return bool(re.fullmatch(r"#[0-9A-Fa-f]{6}", str(value or "").strip()))
+
+
+def _hex_to_rgb(h: str):
+    h = h.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def mix_colors(c1: str, c2: str, t: float) -> str:
+    """c1'den c2'ye t (0..1) oranında karışım — '#RRGGBB'."""
+    (r1, g1, b1), (r2, g2, b2) = _hex_to_rgb(c1), _hex_to_rgb(c2)
+    t = max(0.0, min(1.0, t))
+    return "#{:02X}{:02X}{:02X}".format(
+        round(r1 + (r2 - r1) * t), round(g1 + (g2 - g1) * t), round(b1 + (b2 - b1) * t))
+
+
+def derive_theme_colors(accent: str, bg: str) -> dict:
+    """Vurgu + arka plan renginden tüm Theme renklerini türetir."""
+    black, white = "#000000", "#FFFFFF"
+    bg_card = mix_colors(bg, white, 0.05)
+    bg_input = mix_colors(bg, white, 0.065)
+    return {
+        "BG_DARKEST": mix_colors(bg, black, 0.35),
+        "BG_DARK": bg,
+        "BG_CARD": bg_card,
+        "BG_CARD_HOVER": mix_colors(bg, white, 0.09),
+        "BG_INPUT": bg_input,
+        "BUBBLE_USER": mix_colors(bg, white, 0.10),
+        "BUBBLE_AI": mix_colors(bg, accent, 0.16),
+        "BORDER_DEFAULT": mix_colors(bg, white, 0.11),
+        "BTN_DISABLED_BG": mix_colors(bg, white, 0.19),
+        "SCROLLBAR_BG": bg_input,
+        "SCROLLBAR_FG": mix_colors(bg, white, 0.16),
+        "CYAN_PRIMARY": accent,
+        "CYAN_GLOW": mix_colors(accent, black, 0.10),
+        "CYAN_DIM": mix_colors(accent, black, 0.45),
+        "CYAN_DARK": mix_colors(accent, bg, 0.72),
+        "TEXT_ACCENT": accent,
+        "BORDER_FOCUS": accent,
+        "BTN_PRIMARY_BG": accent,
+        "BTN_HOVER_BG": mix_colors(accent, white, 0.20),
+        "BTN_PRIMARY_FG": mix_colors(bg, black, 0.35),
+    }
+
+
+def apply_theme(accent: str, bg: str) -> None:
+    """Theme sınıfının renklerini verilen vurgu/arka plan rengine göre günceller."""
+    if not (is_valid_hex_color(accent) and is_valid_hex_color(bg)):
+        return
+    for name, value in derive_theme_colors(accent.upper(), bg.upper()).items():
+        setattr(Theme, name, value)
 
 
 # ─────────────────────────────────────────────
@@ -360,11 +444,9 @@ def remove_api_key() -> None:
 # "fotoğrafınız çekildi ve cihaz sahibine iletildi" uyarısı gösterilir.
 # Bu ayarlar yalnızca yerel `data/config.json` içinde tutulur (repoya girmez).
 
-# ─── Cihaz sahibinin Telegram ID'si — KODDA SABİT ───
-# Bot yalnızca bu ID'ye sahip kişiden komut alır. Ayarlar dosyası (config.json)
-# bozulsa/silinse/değiştirilse bile bu ID her zaman geçerlidir; başkası bu ID'yi
-# ele geçirmeden botu kullanamaz. Sahibi değiştirmek isterse burayı düzenler.
-OWNER_TELEGRAM_ID = "6865337684"
+# Cihaz sahibinin Telegram ID'si KODDA TUTULMAZ (kaynak koda / .exe'ye / GitHub'a
+# hassas bilgi girmesin diye) — Ayarlar > Güvenlik Modu'ndan girilir ve yalnızca
+# yerel `data/config.json` içinde durur. Bot yalnızca bu ID'den komut alır.
 
 SECURITY_DEFAULTS = {
     "security_enabled": False,
@@ -372,7 +454,7 @@ SECURITY_DEFAULTS = {
     "security_password_hash": "",     # sha256(salt + parola)
     "security_password_salt": "",
     "telegram_bot_token": "",         # BotFather'dan alınır ("MehburAI (Telegram)" botu)
-    "telegram_chat_id": OWNER_TELEGRAM_ID,  # cihaz sahibinin sohbet ID'si (kodda sabit)
+    "telegram_chat_id": "",           # cihaz sahibinin Telegram sohbet ID'si (ayarlardan girilir)
     "telegram_remote_enabled": False, # bota yazarak MehburAI'ı uzaktan yönetme
 }
 
@@ -387,9 +469,9 @@ def get_security_config() -> dict:
             result[key] = config[key]
     if not isinstance(result["security_watch_paths"], list):
         result["security_watch_paths"] = []
-    # Chat ID her zaman geçerli bir Telegram ID olmalı; değilse koddaki sabite dön
+    # Chat ID geçerli bir Telegram ID değilse (bozuk/maskeli) boş say — bot kimseyi yetkilendirmez
     if not re.fullmatch(r"-?\d{5,}", str(result.get("telegram_chat_id", "")).strip()):
-        result["telegram_chat_id"] = OWNER_TELEGRAM_ID
+        result["telegram_chat_id"] = ""
     return result
 
 
@@ -516,3 +598,65 @@ def verify_security_password(plaintext: str) -> bool:
 def has_security_password() -> bool:
     cfg = get_security_config()
     return bool(cfg.get("security_password_hash") and cfg.get("security_password_salt"))
+
+
+# ─────────────────────────────────────────────
+# 🎨 Tema Ayarı (kalıcı) + 🧠 Otomatik Öğrenme Ayarı
+# ─────────────────────────────────────────────
+
+def get_theme_config() -> dict:
+    """Kayıtlı vurgu/arka plan rengi (yoksa varsayılan Neon Cyan & Siyah)."""
+    config = load_config()
+    accent = config.get("theme_accent")
+    bg = config.get("theme_bg")
+    return {
+        "accent": accent if is_valid_hex_color(accent) else THEME_DEFAULT_ACCENT,
+        "bg": bg if is_valid_hex_color(bg) else THEME_DEFAULT_BG,
+    }
+
+
+def update_theme_config(accent: str | None = None, bg: str | None = None) -> None:
+    """Vurgu ve/veya arka plan rengini kaydeder (geçersiz hex yok sayılır)."""
+    config = load_config()
+    if accent is not None and is_valid_hex_color(accent):
+        config["theme_accent"] = accent.strip().upper()
+    if bg is not None and is_valid_hex_color(bg):
+        config["theme_bg"] = bg.strip().upper()
+    save_config(config)
+
+
+def reset_theme_config() -> None:
+    config = load_config()
+    config.pop("theme_accent", None)
+    config.pop("theme_bg", None)
+    save_config(config)
+
+
+LEARN_DEFAULTS = {"auto_learn_enabled": True}
+
+
+def get_learn_config() -> dict:
+    config = load_config()
+    return {"auto_learn_enabled": bool(config.get("auto_learn_enabled", LEARN_DEFAULTS["auto_learn_enabled"]))}
+
+
+def update_learn_config(**changes) -> None:
+    config = load_config()
+    for key, value in changes.items():
+        if key in LEARN_DEFAULTS:
+            config[key] = bool(value)
+    save_config(config)
+
+
+def _apply_saved_theme() -> None:
+    """Uygulama açılırken kayıtlı temayı Theme'e uygular (özel renk seçilmişse)."""
+    try:
+        config = load_config()
+        if config.get("theme_accent") or config.get("theme_bg"):
+            t = get_theme_config()
+            apply_theme(t["accent"], t["bg"])
+    except Exception:
+        pass
+
+
+_apply_saved_theme()

@@ -1,0 +1,8 @@
+#!/bin/sh
+# MehburAI: hassas bilgi (API anahtari, bot token, Telegram ID...) commit'e girmesin.
+cd "$(git rev-parse --show-toplevel)" || exit 1
+python scan_secrets.py --staged || {
+    echo ""
+    echo "Commit ENGELLENDI: yukaridaki hassas bilgileri kaldirip tekrar dene."
+    exit 1
+}

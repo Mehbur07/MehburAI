@@ -332,6 +332,15 @@ class VoiceAssistant:
         self._running = False
         self._audio_q: "queue.Queue[bytes]" = queue.Queue()
         self._muted = threading.Event()   # TTS konuşurken mikrofonu yok say
+        self._paused = threading.Event()  # 🎤 bas-konuş yazdırma sırasında yok say
+
+    def pause(self) -> None:
+        self._paused.set()
+        self._drain_queue()
+
+    def resume(self) -> None:
+        self._drain_queue()
+        self._paused.clear()
 
     # ── yaşam döngüsü ──
     def start(self) -> bool:
@@ -352,7 +361,7 @@ class VoiceAssistant:
 
     # ── mikrofon geri çağrısı ──
     def _mic_cb(self, indata, frames, time_info, status):  # noqa: ARG002
-        if not self._muted.is_set():
+        if not self._muted.is_set() and not self._paused.is_set():
             self._audio_q.put(bytes(indata))
 
     # ── ana döngü ──
@@ -462,6 +471,98 @@ class VoiceAssistant:
             time.sleep(0.15)
             self._drain_queue()
             self._muted.clear()
+
+
+# ─────────────────────────────────────────────
+# 🎤 Bas-Konuş Yazdırma (sohbet kutusundaki mikrofon butonu)
+# ─────────────────────────────────────────────
+
+class Dictation:
+    """
+    Mikrofonu BİR KEZ dinleyip konuşmayı yazıya çevirir (uyandırma sözcüğü gerekmez).
+      on_partial(text) — konuşurken anlık metin
+      on_done(text, error) — bitince nihai metin (boş olabilir); mikrofon/model hatasında
+                             error dolu ("mic" | "model" | "deps")
+    Konuşma bitince (Vosk uç-nokta tespiti), 8 sn hiç konuşulmazsa, 20 sn dolarsa
+    ya da `stop()` çağrılırsa (o ana kadar duyulanla) biter.
+    """
+
+    NO_SPEECH_TIMEOUT = 8.0
+    MAX_SECONDS = 20.0
+
+    def __init__(self, on_partial: Optional[Callable[[str], None]] = None,
+                 on_done: Optional[Callable[[str, str], None]] = None):
+        self._on_partial = on_partial or (lambda t: None)
+        self._on_done = on_done or (lambda t, e: None)
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self) -> bool:
+        if self.is_running():
+            return False
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="MehburAI-Dictation", daemon=True)
+        self._thread.start()
+        return True
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        text, error = "", ""
+        try:
+            if not voice_dependencies_ok():
+                error = "deps"
+                return
+            model = SpeechToText.get_model()
+            if model is None:
+                error = "model"
+                return
+            rec = vosk.KaldiRecognizer(model, SAMPLE_RATE)
+            q: "queue.Queue[bytes]" = queue.Queue()
+
+            def cb(indata, frames, time_info, status):  # noqa: ARG001
+                q.put(bytes(indata))
+
+            started = time.time()
+            heard = False
+            last_partial = ""
+            try:
+                with sd.RawInputStream(samplerate=SAMPLE_RATE, blocksize=4000,
+                                       dtype="int16", channels=1, callback=cb):
+                    while not self._stop.is_set():
+                        if time.time() - started > self.MAX_SECONDS:
+                            break
+                        if not heard and time.time() - started > self.NO_SPEECH_TIMEOUT:
+                            break
+                        try:
+                            chunk = q.get(timeout=0.3)
+                        except queue.Empty:
+                            continue
+                        if rec.AcceptWaveform(chunk):
+                            t = (json.loads(rec.Result()).get("text") or "").strip()
+                            if t:
+                                text = t
+                                break
+                        else:
+                            p = (json.loads(rec.PartialResult()).get("partial") or "").strip()
+                            if p:
+                                heard = True
+                                if p != last_partial:
+                                    last_partial = p
+                                    self._on_partial(p)
+            except Exception:
+                error = "mic"
+                return
+            if not text:
+                text = (json.loads(rec.FinalResult()).get("text") or "").strip() or last_partial
+        except Exception:
+            error = error or "mic"
+        finally:
+            self._on_done(text, error)
 
 
 def _speakable(text: str) -> str:

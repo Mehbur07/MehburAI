@@ -27,7 +27,7 @@ from typing import Callable, List, Optional
 
 import requests
 
-from config import DATA_DIR, OWNER_TELEGRAM_ID, get_security_config, get_voice_config
+from config import DATA_DIR, get_security_config, get_voice_config
 from security_guard import CameraCapture
 from system_tools import SystemTools
 
@@ -87,12 +87,24 @@ HELP_TEXT = (
     "     birden çok eşleşirse hangisini istediğini butonla sorar\n"
     "• /durum — güvenlik modu durumu\n"
     "• /guvenlik ac | /guvenlik kapat — güvenlik modunu aç/kapat\n"
-    "• /arama — 🎙️ sesli görüşme modunu aç: yazsan da sessen de yanıtı ayrıca "
+    "• /aramabaslat — 🎙️ sesli görüşmeyi başlat: yazsan da sessen de yanıtı ayrıca "
     "sesli mesaj olarak da alırsın (Telegram Bot API gerçek arama/çağrı başlatamaz — "
     "bu, sesli mesaj alışverişiyle çağrı hissi veren bir moddur)\n"
-    "• /aramabitir — sesli görüşme modunu kapat\n"
+    "• /aramabitir — sesli görüşmeyi bitir\n"
     "• /yardim — bu mesaj"
 )
+
+# Telegram'ın "/" menüsünde (komut listesi) görünen komutlar — bot açılırken setMyCommands ile kaydedilir
+BOT_COMMANDS = [
+    ("aramabaslat", "🎙️ Sesli görüşmeyi başlat"),
+    ("aramabitir", "📴 Sesli görüşmeyi bitir"),
+    ("ekran", "🖥️ Ekran görüntüsü gönder"),
+    ("foto", "📷 Kameradan fotoğraf gönder"),
+    ("dosya", "📁 Dosya ara ve gönder"),
+    ("durum", "🛡️ Güvenlik modu durumu"),
+    ("guvenlik", "🔒 Güvenlik modunu aç/kapat"),
+    ("yardim", "❓ Komut listesi"),
+]
 
 
 class TelegramControlBot:
@@ -124,20 +136,14 @@ class TelegramControlBot:
     # ── kimlik bilgileri ──────────────────────
     def _creds(self):
         cfg = get_security_config()
-        # Chat ID kodda sabit (OWNER_TELEGRAM_ID) — config bozulsa bile bot sahibini tanır.
-        chat_id = (cfg.get("telegram_chat_id", "") or "").strip() or OWNER_TELEGRAM_ID
+        chat_id = (cfg.get("telegram_chat_id", "") or "").strip()
         return (cfg.get("telegram_bot_token", "").strip(), chat_id)
 
     def _is_owner(self, chat_id) -> bool:
-        """Verilen chat ID cihaz sahibine mi ait? (Kodda sabit ID her zaman geçerli.)"""
+        """Verilen chat ID ayarlardaki cihaz sahibi ID'sine mi ait?"""
         cid = str(chat_id or "").strip()
-        if not cid:
-            return False
-        allowed = {str(OWNER_TELEGRAM_ID)}
-        cfg_id = (get_security_config().get("telegram_chat_id", "") or "").strip()
-        if cfg_id:
-            allowed.add(cfg_id)
-        return cid in allowed
+        owner = (get_security_config().get("telegram_chat_id", "") or "").strip()
+        return bool(cid and owner and cid == owner)
 
     def is_configured(self) -> bool:
         token, chat_id = self._creds()
@@ -165,8 +171,24 @@ class TelegramControlBot:
         return self._running and self._thread is not None and self._thread.is_alive()
 
     # ── ana döngü ─────────────────────────────
+    def _register_commands(self) -> bool:
+        """Komut listesini (Telegram'daki '/' menüsü) günceller — /aramabaslat dahil."""
+        token, _ = self._creds()
+        if not token:
+            return False
+        try:
+            r = self._session.post(
+                f"{self.API}/bot{token}/setMyCommands",
+                json={"commands": [{"command": c, "description": d} for c, d in BOT_COMMANDS]},
+                timeout=15,
+            )
+            return r.ok
+        except requests.RequestException:
+            return False
+
     def _loop(self) -> None:
         self._drain_backlog()
+        self._register_commands()
         self._send("🤖 MehburAI uzaktan kontrol aktif. Komutlar için /yardim yaz.")
         while self._running:
             token, chat_id = self._creds()
@@ -231,7 +253,7 @@ class TelegramControlBot:
             return
         chat = msg.get("chat") or {}
         cid = str(chat.get("id") or "")
-        # Yetkisiz: yalnızca cihaz sahibinin chat ID'si komut verebilir (kodda sabit)
+        # Yetkisiz: yalnızca cihaz sahibinin chat ID'si komut verebilir (ayarlardaki ID)
         if not self._is_owner(cid):
             self._reject_stranger(cid)
             return
@@ -331,7 +353,7 @@ class TelegramControlBot:
                 else:
                     self._send("Kullanım: /dosya <aranacak isim>  (örn. /dosya ödev)")
                 return
-            if cmd in ("arama", "ara", "sesliarama", "call"):
+            if cmd in ("aramabaslat", "aramabaşlat", "arama", "ara", "sesliarama", "call"):
                 self._start_call()
                 return
             if cmd in ("aramabitir", "aramakapat", "aramayibitir", "endcall"):

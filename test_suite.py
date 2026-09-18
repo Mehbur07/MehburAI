@@ -48,7 +48,7 @@ def run_full_validation():
     print("  🤖 MEHBUR AI — FAZ 5 ENTEGRASYON VE DOĞRULAMA TESTLERİ")
     print("=" * 65)
     passed_tests = 0
-    total_tests = 18
+    total_tests = 19
 
     memory = MemoryEngine()
     network = NetworkMonitor()
@@ -446,21 +446,22 @@ def run_full_validation():
     assert len(_rej) == 1 and str(_rej[0][0]) == "111" and "özel" in _rej[0][1].lower(), _rej
     print("  • Yetkisiz chat ID engelleniyor + tek ret mesajı gönderiliyor ✓")
 
-    # 11a-2. Kodda sabit OWNER_TELEGRAM_ID her zaman geçerli (config bozulsa bile)
+    # 11a-2. Sahip ID'si kodda YOK; yalnızca ayarlardaki ID yetkili, bozuk/boş ID kimseyi yetkilendirmez
+    assert not hasattr(_cfg, "OWNER_TELEGRAM_ID"), "sabit Telegram ID'si kodda kalmamalı"
     _bot2 = _tb.TelegramControlBot(query_handler=lambda t: "ok")
-    assert _bot2._is_owner(_cfg.OWNER_TELEGRAM_ID)
-    assert not _bot2._is_owner("999999999")
-    assert not _bot2._is_owner("")
     _real_raw = open(_cfg.CONFIG_FILE, "r", encoding="utf-8").read() \
         if _os.path.exists(_cfg.CONFIG_FILE) else None
     try:
+        _cfg.save_config({**_cfg.load_config(), "telegram_chat_id": "424242424"})
+        assert _bot2._is_owner("424242424")
+        assert not _bot2._is_owner("999999999") and not _bot2._is_owner("")
         _cfg.save_config({**_cfg.load_config(), "telegram_chat_id": "••••bozuk"})
-        assert _cfg.get_security_config()["telegram_chat_id"] == _cfg.OWNER_TELEGRAM_ID
-        assert _bot2._is_owner(_cfg.OWNER_TELEGRAM_ID)   # hâlâ çalışır
+        assert _cfg.get_security_config()["telegram_chat_id"] == ""
+        assert not _bot2._is_owner("424242424") and not _bot2._is_owner("")
     finally:
         if _real_raw is not None:
             open(_cfg.CONFIG_FILE, "w", encoding="utf-8").write(_real_raw)
-    print("  • Kodda sabit sahip ID'si config bozulsa bile geçerli ✓")
+    print("  • Sahip ID'si yalnızca ayarlardan geliyor; bozuk/boş ID kimseyi yetkilendirmiyor ✓")
 
     # 11b. Düz metin → zeka motoruna gider
     _bot._handle_update({"message": {"chat": {"id": 555}, "text": "einstein kimdir"}})
@@ -862,6 +863,122 @@ def run_full_validation():
     print("  • Telegram (metin, görsel_yolu) tuple yanıtını çökmeden işliyor ✓")
 
     print("  ✅ TEST 18 BAŞARILI: Dosya ekleme ve görsel stüdyosu güvenli şekilde çalışıyor.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 19: 🔒 Hassas bilgi tarayıcı, 🎨 tema, 🧠 boşta öğrenme, 🛒 ürün bilgisi,
+    #          🎤 bas-konuş, /aramabaslat
+    # ─────────────────────────────────────────
+    print("\n[TEST 19] Hassas Bilgi Filtresi, Tema, Otomatik Öğrenme, Ürün Bilgisi, Bas-Konuş, /aramabaslat:")
+    import json as _json19
+    import os as _os19
+    import tempfile as _tmp19
+    import zipfile as _zip19
+
+    import config as _cfg19
+    import scan_secrets as _ss
+    import telegram_bot as _tb19
+    import voice_engine as _ve19
+    from auto_learner import IdleLearner as _IdleLearner
+
+    # 19a. Hassas bilgi tarayıcı — kalıpları yakalar, test sahte değerlerini yok sayar, yasak dosyaları bulur
+    _fake_key = "AIza" + "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx"[:35]
+    _fake_tok = "123456789" + ":" + "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx"[:35]
+    assert _ss.scan_text("x.py", f'K = "{_fake_key}"', set())
+    assert _ss.scan_text("x.py", f'T = "{_fake_tok}"', set())
+    assert not _ss.scan_text("x.py", 'K = "AIzaSyD_TestValidGeminiKey1234567890XYZ"', set())
+    assert _ss.scan_text("x.py", "gizli = 'ozelDeger123456'", {"ozelDeger123456"})
+    _zp = _os19.path.join(_tmp19.mkdtemp(), "p.zip")
+    with _zip19.ZipFile(_zp, "w") as _z:
+        _z.writestr("MehburAI.exe", "ok")
+        _z.writestr("data/config.json", "{}")
+    assert any("config.json" in f for f in _ss.scan_zip(_zp, set()))
+    assert _ss.scan_repo(_ss.known_secret_values()) == [], "depoda hassas bilgi var!"
+    print("  • Tarayıcı anahtar/token kalıplarını yakalıyor, config.json/.db'yi paketten engelliyor, depo temiz ✓")
+
+    # 19b. Renk teması — türetme geçerli, kalıcı ayar, geçersiz hex yok sayılır
+    _c19 = _cfg19.derive_theme_colors("#B026FF", "#0A0F1E")
+    assert all(_cfg19.is_valid_hex_color(v) for v in _c19.values())
+    _raw19 = open(_cfg19.CONFIG_FILE, "r", encoding="utf-8").read() if _os19.path.exists(_cfg19.CONFIG_FILE) else None
+    try:
+        _cfg19.update_theme_config(accent="#ff8a00", bg="#0a0f1e")
+        assert _cfg19.get_theme_config() == {"accent": "#FF8A00", "bg": "#0A0F1E"}
+        _cfg19.update_theme_config(accent="kırmızı", bg="#12")     # geçersiz → yok sayılır
+        assert _cfg19.get_theme_config() == {"accent": "#FF8A00", "bg": "#0A0F1E"}
+        _cfg19.reset_theme_config()
+        assert _cfg19.get_theme_config() == {"accent": _cfg19.THEME_DEFAULT_ACCENT, "bg": _cfg19.THEME_DEFAULT_BG}
+    finally:
+        if _raw19 is not None:
+            open(_cfg19.CONFIG_FILE, "w", encoding="utf-8").write(_raw19)
+    for m in ("_build_appearance_card", "_apply_theme_and_restart", "_build_learn_card", "_dictation_done"):
+        assert hasattr(_gui.MehburApp, m), f"gui_app.MehburApp.{m} eksik"
+    print("  • Vurgu/arka plan rengi türetiliyor, kaydediliyor, geçersiz değer reddediliyor ✓")
+
+    # 19c. Ürün algılama + boşta öğrenme (ağ kullanmadan, sahte kaynaklarla)
+    assert TrustedSourceFetcher.is_product_query("iPhone 15 özellikleri")
+    assert TrustedSourceFetcher.is_product_query("RTX 4090 alınır mı")
+    assert not TrustedSourceFetcher.is_product_query("Albert Einstein kimdir")
+    _orig_wiki, _orig_rev = TrustedSourceFetcher.search_wikipedia, TrustedSourceFetcher.search_reddit_reviews
+    TrustedSourceFetcher.search_wikipedia = classmethod(
+        lambda cls, q, lang="tr", detailed=False: {"title": q, "extract": f"{q} hakkında özet.", "source": "Wikipedia"})
+    TrustedSourceFetcher.search_reddit_reviews = classmethod(
+        lambda cls, q, limit=3: [{"title": "harika telefon", "snippet": "pil süresi iyi", "subreddit": "iphone", "score": 42}])
+    try:
+        _mem19 = MemoryEngine(db_path=_os19.path.join(_tmp19.mkdtemp(), "l.db"))
+        _learner = _IdleLearner(_mem19, lambda: True, lambda: 9999)
+        _r_prod = _learner.learn_once("iPhone 15")
+        assert _r_prod and _r_prod["product"] and "Reddit" in _r_prod["source"] and "Wikipedia" in _r_prod["source"]
+        _r_gen = _learner.learn_once("Kara delik")
+        assert _r_gen and not _r_gen["product"]
+        _rows = {r["question"]: r for r in _mem19.get_all_knowledge()}
+        assert "Reddit" in _rows["iPhone 15 özellikleri ve incelemeleri"]["answer"]
+        assert _rows["Kara delik nedir"]["source"].startswith("otomatik öğrenme")
+        _t = _learner._pick_topic()
+        assert _t and _t[0] not in {"iPhone 15", "Kara delik"}
+    finally:
+        TrustedSourceFetcher.search_wikipedia, TrustedSourceFetcher.search_reddit_reviews = _orig_wiki, _orig_rev
+    print("  • Boşta öğrenme: genel konu→Wikipedia, ürün→Wikipedia özellikleri + Reddit incelemeleri, hafızaya yazılıyor ✓")
+
+    # 19d. Telegram: /aramabaslat komutu + komut listesi (setMyCommands)
+    assert any(c == "aramabaslat" for c, _ in _tb19.BOT_COMMANDS) and "/aramabaslat" in _tb19.HELP_TEXT
+    _b19 = _tb19.TelegramControlBot(query_handler=lambda t: "ok")
+    _b19._send = lambda s: None
+    _b19._send_voice_reply = lambda t: None
+    _b19._dispatch("/aramabaslat")
+    assert _b19._call_mode is True
+    _b19._dispatch("/aramabitir")
+    assert _b19._call_mode is False
+    _posted = {}
+
+    class _FakeSess:
+        def post(self, url, json=None, timeout=0, **kw):
+            _posted["url"], _posted["json"] = url, json
+            return type("R", (), {"ok": True})()
+    _b19._session = _FakeSess()
+    _b19._creds = lambda: ("TESTTOKEN", "555")
+    assert _b19._register_commands() is True
+    assert _posted["url"].endswith("/setMyCommands")
+    assert "aramabaslat" in [c["command"] for c in _posted["json"]["commands"]]
+    print("  • /aramabaslat sesli görüşmeyi başlatıyor ve Telegram komut listesine (setMyCommands) kayıtlı ✓")
+
+    # 19e. 🎤 bas-konuş: bağımlılık yoksa temiz hata döner (mikrofon/model asla açılmaz)
+    _orig_ok = _ve19.voice_dependencies_ok
+    _ve19.voice_dependencies_ok = lambda: False
+    try:
+        _res19 = {}
+        _d = _ve19.Dictation(on_done=lambda t, e: _res19.update(t=t, e=e))
+        assert _d.start()
+        _d._thread.join(timeout=5)
+        assert _res19 == {"t": "", "e": "deps"}, _res19
+    finally:
+        _ve19.voice_dependencies_ok = _orig_ok
+    _va = _ve19.VoiceAssistant(on_command=lambda t: "")
+    _va.pause(); assert _va._paused.is_set()
+    _va._mic_cb(b"\x00\x00", 1, None, None); assert _va._audio_q.empty()   # duraklatılmışken ses yok sayılır
+    _va.resume(); assert not _va._paused.is_set()
+    print("  • Bas-konuş (Dictation) hata yolu + uyandırma dinleyicisi duraklat/devam çalışıyor ✓")
+
+    print("  ✅ TEST 19 BAŞARILI: Hassas bilgi filtresi, tema, otomatik öğrenme, ürün bilgisi, bas-konuş, /aramabaslat hazır.")
     passed_tests += 1
 
     # ─────────────────────────────────────────

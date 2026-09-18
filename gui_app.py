@@ -20,6 +20,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 from datetime import datetime
 from tkinter import filedialog, messagebox
@@ -28,15 +29,24 @@ from typing import Optional
 import customtkinter as ctk
 
 from ai_engine import AIEngine
+from auto_learner import IdleLearner
 from config import (
     APP_VERSION,
     DATA_DIR,
+    THEME_ACCENTS,
+    THEME_BACKGROUNDS,
     Theme,
+    derive_theme_colors,
     ensure_app_icon,
     get_api_key,
+    get_learn_config,
     get_logo_path,
     get_security_config,
+    get_theme_config,
     get_voice_config,
+    reset_theme_config,
+    update_learn_config,
+    update_theme_config,
     has_security_password,
     is_valid_bot_token,
     load_config,
@@ -56,10 +66,11 @@ from security_guard import (
     trigger_intruder_alert,
 )
 from telegram_bot import TelegramControlBot
-from background import SingleInstance, is_autostart_enabled, set_autostart
+from background import SingleInstance, is_autostart_enabled, restart_app, set_autostart
 
 try:
     from voice_engine import (
+        Dictation,
         SpeechToText,
         TextToSpeech,
         VoiceAssistant,
@@ -67,6 +78,7 @@ try:
         voice_dependencies_ok,
     )
 except Exception:  # ses bağımlılıkları hiç kurulu değilse uygulama yine açılsın
+    Dictation = None
     VoiceAssistant = None
     SpeechToText = TextToSpeech = None
     voice_dependencies_ok = lambda: False          # noqa: E731
@@ -133,6 +145,8 @@ class MehburApp(ctk.CTk):
         )
         self._voice_state = "kapalı"
         self.jarvis = None   # JARVIS overlay — ilk uyandırmada oluşturulur
+        self._dictation = None      # 🎤 bas-konuş yazdırma oturumu
+        self._dictating = False
 
         # Tek örnek kilidi — ikinci açılış mevcut pencereyi öne getirir
         self._singleton = singleton or SingleInstance()
@@ -145,6 +159,15 @@ class MehburApp(ctk.CTk):
 
         # Ağ İzleyiciyi Başlat
         self.network.start()
+
+        # 🧠 Boşta otomatik öğrenme (Wikipedia; ürünlerde + Reddit incelemeleri)
+        self.learner = IdleLearner(
+            memory=self.memory,
+            is_online=lambda: self.network.is_online,
+            idle_seconds=lambda: time.time() - self.ai.last_activity,
+            on_learned=lambda r: self._ui_call(lambda: self._on_auto_learned(r)),
+        )
+        self.learner.start()
 
         # Güvenlik Modu etkinse izlemeyi başlat + tepsi ikonunu hazırla
         if get_security_config().get("security_enabled"):
@@ -1443,6 +1466,10 @@ class MehburApp(ctk.CTk):
         # 2b. 🎙️ Sesli Sohbet Kartı
         self._build_voice_card(self.settings_scroll)
 
+        # 2c. 🎨 Görünüm (renk ayarı) + 2d. 🧠 Otomatik Öğrenme
+        self._build_appearance_card(self.settings_scroll)
+        self._build_learn_card(self.settings_scroll)
+
         # 3. Ağ Testi & Durum Kartı
         net_card = ctk.CTkFrame(
             self.settings_scroll,
@@ -1504,6 +1531,194 @@ class MehburApp(ctk.CTk):
             justify="left",
         )
         about_lbl.pack(anchor="w", padx=16, pady=(0, 14))
+
+    # ─────────────────────────────────────────
+    # 🎨 GÖRÜNÜM (RENK AYARI) KARTI
+    # ─────────────────────────────────────────
+
+    _CUSTOM_COLOR_LABEL = "Özel renk…"
+
+    @staticmethod
+    def _name_for_color(table: dict, value: str) -> str:
+        for name, hexv in table.items():
+            if hexv.upper() == str(value).upper():
+                return name
+        return MehburApp._CUSTOM_COLOR_LABEL
+
+    def _build_appearance_card(self, parent):
+        """Vurgu rengi + arka plan tonu seçimi; değişiklik yeniden başlatınca uygulanır."""
+        self._theme_pending = dict(get_theme_config())
+
+        card = ctk.CTkFrame(parent, fg_color=Theme.BG_CARD, corner_radius=12,
+                            border_width=1, border_color=Theme.CYAN_DARK)
+        card.pack(fill="x", padx=0, pady=(0, 12))
+
+        ctk.CTkLabel(card, text="🎨 Görünüm (Renk Ayarı)",
+                     font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=16, weight="bold"),
+                     text_color=Theme.CYAN_PRIMARY).pack(anchor="w", padx=16, pady=(16, 4))
+        ctk.CTkLabel(card, text="Arayüzün vurgu rengini ve arka plan tonunu istediğin gibi değiştir. "
+                                "Önizlemeyi aşağıda gör; 'Uygula' dersen uygulama yeniden başlar.",
+                     font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+                     text_color=Theme.TEXT_SECONDARY, justify="left",
+                     wraplength=700).pack(anchor="w", padx=16, pady=(0, 10))
+
+        accent_names = list(THEME_ACCENTS) + [self._CUSTOM_COLOR_LABEL]
+        bg_names = list(THEME_BACKGROUNDS) + [self._CUSTOM_COLOR_LABEL]
+
+        row1 = ctk.CTkFrame(card, fg_color="transparent")
+        row1.pack(fill="x", padx=16, pady=(0, 8))
+        ctk.CTkLabel(row1, text="Vurgu rengi", width=110, anchor="w",
+                     text_color=Theme.TEXT_PRIMARY).pack(side="left")
+        self.theme_accent_menu = ctk.CTkOptionMenu(
+            row1, values=accent_names, command=self._on_accent_choice, width=190,
+            fg_color=Theme.BG_INPUT, button_color=Theme.CYAN_DARK,
+            button_hover_color=Theme.CYAN_DIM)
+        self.theme_accent_menu.set(self._name_for_color(THEME_ACCENTS, self._theme_pending["accent"]))
+        self.theme_accent_menu.pack(side="left")
+
+        row2 = ctk.CTkFrame(card, fg_color="transparent")
+        row2.pack(fill="x", padx=16, pady=(0, 10))
+        ctk.CTkLabel(row2, text="Arka plan", width=110, anchor="w",
+                     text_color=Theme.TEXT_PRIMARY).pack(side="left")
+        self.theme_bg_menu = ctk.CTkOptionMenu(
+            row2, values=bg_names, command=self._on_bg_choice, width=190,
+            fg_color=Theme.BG_INPUT, button_color=Theme.CYAN_DARK,
+            button_hover_color=Theme.CYAN_DIM)
+        self.theme_bg_menu.set(self._name_for_color(THEME_BACKGROUNDS, self._theme_pending["bg"]))
+        self.theme_bg_menu.pack(side="left")
+
+        # Canlı önizleme: küçük bir sahte pencere
+        self.theme_preview = ctk.CTkFrame(card, corner_radius=10, border_width=2, height=86)
+        self.theme_preview.pack(fill="x", padx=16, pady=(0, 10))
+        self.theme_preview.pack_propagate(False)
+        self.theme_prev_bubble = ctk.CTkLabel(self.theme_preview, text="MehburAI: Merhaba efendim! 👋",
+                                              corner_radius=8, anchor="w", padx=10, height=30)
+        self.theme_prev_bubble.pack(anchor="w", padx=12, pady=(12, 4))
+        self.theme_prev_btn = ctk.CTkLabel(self.theme_preview, text="Gönder ⚡", corner_radius=8,
+                                           width=90, height=28,
+                                           font=ctk.CTkFont(weight="bold"))
+        self.theme_prev_btn.pack(anchor="w", padx=12)
+        self._refresh_theme_preview()
+
+        btns = ctk.CTkFrame(card, fg_color="transparent")
+        btns.pack(fill="x", padx=16, pady=(0, 14))
+        ctk.CTkButton(btns, text="✅ Uygula ve Yeniden Başlat", height=36,
+                      fg_color=Theme.CYAN_PRIMARY, text_color=Theme.BG_DARKEST,
+                      hover_color=Theme.CYAN_GLOW,
+                      font=ctk.CTkFont(size=12, weight="bold"),
+                      command=self._apply_theme_and_restart).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btns, text="↺ Varsayılan (Neon Cyan)", height=36,
+                      fg_color=Theme.BG_CARD_HOVER, hover_color=Theme.CYAN_DARK,
+                      command=self._reset_theme_and_restart).pack(side="left")
+
+    def _refresh_theme_preview(self):
+        c = derive_theme_colors(self._theme_pending["accent"], self._theme_pending["bg"])
+        self.theme_preview.configure(fg_color=c["BG_DARK"], border_color=c["CYAN_DARK"])
+        self.theme_prev_bubble.configure(fg_color=c["BUBBLE_AI"], text_color="#E8E8EC")
+        self.theme_prev_btn.configure(fg_color=c["BTN_PRIMARY_BG"], text_color=c["BTN_PRIMARY_FG"])
+
+    def _pick_custom_color(self, current: str) -> Optional[str]:
+        from tkinter import colorchooser
+        picked = colorchooser.askcolor(color=current, parent=self, title="Renk seç")
+        return picked[1].upper() if picked and picked[1] else None
+
+    def _on_accent_choice(self, name: str):
+        if name == self._CUSTOM_COLOR_LABEL:
+            color = self._pick_custom_color(self._theme_pending["accent"])
+            if not color:
+                self.theme_accent_menu.set(self._name_for_color(THEME_ACCENTS, self._theme_pending["accent"]))
+                return
+            self._theme_pending["accent"] = color
+        else:
+            self._theme_pending["accent"] = THEME_ACCENTS[name]
+        self._refresh_theme_preview()
+
+    def _on_bg_choice(self, name: str):
+        if name == self._CUSTOM_COLOR_LABEL:
+            color = self._pick_custom_color(self._theme_pending["bg"])
+            if not color:
+                self.theme_bg_menu.set(self._name_for_color(THEME_BACKGROUNDS, self._theme_pending["bg"]))
+                return
+            self._theme_pending["bg"] = color
+        else:
+            self._theme_pending["bg"] = THEME_BACKGROUNDS[name]
+        self._refresh_theme_preview()
+
+    def _restart_now(self, why: str):
+        if not messagebox.askyesno("Yeniden başlat", f"{why}\n\nMehburAI şimdi yeniden başlatılsın mı?", parent=self):
+            return
+        if restart_app():
+            self._real_quit()
+        else:
+            messagebox.showwarning("Yeniden başlat", "Otomatik yeniden başlatılamadı — "
+                                   "lütfen uygulamayı kapatıp elle aç.", parent=self)
+
+    def _apply_theme_and_restart(self):
+        update_theme_config(accent=self._theme_pending["accent"], bg=self._theme_pending["bg"])
+        self._restart_now("Renk ayarları kaydedildi.")
+
+    def _reset_theme_and_restart(self):
+        reset_theme_config()
+        self._restart_now("Varsayılan renklere dönüldü.")
+
+    # ─────────────────────────────────────────
+    # 🧠 OTOMATİK ÖĞRENME KARTI
+    # ─────────────────────────────────────────
+
+    def _build_learn_card(self, parent):
+        card = ctk.CTkFrame(parent, fg_color=Theme.BG_CARD, corner_radius=12,
+                            border_width=1, border_color=Theme.CYAN_DARK)
+        card.pack(fill="x", padx=0, pady=(0, 12))
+        ctk.CTkLabel(card, text="🧠 Otomatik Öğrenme",
+                     font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=16, weight="bold"),
+                     text_color=Theme.CYAN_PRIMARY).pack(anchor="w", padx=16, pady=(16, 4))
+        ctk.CTkLabel(card, text="MehburAI açıkken sen bir süre soru sormazsan arka planda Wikipedia'dan yeni "
+                                "konular öğrenip hafızasına yazar (çevrimdışıyken de kullanır). Ürünlerde "
+                                "özellikleri Wikipedia'dan, kullanıcı incelemelerini Reddit'ten çeker.",
+                     font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+                     text_color=Theme.TEXT_SECONDARY, justify="left",
+                     wraplength=700).pack(anchor="w", padx=16, pady=(0, 10))
+
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(0, 6))
+        self.learn_switch = ctk.CTkSwitch(row, text="Boştayken otomatik öğren",
+                                          progress_color=Theme.CYAN_PRIMARY,
+                                          command=self._toggle_auto_learn)
+        if get_learn_config()["auto_learn_enabled"]:
+            self.learn_switch.select()
+        self.learn_switch.pack(side="left")
+        ctk.CTkButton(row, text="⚡ Şimdi bir konu öğren", width=170, height=32,
+                      fg_color=Theme.BG_CARD_HOVER, hover_color=Theme.CYAN_DARK,
+                      command=self._learn_now).pack(side="left", padx=14)
+
+        self.learn_status = ctk.CTkLabel(card, text="Henüz bir şey öğrenmedi.",
+                                         font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+                                         text_color=Theme.TEXT_SECONDARY)
+        self.learn_status.pack(anchor="w", padx=16, pady=(0, 14))
+
+    def _toggle_auto_learn(self):
+        update_learn_config(auto_learn_enabled=bool(self.learn_switch.get()))
+
+    def _learn_now(self):
+        self.learn_status.configure(text="⏳ Öğreniyor…", text_color=Theme.STATUS_WARNING)
+
+        def work():
+            res = self.learner.learn_once()
+            if res is None:
+                self._ui_call(lambda: self.learn_status.configure(
+                    text="⚠️ Şu an öğrenilemedi (internet/kaynak yok?)", text_color=Theme.STATUS_OFFLINE))
+        threading.Thread(target=work, daemon=True, name="MehburAI-LearnNow").start()
+
+    def _on_auto_learned(self, result: dict):
+        if hasattr(self, "learn_status") and self.learn_status.winfo_exists():
+            kind = "🛒 ürün" if result.get("product") else "📚 konu"
+            self.learn_status.configure(
+                text=f"✅ Son öğrenilen {kind}: {result['topic']}  —  {result['source']}",
+                text_color=Theme.STATUS_ONLINE)
+        try:
+            self._refresh_memory_list()
+        except Exception:
+            pass
 
     # ─────────────────────────────────────────
     # 🎙️ SESLİ SOHBET KARTI
@@ -2299,29 +2514,76 @@ class MehburApp(ctk.CTk):
         """Sohbet kutusundaki 🎤 butonunu sesli sohbet durumuna göre renklendirir."""
         if not hasattr(self, "mic_btn") or not self.mic_btn.winfo_exists():
             return
+        if self._dictating:
+            self.mic_btn.configure(text="⏺", text_color=Theme.NEON_RED, border_color=Theme.NEON_RED)
+            return
         if state is None:
             active = bool(get_voice_config().get("voice_enabled")) and voice_dependencies_ok()
             state = "dinliyor" if active else "kapali"
         color = self._MIC_STATE_COLOR.get(state, Theme.TEXT_DARK)
-        self.mic_btn.configure(text_color=color, border_color=color)
+        self.mic_btn.configure(text="🎤", text_color=color, border_color=color)
+
+    _MIC_ERRORS = {
+        "mic": "Mikrofona erişilemedi. Windows Ayarlar → Gizlilik ve güvenlik → Mikrofon bölümünden "
+               "masaüstü uygulamalarının mikrofon kullanmasına izin verildiğini kontrol et.",
+        "model": "Türkçe ses modeli yüklenemedi (ilk kullanımda internet gerekir).",
+    }
 
     def _toggle_voice_from_chat(self):
-        """Sohbet kutusundaki 🎤 butonu — sesli sohbeti Ayarlar'daki anahtarla senkron açar/kapar."""
-        if not voice_dependencies_ok():
+        """Sohbet kutusundaki 🎤 butonu — bas-konuş: konuşmanı yazıya çevirip gönderir.
+        Dinlerken tekrar basılırsa o ana kadar duyulan gönderilir."""
+        if self._dictating and self._dictation is not None:
+            self._dictation.stop()
+            return
+        if Dictation is None or not voice_dependencies_ok():
             messagebox.showwarning(
                 "Sesli Sohbet",
                 "Eksik kütüphane: " + ", ".join(voice_missing_deps()),
                 parent=self,
             )
             return
-        want = not bool(get_voice_config().get("voice_enabled"))
-        if hasattr(self, "voice_switch"):
-            if want:
-                self.voice_switch.select()
-            else:
-                self.voice_switch.deselect()
-        self._toggle_voice()
+        if self._is_processing:
+            return
+
+        self._dictating = True
+        if self.voice_assistant is not None:
+            self.voice_assistant.pause()
+        self.query_entry.delete(0, "end")
+        self.query_entry.configure(placeholder_text="🎤 Dinliyorum... konuş (bitirmek için 🎤'e tekrar bas)")
         self._update_mic_button()
+
+        self._dictation = Dictation(
+            on_partial=lambda t: self._ui_call(lambda: self._dictation_partial(t)),
+            on_done=lambda t, e: self._ui_call(lambda: self._dictation_done(t, e)),
+        )
+        self._dictation.start()
+
+    def _dictation_partial(self, text: str):
+        if self._dictating and self.query_entry.winfo_exists():
+            self.query_entry.delete(0, "end")
+            self.query_entry.insert(0, text)
+
+    def _dictation_done(self, text: str, error: str):
+        self._dictating = False
+        self._dictation = None
+        if self.voice_assistant is not None:
+            self.voice_assistant.resume()
+        if self.query_entry.winfo_exists():
+            self.query_entry.configure(
+                placeholder_text="MehburAI'ye bir soru sorun veya mesaj yazın... (Örn: Albert Einstein kimdir?)")
+            self.query_entry.delete(0, "end")
+        self._update_mic_button()
+        if error:
+            messagebox.showwarning("Sesli Sohbet", self._MIC_ERRORS.get(error, "Mikrofon başlatılamadı."),
+                                   parent=self)
+            return
+        if not text:
+            self.query_entry.configure(placeholder_text="🎤 Ses algılanamadı — tekrar dene")
+            self.after(3500, lambda: self.query_entry.winfo_exists() and self.query_entry.configure(
+                placeholder_text="MehburAI'ye bir soru sorun veya mesaj yazın... (Örn: Albert Einstein kimdir?)"))
+            return
+        self.query_entry.insert(0, text)
+        self._on_send_clicked()
 
     def _drive_jarvis(self, state: str, text: str = ""):
         """Sesli asistan durumunu JARVIS tam ekran görseline aktarır."""
@@ -2628,6 +2890,10 @@ class MehburApp(ctk.CTk):
         self._quitting = True
         self._persist_all_settings()
         self.network.stop()
+        try:
+            self.learner.stop()
+        except Exception:
+            pass
         try:
             self.security_guard.stop()
         except Exception:
