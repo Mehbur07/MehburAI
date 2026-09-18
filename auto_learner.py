@@ -6,8 +6,8 @@ MehburAI açıkken kullanıcı bir süredir soru sormuyorsa arka planda Wikipedi
 yeni bir konu çekip hafızaya (SQLite `knowledge_base`) kaydeder — çevrimdışıyken de
 bu bilgilerle yanıt verebilsin diye.
 
-  • Genel konu  → Wikipedia özeti
-  • Ürün konusu → özellikleri Wikipedia'dan, kullanıcı incelemeleri Reddit'ten
+  • Genel konu  → Wikipedia maddesinin önemli bölümleri
+  • Ürün konusu → Wikipedia'dan özellikler + eleştirmen/basın değerlendirmesi (Reddit gibi denetimsiz kaynak yok)
 
 Ayarlar > 🧠 Otomatik Öğrenme anahtarıyla kapatılabilir.
 """
@@ -110,27 +110,12 @@ class IdleLearner:
             topic, is_product = picked
         self._tried.add(topic)
 
-        if is_product:
-            info = TrustedSourceFetcher.product_info(topic)
-            wiki, reviews = info["wiki"], info["reviews"]
-            if not wiki and not reviews:
-                return None
-            parts, sources = [], []
-            if wiki:
-                parts.append(f"📋 Özellikler ({wiki['title']}):\n{wiki['extract']}")
-                sources.append("Wikipedia")
-            if reviews:
-                parts.append("💬 Kullanıcı incelemeleri (Reddit):\n" + TrustedSourceFetcher.format_reviews(reviews))
-                sources.append("Reddit")
-            question = f"{topic} özellikleri ve incelemeleri"
-            answer = "\n\n".join(parts)
-        else:
-            wiki = TrustedSourceFetcher.search_wikipedia(topic)
-            if not wiki:
-                return None
-            question = f"{topic} nedir"
-            answer = wiki["extract"]
-            sources = ["Wikipedia"]
+        wiki = TrustedSourceFetcher.search_wikipedia(topic, product=is_product)
+        if not wiki:
+            return None
+        question = f"{topic} özellikleri ve incelemeleri" if is_product else f"{topic} nedir"
+        answer = wiki["extract"] + "\n\n" + TrustedSourceFetcher.source_footer(wiki)
+        sources = ["Wikipedia"]
 
         source_label = "otomatik öğrenme (" + " + ".join(sources) + ")"
         self._memory.save_knowledge(question=question, answer=answer, source=source_label)

@@ -740,25 +740,58 @@ def run_full_validation():
     # ─────────────────────────────────────────
     # TEST 16: 🔢 Sürüm Numarası + Wikipedia/Reddit Yedeği
     # ─────────────────────────────────────────
-    print("\n[TEST 16] Sürüm Numarası & Reddit Yedek Kaynağı:")
+    print("\n[TEST 16] Sürüm Numarası & Uzun Wikipedia Yanıtı (Reddit yok):")
     import re as _re16
 
     assert _re16.fullmatch(r"\d+\.\d+(\.\d+)?", APP_VERSION), f"APP_VERSION biçimi geçersiz: {APP_VERSION!r}"
     print(f"  • APP_VERSION = '{APP_VERSION}' (X.Y veya X.Y.Z biçiminde) ✓")
 
-    try:
-        reddit_data = TrustedSourceFetcher.search_reddit("python programlama dili")
-    except Exception as e:
-        reddit_data = None
-        print(f"  • Reddit isteği istisna fırlattı (ağ yok olabilir), tolere edildi: {e}")
-    if reddit_data:
-        assert {"title", "extract", "source"} <= set(reddit_data)
-        assert reddit_data["source"].startswith("Reddit (r/")
-        print(f"  • Reddit yedek kaynağı çalışıyor: {reddit_data['source']} ✓")
-    else:
-        print("  • Reddit sonuç döndürmedi (ağ/engel olabilir) — arayüz güvenli şekilde None döndü ✓")
+    # 16a. Reddit (denetimsiz kaynak) tamamen kaldırıldı
+    assert not any("reddit" in n.lower() for n in dir(TrustedSourceFetcher)), "Reddit kalıntısı var"
+    print("  • Reddit kaynağı kaldırıldı (yalnızca güvenilir kaynak: Wikipedia) ✓")
 
-    print("  ✅ TEST 16 BAŞARILI: Sürüm sabiti ve Reddit yedek kaynağı hatasız çalışıyor.")
+    # 16b. Uzun madde → giriş + önemli bölümler, ~3 kB, sonda 'daha fazlasını oku' bağlantısı (ağ gerekmez)
+    _para = "Bu bir örnek cümledir. " * 40
+    _long_art = {
+        "title": "Örnek", "lang": "tr", "url": "https://tr.wikipedia.org/wiki/%C3%96rnek",
+        "lead": _para, "sections": [("Tarihçe", _para), ("Özellikler", _para), ("Kullanım", _para),
+                                    ("Kaynakça", "atlanmalı"), ("Dış bağlantılar", "atlanmalı")],
+    }
+    _txt, _trunc = TrustedSourceFetcher._compose_general(_long_art)
+    assert _trunc and len(_txt) > 1500, len(_txt)
+    assert "▸ Tarihçe" in _txt and "atlanmalı" not in _txt
+    _foot = TrustedSourceFetcher.source_footer({"truncated": True, "url": _long_art["url"], "source": "Wikipedia (Örnek)"})
+    assert _foot.startswith("📖 Daha fazlasını okumak için:") and _long_art["url"] in _foot
+    _short_art = dict(_long_art, lead="Kısa madde.", sections=[])
+    _txt2, _trunc2 = TrustedSourceFetcher._compose_general(_short_art)
+    assert _txt2 == "Kısa madde." and not _trunc2
+    assert "Kaynak: Wikipedia (Örnek)" in TrustedSourceFetcher.source_footer(
+        {"truncated": False, "url": _long_art["url"], "source": "Wikipedia (Örnek)"})
+    print("  • Uzun madde ~3 kB'a derleniyor, Kaynakça atlanıyor, sonda 'daha fazlasını okumak için' bağlantısı var ✓")
+
+    # 16c. Ürün: özellikler + eleştirmen değerlendirmesi (Wikipedia bölümlerinden)
+    _prod_art = {
+        "title": "Telefon X", "lang": "tr", "url": "https://tr.wikipedia.org/wiki/Telefon_X",
+        "lead": "Telefon X bir akıllı telefondur.",
+        "sections": [("Özellikler", "6,1 inç ekran ve güçlü işlemci."),
+                     ("Eleştiriler", "Eleştirmenler pil ömrünü övdü.")],
+    }
+    _ptxt, _ = TrustedSourceFetcher._compose_product(_prod_art, None)
+    assert "📋 Özellikler" in _ptxt and "6,1 inç" in _ptxt and "💬 Eleştirmenlerin" in _ptxt and "pil ömrünü" in _ptxt
+    print("  • Ürün yanıtı: özellikler + eleştirmen/basın değerlendirmesi Wikipedia'dan derleniyor ✓")
+
+    # 16d. Gerçek Wikipedia (ağ varsa): tek cümle değil, uzun ve bağlantılı yanıt
+    try:
+        _wp = TrustedSourceFetcher.search_wikipedia("python")
+    except Exception:
+        _wp = None
+    if _wp:
+        assert len(_wp["extract"]) > 1000 and _wp["url"].startswith("https://tr.wikipedia.org/wiki/")
+        print(f"  • Gerçek Wikipedia: {_wp['source']} → {len(_wp['extract'])} karakter ✓")
+    else:
+        print("  • Wikipedia'ya ulaşılamadı (ağ yok olabilir) — güvenli şekilde None ✓")
+
+    print("  ✅ TEST 16 BAŞARILI: Sürüm sabiti ve uzun/güvenilir Wikipedia yanıtı çalışıyor.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
@@ -918,26 +951,30 @@ def run_full_validation():
     assert TrustedSourceFetcher.is_product_query("iPhone 15 özellikleri")
     assert TrustedSourceFetcher.is_product_query("RTX 4090 alınır mı")
     assert not TrustedSourceFetcher.is_product_query("Albert Einstein kimdir")
-    _orig_wiki, _orig_rev = TrustedSourceFetcher.search_wikipedia, TrustedSourceFetcher.search_reddit_reviews
-    TrustedSourceFetcher.search_wikipedia = classmethod(
-        lambda cls, q, lang="tr", detailed=False: {"title": q, "extract": f"{q} hakkında özet.", "source": "Wikipedia"})
-    TrustedSourceFetcher.search_reddit_reviews = classmethod(
-        lambda cls, q, limit=3: [{"title": "harika telefon", "snippet": "pil süresi iyi", "subreddit": "iphone", "score": 42}])
+    _orig_wiki = TrustedSourceFetcher.search_wikipedia
+    _calls19 = []
+
+    def _fake_wiki(cls, q, lang="tr", product=False):
+        _calls19.append((q, product))
+        return {"title": q, "extract": f"{q} hakkında uzun özet.", "source": f"Wikipedia ({q})",
+                "url": "https://tr.wikipedia.org/wiki/X", "truncated": True}
+    TrustedSourceFetcher.search_wikipedia = classmethod(_fake_wiki)
     try:
         _mem19 = MemoryEngine(db_path=_os19.path.join(_tmp19.mkdtemp(), "l.db"))
         _learner = _IdleLearner(_mem19, lambda: True, lambda: 9999)
         _r_prod = _learner.learn_once("iPhone 15")
-        assert _r_prod and _r_prod["product"] and "Reddit" in _r_prod["source"] and "Wikipedia" in _r_prod["source"]
+        assert _r_prod and _r_prod["product"] and _r_prod["source"] == "otomatik öğrenme (Wikipedia)"
         _r_gen = _learner.learn_once("Kara delik")
         assert _r_gen and not _r_gen["product"]
+        assert _calls19 == [("iPhone 15", True), ("Kara delik", False)], _calls19
         _rows = {r["question"]: r for r in _mem19.get_all_knowledge()}
-        assert "Reddit" in _rows["iPhone 15 özellikleri ve incelemeleri"]["answer"]
+        assert "Daha fazlasını okumak için" in _rows["iPhone 15 özellikleri ve incelemeleri"]["answer"]
         assert _rows["Kara delik nedir"]["source"].startswith("otomatik öğrenme")
         _t = _learner._pick_topic()
         assert _t and _t[0] not in {"iPhone 15", "Kara delik"}
     finally:
-        TrustedSourceFetcher.search_wikipedia, TrustedSourceFetcher.search_reddit_reviews = _orig_wiki, _orig_rev
-    print("  • Boşta öğrenme: genel konu→Wikipedia, ürün→Wikipedia özellikleri + Reddit incelemeleri, hafızaya yazılıyor ✓")
+        TrustedSourceFetcher.search_wikipedia = _orig_wiki
+    print("  • Boşta öğrenme: genel konu ve ürün Wikipedia'dan (bağlantılı) hafızaya yazılıyor, Reddit yok ✓")
 
     # 19d. Telegram: /aramabaslat komutu + komut listesi (setMyCommands)
     assert any(c == "aramabaslat" for c, _ in _tb19.BOT_COMMANDS) and "/aramabaslat" in _tb19.HELP_TEXT

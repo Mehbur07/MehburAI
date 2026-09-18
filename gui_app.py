@@ -18,10 +18,12 @@ Neon Cyan & Derin Siyah temalı CustomTkinter masaüstü arayüzü.
 import math
 import os
 import queue
+import re
 import sys
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from datetime import datetime
 from tkinter import filedialog, messagebox
 from typing import Optional
@@ -160,7 +162,7 @@ class MehburApp(ctk.CTk):
         # Ağ İzleyiciyi Başlat
         self.network.start()
 
-        # 🧠 Boşta otomatik öğrenme (Wikipedia; ürünlerde + Reddit incelemeleri)
+        # 🧠 Boşta otomatik öğrenme (Wikipedia; ürünlerde özellikler + eleştirmen değerlendirmesi)
         self.learner = IdleLearner(
             memory=self.memory,
             is_online=lambda: self.network.is_online,
@@ -1070,6 +1072,17 @@ class MehburApp(ctk.CTk):
             )
             msg_lbl.pack(anchor="w", padx=12, pady=(2, 10))
 
+            url_m = re.search(r"https?://[^\s]+", message)
+            if url_m:
+                url = url_m.group(0).rstrip(".,);")
+                link_lbl = ctk.CTkLabel(
+                    bubble, text="🔗 Maddeyi tarayıcıda aç", cursor="hand2",
+                    font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, underline=True),
+                    text_color=Theme.CYAN_PRIMARY,
+                )
+                link_lbl.pack(anchor="w", padx=12, pady=(0, 10))
+                link_lbl.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
+
             if do_animate:
                 self._run_typewriter(msg_lbl, message, on_done)
             elif on_done:
@@ -1674,7 +1687,7 @@ class MehburApp(ctk.CTk):
                      text_color=Theme.CYAN_PRIMARY).pack(anchor="w", padx=16, pady=(16, 4))
         ctk.CTkLabel(card, text="MehburAI açıkken sen bir süre soru sormazsan arka planda Wikipedia'dan yeni "
                                 "konular öğrenip hafızasına yazar (çevrimdışıyken de kullanır). Ürünlerde "
-                                "özellikleri Wikipedia'dan, kullanıcı incelemelerini Reddit'ten çeker.",
+                                "özellikleri ve eleştirmen/basın değerlendirmelerini Wikipedia'dan çeker (Reddit gibi denetimsiz kaynak yok).",
                      font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
                      text_color=Theme.TEXT_SECONDARY, justify="left",
                      wraplength=700).pack(anchor="w", padx=16, pady=(0, 10))

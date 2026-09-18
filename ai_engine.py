@@ -44,11 +44,34 @@ from system_tools import SystemTools
 # ─────────────────────────────────────────────
 
 class TrustedSourceFetcher:
-    """Türkçe Wikipedia ve güvenilir kaynaklardan bilgi çekici."""
+    """
+    Güvenilir bilgi kaynağı: Wikipedia (önce Türkçe; ürünlerde gerekirse İngilizce).
+    Maddenin yalnızca ilk cümlesini değil, önemli bölümlerini derleyip uzunsa sonuna
+    "daha fazlasını okumak için" bağlantısı ekler. (Reddit gibi denetimsiz kaynaklar
+    kaldırıldı — yanıltıcı/troll içerik olabiliyordu.)
+    """
 
     USER_AGENT = "MehburAI/1.0 (Desktop AI Assistant; Contact: local)"
 
-    # ── 🛒 Ürün algılama: özellikler Wikipedia'dan, incelemeler Reddit'ten ──
+    # Yanıta alınmayacak bölümler
+    _SKIP_SECTIONS = {
+        "kaynakça", "kaynaklar", "dış bağlantılar", "ayrıca bakınız", "notlar", "dipnotlar",
+        "notlar ve kaynaklar", "konuyla ilgili yayınlar", "galeri", "dış kaynaklar",
+        "references", "external links", "see also", "notes", "further reading",
+        "bibliography", "sources", "footnotes", "citations", "gallery", "explanatory notes",
+    }
+    # Ürün maddelerinde "özellikler" ve "değerlendirme/eleştiri" bölümlerini bulan anahtarlar
+    _SPEC_KEYS = ("specification", "özellik", "donanım", "teknik", "hardware", "features",
+                  "design", "tasarım", "software", "yazılım", "performance", "performans",
+                  "camera", "kamera", "display", "ekran", "models", "modeller", "varyant")
+    _REVIEW_KEYS = ("reception", "review", "critical", "eleştiri", "değerlendirme", "resepsiyon",
+                    "karşılama", "tepki", "incelemeler", "sales", "satış", "criticism", "reaction")
+
+    GENERAL_BUDGET = 3200      # genel konu yanıtı için hedef karakter sayısı
+    LEAD_MAX = 1600            # giriş (lead) bölümünden en çok alınacak karakter
+    SECTION_MAX = 480          # her bölümden alınacak karakter (cümle sınırında kesilir)
+
+    # ── 🛒 Ürün algılama ──
     _PRODUCT_RE = re.compile(
         r"\b(iphone|ipad|macbook|airpods|apple watch|galaxy|samsung|xiaomi|redmi|poco|huawei|oppo|"
         r"realme|oneplus|pixel|playstation|ps[45]|xbox|nintendo|switch|steam deck|meta quest|"
@@ -69,192 +92,217 @@ class TrustedSourceFetcher:
         # "…14 pro incelemesi" gibi: inceleme/özellik sözcüğü + model numarası
         return any(w in low for w in cls._REVIEW_WORDS) and bool(re.search(r"\d", low))
 
-    _BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-    _reddit_cache: Dict[Any, Any] = {}
-    _reddit_blocked_until = 0.0
-
-    @classmethod
-    def _reddit_search(cls, term: str, limit: int = 3) -> List[Dict[str, Any]]:
-        """
-        Reddit'te arama. Kimlik doğrulamasız JSON uç noktası çoğu ağda 403 verdiğinden önce
-        herkese açık RSS (Atom) akışı denenir; olmazsa JSON'a düşülür.
-        Dönen kayıtlar: {"title","snippet","subreddit","score"(bilinmiyorsa None)}
-        """
-        import html as _html
-        import xml.etree.ElementTree as ET
-
-        key = (term.lower(), limit)
-        now = time.time()
-        cached = cls._reddit_cache.get(key)
-        if cached and now - cached[0] < 1800:          # aynı arama 30 dk önbellekte
-            return cached[1]
-        if now < cls._reddit_blocked_until:            # 429 sonrası bekleme — Reddit'i yorma
-            return []
-
-        q = urllib.parse.quote(term)
-        out: List[Dict[str, Any]] = []
-        try:
-            r = requests.get(f"https://www.reddit.com/search.rss?q={q}&sort=relevance&type=link",
-                             headers={"User-Agent": cls._BROWSER_UA}, timeout=5.0)
-            if r.status_code == 429:
-                cls._reddit_blocked_until = now + 120
-                return []
-            if r.status_code == 200:
-                ns = {"a": "http://www.w3.org/2005/Atom"}
-                for entry in ET.fromstring(r.content).findall("a:entry", ns):
-                    title = (entry.findtext("a:title", default="", namespaces=ns) or "").strip()
-                    if not title:
-                        continue
-                    cat = entry.find("a:category", ns)
-                    sub = (cat.get("label") or cat.get("term") or "reddit") if cat is not None else "reddit"
-                    raw = entry.findtext("a:content", default="", namespaces=ns) or ""
-                    text = _html.unescape(re.sub(r"<[^>]+>", " ", raw))
-                    text = re.sub(r"\s+", " ", text).replace("[link]", "").replace("[comments]", "").strip()
-                    out.append({"title": title, "snippet": text[:280],
-                                "subreddit": sub.replace("r/", ""), "score": None})
-                    if len(out) >= limit:
-                        break
-                if out:
-                    cls._reddit_cache[key] = (now, out)
-                    return out
-        except Exception:
-            pass
-        try:
-            r = requests.get(
-                f"https://www.reddit.com/search.json?q={q}&sort=relevance&limit=12&raw_json=1",
-                headers={"User-Agent": cls.USER_AGENT}, timeout=4.5)
-            if r.status_code == 200:
-                for child in ((r.json().get("data") or {}).get("children") or []):
-                    post = child.get("data") or {}
-                    if post.get("over_18") or post.get("quarantine") or not (post.get("title") or "").strip():
-                        continue
-                    out.append({"title": post["title"].strip(),
-                                "snippet": (post.get("selftext") or "").strip()[:280],
-                                "subreddit": post.get("subreddit") or "reddit",
-                                "score": int(post.get("score") or 0)})
-                    if len(out) >= limit:
-                        break
-        except Exception:
-            pass
-        return out
-
-    @classmethod
-    def search_reddit_reviews(cls, query: str, limit: int = 3) -> List[Dict[str, Any]]:
-        """Reddit'ten ürünle ilgili kullanıcı incelemesi/yorumu gönderileri."""
-        words = clean_text(query).split()
-        drop = {"nedir", "nelerdir", "özellikleri", "ozellikleri", "inceleme", "incelemesi",
-                "yorumları", "yorumlari", "alınır", "alinir", "mı", "mi", "değer", "bilgi", "hakkında"}
-        term = " ".join(w for w in words if w not in drop) or clean_text(query)
-        return cls._reddit_search(term + " review", limit) if term else []
+    # ── Wikipedia madde işleme ──
 
     @staticmethod
-    def format_reviews(reviews: List[Dict[str, Any]]) -> str:
-        lines = []
-        for r in reviews:
-            line = f"• {r['title']} (r/{r['subreddit']}" + (f", ▲{r['score']})" if r.get("score") is not None else ")")
-            if r.get("snippet"):
-                line += f"\n   “{r['snippet']}”"
-            lines.append(line)
-        return "\n".join(lines)
+    def _split_sections(text: str):
+        """Düz metin maddeyi (lead, [(başlık, gövde), ...]) olarak böler."""
+        lead: List[str] = []
+        sections: List[List[Any]] = []
+        for line in (text or "").splitlines():
+            m = re.match(r"^(={2,6})\s*(.+?)\s*\1\s*$", line)
+            if m:
+                if len(m.group(1)) == 2:
+                    sections.append([m.group(2).strip(), []])
+                elif sections:
+                    sections[-1][1].append("")      # alt başlık: gövdeye devam
+                continue
+            (sections[-1][1] if sections else lead).append(line)
+        body = [(h, "\n".join(b).strip()) for h, b in sections]
+        return "\n".join(lead).strip(), [(h, t) for h, t in body if t]
+
+    @staticmethod
+    def _clip(text: str, limit: int) -> Tuple[str, bool]:
+        """Metni ~limit karaktere, paragraf/cümle sınırında keser. (kesilen_metin, kesildi_mi)"""
+        text = re.sub(r"\n{3,}", "\n\n", (text or "").strip())
+        if len(text) <= limit:
+            return text, False
+        cut = text[:limit]
+        # önce paragraf sonu, sonra cümle sonu
+        para = cut.rfind("\n\n")
+        if para > limit * 0.5:
+            return cut[:para].strip(), True
+        sent = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "), cut.rfind(".\n"))
+        if sent > limit * 0.4:
+            return cut[:sent + 1].strip(), True
+        return cut.rstrip() + "…", True
 
     @classmethod
-    def search_wikipedia(cls, query: str, lang: str = "tr", detailed: bool = False) -> Optional[Dict[str, str]]:
-        """
-        Wikipedia (varsayılan Türkçe) OpenSearch ve Summary API'sinden en doğru madde özetini çeker.
-        `detailed=True` ise (ürün özellikleri için) madde girişinden daha uzun bir metin alınır.
-        """
-        words = clean_text(query).split()
-        keywords = [w for w in words if w not in [
-            "nedir", "nelerdir", "neresi", "neresidir", "kimdir", "hangisidir",
-            "hangisi", "ne", "neler", "nerede", "nasıl", "neden", "hakkında",
-            "bilgi", "ver", "söyle", "anlat", "lütfen", "bana", "acaba"
-        ]]
-        search_term = " ".join(keywords) if keywords else clean_text(query)
-
-        if not search_term:
-            return None
-
+    def _fetch_article(cls, title: str, lang: str) -> Optional[Dict[str, Any]]:
+        """Maddenin düz metnini + bağlantısını alır: {title, lang, url, lead, sections}."""
         headers = {"User-Agent": cls.USER_AGENT}
-
-        # 1. OpenSearch ile en uygun başlığı bul
         try:
-            opensearch_url = (
-                f"https://{lang}.wikipedia.org/w/api.php?action=opensearch"
-                f"&search={urllib.parse.quote(search_term)}&limit=1&namespace=0&format=json"
+            r = requests.get(
+                f"https://{lang}.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1"
+                f"&redirects=1&format=json&titles={urllib.parse.quote(title)}",
+                headers=headers, timeout=6.0,
             )
-            resp = requests.get(opensearch_url, headers=headers, timeout=3.5)
-            if resp.status_code == 200:
-                data = resp.json()
-                if len(data) >= 2 and data[1]:
-                    title = data[1][0]
-                    # 2. Summary REST API'den özet çek
-                    summary_url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(title)}"
-                    s_resp = requests.get(summary_url, headers=headers, timeout=3.5)
-                    if s_resp.status_code == 200:
-                        s_data = s_resp.json()
-                        extract = s_data.get("extract", "").strip()
-                        if extract:
-                            if detailed:
-                                extract = cls._wikipedia_long_extract(title, lang, headers) or extract
-                            return {
-                                "title": title,
-                                "extract": extract,
-                                "source": f"Wikipedia ({title})" if lang == "tr" else f"Wikipedia-{lang} ({title})",
-                            }
+            if r.status_code != 200:
+                return None
+            for page in ((r.json().get("query") or {}).get("pages") or {}).values():
+                text = (page.get("extract") or "").strip()
+                if not text:
+                    continue
+                real_title = page.get("title") or title
+                lead, sections = cls._split_sections(text)
+                return {
+                    "title": real_title, "lang": lang, "lead": lead, "sections": sections,
+                    "url": f"https://{lang}.wikipedia.org/wiki/"
+                           + urllib.parse.quote(real_title.replace(" ", "_")),
+                }
         except Exception:
             pass
-
         return None
 
     @classmethod
-    def _wikipedia_long_extract(cls, title: str, lang: str, headers: dict, chars: int = 1600) -> str:
-        """Maddenin başından ~`chars` karakterlik düz metin (ürün özellikleri için özetten uzun)."""
-        try:
-            url = (f"https://{lang}.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1"
-                   f"&exchars={chars}&redirects=1&format=json&titles={urllib.parse.quote(title)}")
-            r = requests.get(url, headers=headers, timeout=4.0)
-            if r.status_code == 200:
-                pages = (r.json().get("query") or {}).get("pages") or {}
-                for page in pages.values():
-                    return (page.get("extract") or "").strip()
-        except Exception:
-            pass
-        return ""
+    def _compose_general(cls, art: Dict[str, Any]) -> Tuple[str, bool]:
+        """Genel konu: giriş + önemli bölümlerin ilk paragrafları (~GENERAL_BUDGET karakter)."""
+        parts: List[str] = []
+        lead, truncated = cls._clip(art["lead"], cls.LEAD_MAX)
+        if lead:
+            parts.append(lead)
+        used = len(lead)
+        content = [(h, t) for h, t in art["sections"] if h.lower() not in cls._SKIP_SECTIONS]
+        for i, (h, t) in enumerate(content):
+            if used >= cls.GENERAL_BUDGET:
+                truncated = True
+                break
+            first_par = t.split("\n\n")[0] if "\n\n" in t else t
+            piece, cut = cls._clip(first_par, cls.SECTION_MAX)
+            if cut or len(first_par) < len(t):
+                truncated = True
+            parts.append(f"▸ {h}\n{piece}")
+            used += len(piece) + len(h)
+        return "\n\n".join(parts), truncated
 
     @classmethod
-    def product_info(cls, query: str) -> Dict[str, Any]:
-        """Ürün için: özellikler (Wikipedia — önce Türkçe, yoksa İngilizce) + incelemeler (Reddit)."""
-        wiki = (cls.search_wikipedia(query, "tr", detailed=True)
-                or cls.search_wikipedia(query, "en", detailed=True))
-        return {"wiki": wiki, "reviews": cls.search_reddit_reviews(query)}
+    def _pick_sections(cls, art: Dict[str, Any], keys, maxn: int, limit: int) -> Tuple[List[str], bool]:
+        out, truncated = [], False
+        for h, t in art["sections"]:
+            low = h.lower()
+            if low in cls._SKIP_SECTIONS or not any(k in low for k in keys):
+                continue
+            if len(out) >= maxn:
+                truncated = True
+                break
+            piece, cut = cls._clip(t, limit)
+            truncated = truncated or cut
+            out.append(f"▸ {h}\n{piece}")
+        return out, truncated
 
     @classmethod
-    def search_reddit(cls, query: str) -> Optional[Dict[str, str]]:
-        """
-        Reddit'in genel arama API'sinden (kimlik doğrulama gerekmez) en ilgili
-        gönderiyi bulur; Gemini API anahtarı girilmemişken Wikipedia'dan sonraki
-        ikinci güvenilir kaynaktır.
-        """
+    def _compose_product(cls, spec_art: Dict[str, Any], review_art: Optional[Dict[str, Any]]) -> Tuple[str, bool]:
+        """Ürün: giriş + özellik bölümleri (Wikipedia) + eleştirmen/basın değerlendirmesi (Wikipedia)."""
+        parts: List[str] = []
+        lead, truncated = cls._clip(spec_art["lead"], 1300)
+        if lead:
+            parts.append(lead)
+        specs, t1 = cls._pick_sections(spec_art, cls._SPEC_KEYS, 3, 700)
+        if specs:
+            parts.append("📋 Özellikler\n" + "\n\n".join(specs))
+        truncated = truncated or t1
+        for art in ([review_art] if review_art else []) + ([spec_art] if spec_art is not review_art else []):
+            revs, t2 = cls._pick_sections(art, cls._REVIEW_KEYS, 2, 900)
+            if revs:
+                tag = "" if art["lang"] == "tr" else " (İngilizce Wikipedia)"
+                parts.append(f"💬 Eleştirmenlerin ve basının değerlendirmesi{tag}\n" + "\n\n".join(revs))
+                truncated = truncated or t2
+                break
+        if not specs and len(parts) <= 1:
+            more, t3 = cls._compose_general(spec_art)     # özel bölüm yoksa genel derleme
+            return more, t3
+        return "\n\n".join(parts), truncated
+
+    @staticmethod
+    def _search_term(query: str) -> str:
         words = clean_text(query).split()
         keywords = [w for w in words if w not in [
             "nedir", "nelerdir", "neresi", "neresidir", "kimdir", "hangisidir",
             "hangisi", "ne", "neler", "nerede", "nasıl", "neden", "hakkında",
-            "bilgi", "ver", "söyle", "anlat", "lütfen", "bana", "acaba"
+            "bilgi", "ver", "söyle", "anlat", "lütfen", "bana", "acaba",
+            "özellikleri", "ozellikleri", "inceleme", "incelemesi", "yorumları", "yorumlari",
         ]]
-        search_term = " ".join(keywords) if keywords else clean_text(query)
-        if not search_term:
+        return " ".join(keywords) if keywords else clean_text(query)
+
+    @classmethod
+    def _find_title(cls, term: str, lang: str) -> Optional[str]:
+        try:
+            r = requests.get(
+                f"https://{lang}.wikipedia.org/w/api.php?action=opensearch"
+                f"&search={urllib.parse.quote(term)}&limit=1&namespace=0&format=json",
+                headers={"User-Agent": cls.USER_AGENT}, timeout=3.5,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                if len(data) >= 2 and data[1]:
+                    return data[1][0]
+        except Exception:
+            pass
+        return None
+
+    @classmethod
+    def search_wikipedia(cls, query: str, lang: str = "tr", product: bool = False) -> Optional[Dict[str, Any]]:
+        """
+        Wikipedia'dan (varsayılan Türkçe) maddeyi bulur ve önemli bölümlerini derler.
+        `product=True` ise özellikler + eleştirmen değerlendirmesi öne çıkarılır; Türkçe
+        madde yoksa (veya değerlendirme bölümü yoksa) İngilizce Wikipedia'dan tamamlanır.
+        Dönüş: {title, extract, source, url, truncated} ya da None.
+        """
+        term = cls._search_term(query)
+        if not term:
             return None
 
-        for post in cls._reddit_search(search_term, 1):
-            title = post["title"]
-            snippet = post["snippet"][:500].strip()
-            return {
-                "title": title,
-                "extract": f"**{title}**" + (f"\n\n{snippet}" if snippet else ""),
-                "source": f"Reddit (r/{post['subreddit']})",
-            }
+        title = cls._find_title(term, lang)
+        art = cls._fetch_article(title, lang) if title else None
+
+        if product:
+            en_art = None
+            need_en = art is None or not any(
+                any(k in h.lower() for k in cls._REVIEW_KEYS) for h, _ in art["sections"])
+            if need_en and lang != "en":
+                en_title = cls._find_title(term, "en")
+                en_art = cls._fetch_article(en_title, "en") if en_title else None
+            main = art or en_art
+            if main:
+                extract, truncated = cls._compose_product(main, en_art if (en_art and main is not en_art) else None)
+                if extract:
+                    return cls._result(main, extract, truncated)
+            return None
+
+        if art:
+            extract, truncated = cls._compose_general(art)
+            if extract:
+                return cls._result(art, extract, truncated)
+        # Madde metni alınamadıysa kısa özete (REST summary) düş
+        if title:
+            try:
+                s = requests.get(
+                    f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(title)}",
+                    headers={"User-Agent": cls.USER_AGENT}, timeout=3.5)
+                if s.status_code == 200:
+                    d = s.json()
+                    ext = (d.get("extract") or "").strip()
+                    if ext:
+                        url = ((d.get("content_urls") or {}).get("desktop") or {}).get("page") or (
+                            f"https://{lang}.wikipedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_")))
+                        return {"title": title, "extract": ext, "source": f"Wikipedia ({title})",
+                                "url": url, "truncated": True}
+            except Exception:
+                pass
         return None
+
+    @staticmethod
+    def _result(art: Dict[str, Any], extract: str, truncated: bool) -> Dict[str, Any]:
+        src = f"Wikipedia ({art['title']})" if art["lang"] == "tr" else f"Wikipedia-{art['lang']} ({art['title']})"
+        return {"title": art["title"], "extract": extract, "source": src,
+                "url": art["url"], "truncated": truncated}
+
+    @staticmethod
+    def source_footer(wiki: Dict[str, Any]) -> str:
+        """Yanıtın altına eklenen kaynak / 'daha fazlasını oku' satırı (düz metin)."""
+        if wiki.get("truncated"):
+            return f"📖 Daha fazlasını okumak için: {wiki['url']}"
+        return f"📌 Kaynak: {wiki['source']} — {wiki['url']}"
 
 
 # ─────────────────────────────────────────────
@@ -279,7 +327,9 @@ class GeminiService:
                 "Aşağıdaki güvenilir kaynak bilgisini dikkate alarak soruyu yanıtla:\n"
                 f"KAYNAK BİLGİSİ: {context}\n\n"
                 f"SORU: {question}\n\n"
-                "Lütfen net, anlaşılır, Türkçe ve samimi bir dille açıkla."
+                "Lütfen kapsamlı ve ayrıntılı, Türkçe ve samimi bir dille açıkla. Konu genişse önemli "
+                "yönleri (tanım, tarihçe, özellikler, kullanım alanları vb.) ayrı kısa paragraflarda anlat. "
+                "Markdown işaretleri (*, #, `) kullanma; düz metin yaz."
             )
         return {
             "systemInstruction": {"parts": [{"text": GeminiConfig.SYSTEM_PROMPT}]},
@@ -1335,69 +1385,45 @@ class AIEngine:
             # Kullanıcı mesajını kaydet
             log("user", query, True)
 
-            # Güvenilir kaynaktan araştır: ürünse özellikler Wikipedia'dan + incelemeler Reddit'ten,
-            # değilse yalnızca Wikipedia özeti
-            reviews: List[Dict[str, Any]] = []
-            if TrustedSourceFetcher.is_product_query(query):
-                info = TrustedSourceFetcher.product_info(query)
-                wiki_data, reviews = info["wiki"], info["reviews"]
-            else:
-                wiki_data = TrustedSourceFetcher.search_wikipedia(query)
+            # Güvenilir kaynaktan araştır: Wikipedia (ürünlerde özellikler + eleştirmen
+            # değerlendirmesi; gerekirse İngilizce madde). Reddit gibi denetimsiz kaynaklar yok.
+            wiki_data = TrustedSourceFetcher.search_wikipedia(
+                query, product=TrustedSourceFetcher.is_product_query(query))
             context_text = None
             source_tag = "gemini"
 
             if wiki_data:
-                context_text = f"Wikipedia Başlığı: {wiki_data['title']}\nÖzet: {wiki_data['extract']}"
+                context_text = f"Wikipedia Başlığı: {wiki_data['title']}\nKaynak metin:\n{wiki_data['extract']}"
                 source_tag = f"gemini + {wiki_data['source']}"
-            if reviews:
-                context_text = (context_text or "") + (
-                    "\n\nReddit kullanıcı incelemeleri:\n" + TrustedSourceFetcher.format_reviews(reviews))
-                source_tag = (source_tag if wiki_data else "gemini") + " + Reddit"
 
             # Gemini API ile yanıt üret
             answer = self.gemini.generate_response(query, context=context_text)
+            if answer and wiki_data:
+                answer = f"{answer.rstrip()}\n\n{TrustedSourceFetcher.source_footer(wiki_data)}"
 
-            # Eğer Gemini API anahtarı yoksa veya hata verdiyse Wikipedia özetini doğrudan kullan
+            # Eğer Gemini API anahtarı yoksa veya hata verdiyse Wikipedia derlemesini doğrudan kullan
             if not answer:
                 if wiki_data and wiki_data.get("extract"):
-                    answer = f"{wiki_data['extract']}"
-                    if reviews:
-                        answer += "\n\n💬 Kullanıcı incelemeleri (Reddit):\n" + TrustedSourceFetcher.format_reviews(reviews)
-                    answer += f"\n\n📌 *Kaynak: {wiki_data['source']}" + (" + Reddit*" if reviews else "*")
-                    source_tag = wiki_data['source'] + (" + Reddit" if reviews else "")
-                elif reviews:
-                    answer = ("💬 Kullanıcı incelemeleri (Reddit):\n"
-                              + TrustedSourceFetcher.format_reviews(reviews)
-                              + "\n\n📌 *Kaynak: Reddit*")
-                    source_tag = "Reddit"
+                    answer = f"{wiki_data['extract']}\n\n{TrustedSourceFetcher.source_footer(wiki_data)}"
+                    source_tag = wiki_data['source']
                 else:
-                    # Wikipedia'da da yoksa — Gemini anahtarı yokken/başarısızken
-                    # ikinci deneme olarak Reddit'e bakılır.
-                    reddit_data = TrustedSourceFetcher.search_reddit(query)
-                    if reddit_data:
+                    api_key = get_api_key()
+                    if not api_key:
                         answer = (
-                            f"{reddit_data['extract']}\n\n"
-                            f"📌 *Kaynak: {reddit_data['source']}*"
+                            "⚠️ Gemini API Anahtarı Bulunamadı!\n\n"
+                            "Wikipedia'da bu soruyla ilgili bir sonuç bulamadım. "
+                            "Çevrim içi arama ve akıllı yapay zeka yanıtları için lütfen "
+                            "Ayarlar bölümünden Google Gemini API anahtarınızı giriniz.\n"
+                            "(API anahtarı olmadan Wikipedia ve hafızadaki kayıtlı "
+                            "bilgiler çalışır.)"
                         )
-                        source_tag = reddit_data['source']
+                        source_tag = "system_no_key"
                     else:
-                        api_key = get_api_key()
-                        if not api_key:
-                            answer = (
-                                "⚠️ **Gemini API Anahtarı Bulunamadı!**\n\n"
-                                "Wikipedia ve Reddit'te de bu soruyla ilgili bir sonuç bulamadım. "
-                                "Çevrim içi arama ve akıllı yapay zeka yanıtları için lütfen "
-                                "**Ayarlar** bölümünden Google Gemini API anahtarınızı giriniz.\n"
-                                "*(API anahtarı olmadan Wikipedia, Reddit ve hafızadaki kayıtlı "
-                                "bilgiler çalışır.)*"
-                            )
-                            source_tag = "system_no_key"
-                        else:
-                            answer = (
-                                "Bu soruyla ilgili güvenilir bir bilgi kaynağına ulaşılamadı. "
-                                "Lütfen soruyu farklı kelimelerle sormayı deneyin."
-                            )
-                            source_tag = "unknown"
+                        answer = (
+                            "Bu soruyla ilgili güvenilir bir bilgi kaynağına ulaşılamadı. "
+                            "Lütfen soruyu farklı kelimelerle sormayı deneyin."
+                        )
+                        source_tag = "unknown"
 
             # Otomatik Öğrenme: Geçerli yanıtları hemen hafızaya kaydet ("Eğer bu soru sorulursa bu cevabı ver")
             learned = False

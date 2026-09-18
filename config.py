@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 MehburAI - Konfigürasyon & Tema Ayarları
 =========================================
@@ -19,7 +19,7 @@ import sys
 #   • KÜÇÜK ekleme (ince ayar, küçük düzeltme/iyileştirme) → SON basamak artar: 1.2 → 1.2.1 → 1.2.2 → ...
 #     (bir sonraki BÜYÜK eklemede üçüncü basamak sıfırlanıp ORTA basamak artar, örn. 1.2.3 → 1.3)
 # (Elle güncellenir — kod her eklemede otomatik saymaz.)
-APP_VERSION = "1.3"
+APP_VERSION = "1.3.1"
 
 # ─────────────────────────────────────────────
 # Proje Yolları
@@ -267,7 +267,8 @@ class GeminiConfig:
     # Sistem promptu (MehburAI Kişiliği)
     SYSTEM_PROMPT = (
         "Sen MehburAI adında Türkçe konuşan akıllı bir yapay zeka asistanısın. "
-        "Soruları doğru, öz ve anlaşılır şekilde yanıtlarsın. "
+        "Soruları doğru, kapsamlı ve anlaşılır şekilde yanıtlarsın; konu genişse "
+        "önemli kısımları düzenli paragraflarla açıklarsın. "
         "Güvenilir bilgi kaynakları olan Wikipedia, ansiklopediler ve bilimsel veriler "
         "çerçevesinde yanıt üretirsin. Yanıtlarında kaynak belirtmeye özen gösterirsin. "
         "Samimi, yardımsever ve profesyonel bir üslup kullanırsın. "
