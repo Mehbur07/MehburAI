@@ -29,19 +29,25 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo  [3/3] Bilgisayara kuruluyor: %%LOCALAPPDATA%%\Programs\MehburAI ...
-set "DEST=%LOCALAPPDATA%\Programs\MehburAI"
-if exist "%DEST%" rmdir /s /q "%DEST%"
-mkdir "%DEST%"
-robocopy "dist\MehburAI" "%DEST%" /E /NFL /NDL /NJH /NJS >nul
-if not exist "%DEST%\data" mkdir "%DEST%\data"
-if exist "data\config.json" copy /y "data\config.json" "%DEST%\data\config.json" >nul
-if exist "data\mehbur_memory.db" copy /y "data\mehbur_memory.db" "%DEST%\data\mehbur_memory.db" >nul
+echo  [3/3] MehburAI.Setup.exe olusturuluyor (dist\MehburAI.Setup.exe)...
+python -c "import shutil; shutil.make_archive('build/payload', 'zip', 'dist/MehburAI')"
+if %ERRORLEVEL% NEQ 0 (
+    echo  [HATA] Paket arsivi olusturulamadi.
+    pause
+    exit /b 1
+)
+python -m PyInstaller installer.py --noconfirm --onefile --windowed --name MehburAI.Setup ^
+    --icon "%CD%\assets\logo.ico" --add-data "%CD%\build\payload.zip;." --add-data "%CD%\assets\logo.ico;." ^
+    --distpath dist --workpath build\setup --specpath build
+if %ERRORLEVEL% NEQ 0 (
+    echo  [HATA] Setup derlenemedi.
+    pause
+    exit /b 1
+)
 
 echo.
 echo  =============================================================
-echo   [OK] Kurulum tamamlandi: %DEST%\MehburAI.exe
-echo   Masaustu kisayolunu bu dosyaya yonlendirmeyi unutma
-echo   (ya da MehburAI.lnk'yi bu betiği calistiran Claude güncelledi).
+echo   [OK] Kurulum dosyasi: dist\MehburAI.Setup.exe
+echo   Calistirinca %%APPDATA%%\MehburAI altina kurar ve baslatir.
 echo  =============================================================
 pause

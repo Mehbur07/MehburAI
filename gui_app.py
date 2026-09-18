@@ -2293,6 +2293,7 @@ class MehburApp(ctk.CTk):
             txt, col = self._VOICE_STATE_LABEL.get(state, (f"• {state}", Theme.TEXT_SECONDARY))
             self.voice_status_lbl.configure(text=txt, text_color=col)
         self._update_mic_button(state)
+        self._drive_jarvis(state, text)
 
     def _update_mic_button(self, state: Optional[str] = None):
         """Sohbet kutusundaki 🎤 butonunu sesli sohbet durumuna göre renklendirir."""
@@ -2321,7 +2322,6 @@ class MehburApp(ctk.CTk):
                 self.voice_switch.deselect()
         self._toggle_voice()
         self._update_mic_button()
-        self._drive_jarvis(state, text)
 
     def _drive_jarvis(self, state: str, text: str = ""):
         """Sesli asistan durumunu JARVIS tam ekran görseline aktarır."""
