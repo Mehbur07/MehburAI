@@ -68,6 +68,7 @@ from security_guard import (
     trigger_intruder_alert,
 )
 from telegram_bot import TelegramControlBot
+from updater import check_for_update
 from background import SingleInstance, is_autostart_enabled, restart_app, set_autostart
 
 try:
@@ -189,6 +190,9 @@ class MehburApp(ctk.CTk):
         # Güvenlik kuyruğunu düzenli aralıkla ana thread'de kontrol et
         self.after(700, self._poll_security_queue)
 
+        # Yeni sürüm var mı? (pencere çizildikten sonra arka planda, sessizce)
+        self.after(4000, self._check_for_updates)
+
         # Sohbet listesi + aktif sohbetin geçmişi
         self._refresh_conversation_list()
         self._load_active_conversation()
@@ -244,8 +248,81 @@ class MehburApp(ctk.CTk):
         self._build_memory_panel()
         self._build_settings_panel()
 
+        # Güncelleme uyarı şeridi (yeni sürüm varsa görünür)
+        self._build_update_banner()
+
         # Varsayılan olarak Sohbet panelini göster
         self.switch_tab("chat")
+
+    # ─────────────────────────────────────────
+    # 🔔 Güncelleme Uyarısı
+    # ─────────────────────────────────────────
+
+    def _build_update_banner(self):
+        """Pencerenin altındaki uyarı şeridi — yeni sürüm bulunana kadar gizli."""
+        self._update_url = ""
+        self.update_banner = ctk.CTkFrame(
+            self, fg_color=Theme.BG_CARD, corner_radius=10,
+            border_width=1, border_color=Theme.STATUS_WARNING,
+        )
+        self.update_banner.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 12))
+        self.update_banner.grid_columnconfigure(0, weight=1)
+
+        self.update_msg_lbl = ctk.CTkLabel(
+            self.update_banner, text="", justify="left", anchor="w", wraplength=760,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=13, weight="bold"),
+            text_color=Theme.STATUS_WARNING,
+        )
+        self.update_msg_lbl.grid(row=0, column=0, sticky="w", padx=14, pady=(10, 2))
+
+        self.update_link_lbl = ctk.CTkLabel(
+            self.update_banner, text="", cursor="hand2", anchor="w",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=13, underline=True),
+            text_color=Theme.CYAN_PRIMARY,
+        )
+        self.update_link_lbl.grid(row=1, column=0, sticky="w", padx=14, pady=(0, 2))
+        self.update_link_lbl.bind("<Button-1>", lambda e: self._open_update_page())
+
+        self.update_ver_lbl = ctk.CTkLabel(
+            self.update_banner, text="", anchor="w",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11), text_color=Theme.TEXT_SECONDARY,
+        )
+        self.update_ver_lbl.grid(row=2, column=0, sticky="w", padx=14, pady=(0, 10))
+
+        ctk.CTkButton(
+            self.update_banner, text="✕", width=30, height=30, fg_color="transparent",
+            hover_color=Theme.BG_CARD_HOVER, text_color=Theme.TEXT_SECONDARY,
+            command=self.update_banner.grid_remove,
+        ).grid(row=0, column=1, rowspan=2, padx=(0, 10), pady=8, sticky="ne")
+
+        self.update_banner.grid_remove()
+
+    def _open_update_page(self):
+        if self._update_url.startswith("https://"):
+            webbrowser.open(self._update_url)
+
+    def _check_for_updates(self):
+        """Açılışta (ve açık kaldıkça 6 saatte bir) yeni sürümü arka planda denetler."""
+        def work():
+            try:
+                info = check_for_update()
+            except Exception:
+                info = None
+            self._ui_call(lambda: self._show_update_banner(info))
+        threading.Thread(target=work, daemon=True, name="MehburAI-UpdateCheck").start()
+        if not self._quitting:
+            self.after(6 * 3600 * 1000, self._check_for_updates)
+
+    def _show_update_banner(self, info):
+        if not info or not self.update_banner.winfo_exists():
+            return
+        self._update_url = info["url"]
+        self.update_msg_lbl.configure(
+            text="Uyarı: MehburAI'a güncelleme geldi. Eğer yeni sürümü indirmek istiyorsanız "
+                 "bu adresten indirebilirsiniz:")
+        self.update_link_lbl.configure(text=info["url"])
+        self.update_ver_lbl.configure(text=f"Sizdeki sürüm: {info['current']}  •  Yeni sürüm: {info['latest']}")
+        self.update_banner.grid()
 
     def _apply_window_icon(self):
         """Pencere / görev çubuğu ikonunu assets/logo.png'den uygular (varsa)."""

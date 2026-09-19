@@ -48,7 +48,7 @@ def run_full_validation():
     print("  🤖 MEHBUR AI — FAZ 5 ENTEGRASYON VE DOĞRULAMA TESTLERİ")
     print("=" * 65)
     passed_tests = 0
-    total_tests = 19
+    total_tests = 20
 
     memory = MemoryEngine()
     network = NetworkMonitor()
@@ -1107,6 +1107,60 @@ def run_full_validation():
     print("  • Görsel: Gemini kotası yokken ücretsiz yedekle çiziyor, düzenlemede gerçek sebebi söylüyor ✓")
 
     print("  ✅ TEST 19 BAŞARILI: Hassas bilgi filtresi, tema, otomatik öğrenme, ürün bilgisi, bas-konuş, /aramabaslat hazır.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 20: 🔔 Güncelleme uyarısı (yeni sürüm denetimi)
+    # ─────────────────────────────────────────
+    print("\n[TEST 20] Güncelleme Uyarısı:")
+    import updater as _up
+
+    # 20a. Sürüm ayrıştırma / karşılaştırma
+    assert _up.parse_version("v1.3.3") == (1, 3, 3) and _up.parse_version("1.4") == (1, 4, 0)
+    assert _up.parse_version("sürüm yok") is None
+    assert _up.parse_version("1.10") > _up.parse_version("1.9.9") > _up.parse_version("1.3.3")
+    print("  • Sürüm numaraları doğru ayrıştırılıyor/karşılaştırılıyor (1.10 > 1.9.9 > 1.3.3) ✓")
+
+    # 20b. Kaynak sırası ve hata yolları (ağ çağrıları sahte)
+    class _Resp:
+        def __init__(self, code, js=None, text=""):
+            self.status_code, self._js, self.text = code, js, text
+        def json(self):
+            return self._js
+    _orig_get20 = _up.requests.get
+    try:
+        # yeni sürüm: Releases API'den
+        _up.requests.get = lambda url, **k: _Resp(200, {"tag_name": "v9.9.9", "html_url": "https://github.com/x/y/releases/tag/v9.9.9"})
+        _r = _up.check_for_update("1.3.3")
+        assert _r == {"current": "1.3.3", "latest": "9.9.9", "url": "https://github.com/x/y/releases/tag/v9.9.9"}, _r
+        # aynı/eski sürüm: uyarı yok
+        _up.requests.get = lambda url, **k: _Resp(200, {"tag_name": "v1.3.3", "html_url": "u"})
+        assert _up.check_for_update("1.3.3") is None
+        # Releases 404 (depo gizli / yayın yok) → depodaki config.py'ye düş
+        def _get_fallback(url, **k):
+            if "api.github.com" in url:
+                return _Resp(404)
+            return _Resp(200, text='# x\nAPP_VERSION = "2.0"\n')
+        _up.requests.get = _get_fallback
+        _r2 = _up.check_for_update("1.3.3")
+        assert _r2 and _r2["latest"] == "2.0" and _r2["url"] == _cfg19.UPDATE_PAGE_URL
+        # her yer 404 → sessizce None (uyarı yok, hata yok)
+        _up.requests.get = lambda url, **k: _Resp(404)
+        assert _up.check_for_update("1.3.3") is None
+        # ağ hatası → sessizce None
+        def _boom(url, **k):
+            raise _up.requests.ConnectionError("yok")
+        _up.requests.get = _boom
+        assert _up.check_for_update("1.3.3") is None
+    finally:
+        _up.requests.get = _orig_get20
+    print("  • Yeni sürüm bulununca bilgi dönüyor; aynı sürüm / 404 / ağ hatasında sessizce uyarı yok ✓")
+
+    # 20c. Arayüzde şerit bileşenleri + varsayılan depo adresi
+    for m in ("_build_update_banner", "_check_for_updates", "_show_update_banner", "_open_update_page"):
+        assert hasattr(_gui.MehburApp, m), f"gui_app.MehburApp.{m} eksik"
+    assert _cfg19.UPDATE_PAGE_URL.startswith("https://github.com/") and _cfg19.GITHUB_REPO in _cfg19.UPDATE_PAGE_URL
+    print("  ✅ TEST 20 BAŞARILI: Güncelleme denetimi ve uyarı şeridi hazır.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
