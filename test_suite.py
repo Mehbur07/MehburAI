@@ -1015,6 +1015,34 @@ def run_full_validation():
     _va.resume(); assert not _va._paused.is_set()
     print("  • Bas-konuş (Dictation) hata yolu + uyandırma dinleyicisi duraklat/devam çalışıyor ✓")
 
+    # 19f. Gemini anahtarı girilmemişse yanıtın en başında özür notu (yalnızca gösterimde; hafızaya notsuz)
+    from ai_engine import NO_GEMINI_APOLOGY as _apology
+    from config import get_api_key as _gk19, remove_api_key as _rk19, set_api_key as _sk19
+    _saved_key19 = _gk19()
+    _orig_wiki19 = TrustedSourceFetcher.search_wikipedia
+    _orig_gem19 = ai.gemini.generate_response
+    TrustedSourceFetcher.search_wikipedia = classmethod(
+        lambda cls, q, lang="tr", product=False: {"title": "X", "extract": "Wikipedia özeti.", "source": "Wikipedia (X)",
+                                                   "url": "https://tr.wikipedia.org/wiki/X", "truncated": False})
+    try:
+        if network.check_now():
+            _rk19()
+            ai.gemini.generate_response = lambda *a, **k: None
+            _nk = ai.process_query("kuantum dolanıklık deneyi nedir zzq")
+            assert _nk["answer"].startswith(_apology + "\n\n"), _nk["answer"][:80]
+            assert _apology not in memory.search_knowledge("kuantum dolanıklık deneyi nedir zzq")["answer"]
+            _sk19("AIzaSyD_TestValidGeminiKey1234567890XYZ")
+            ai.gemini.generate_response = lambda *a, **k: "Gemini yanıtı."
+            _wk = ai.process_query("kuantum dolanıklık deneyi nedir zzq")
+            assert _apology not in _wk["answer"] and _wk["answer"].startswith("Gemini yanıtı.")
+            print("  • Gemini anahtarı yokken yanıtın başında özür notu var, anahtar varken yok ✓")
+        else:
+            print("  • (Çevrimdışı — özür notu testi atlandı)")
+    finally:
+        TrustedSourceFetcher.search_wikipedia = _orig_wiki19
+        ai.gemini.generate_response = _orig_gem19
+        (_sk19(_saved_key19) if _saved_key19 else _rk19())
+
     print("  ✅ TEST 19 BAŞARILI: Hassas bilgi filtresi, tema, otomatik öğrenme, ürün bilgisi, bas-konuş, /aramabaslat hazır.")
     passed_tests += 1
 

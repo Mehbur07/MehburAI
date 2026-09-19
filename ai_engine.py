@@ -39,6 +39,8 @@ from network_manager import NetworkMonitor
 from system_tools import SystemTools
 
 
+NO_GEMINI_APOLOGY = "Gemini'ye bağlanılamadı biraz bekleteceğim için özür dilerim. :("
+
 # ─────────────────────────────────────────────
 # Güvenilir Bilgi Kaynakları (Wikipedia / Web)
 # ─────────────────────────────────────────────
@@ -1430,6 +1432,10 @@ class AIEngine:
             if source_tag not in ["system_no_key", "unknown", "empty"]:
                 self.memory.save_knowledge(question=query, answer=answer, source=source_tag)
                 learned = True
+
+            # Gemini API anahtarı girilmemişse yanıtın en başına özür notu (hafızaya notsuz kaydedildi)
+            if not get_api_key():
+                answer = f"{NO_GEMINI_APOLOGY}\n\n{answer}"
 
             # Sohbet kaydını yap
             log("mehbur", answer, True, source=source_tag)
