@@ -413,6 +413,7 @@ class GeminiService:
         istenir). Hesaptaki görsel üretim modellerini sırayla dener.
         Döner: (görsel_bayt, mime_type) ya da hiçbiri çalışmazsa None.
         """
+        self.last_image_error = None      # "quota" (ücretsiz katman kotası) | "other"
         api_key = get_api_key()
         if not api_key:
             return None
@@ -433,14 +434,17 @@ class GeminiService:
         last_error = None
 
         for model in GeminiConfig.IMAGE_MODELS:
-            payload: dict = {"contents": [{"role": "user", "parts": parts}]}
-            if "preview-image" in model:
-                payload["generationConfig"] = {"responseModalities": ["TEXT", "IMAGE"]}
+            payload: dict = {"contents": [{"role": "user", "parts": parts}],
+                             "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]}}
             url = f"{GeminiConfig.API_BASE}/models/{model}:generateContent?key={urllib.parse.quote(api_key)}"
             try:
                 resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
                 if resp.status_code != 200:
                     last_error = f"{model}: HTTP {resp.status_code} {resp.text[:160]}"
+                    if resp.status_code == 429 and "FreeTier" in resp.text:
+                        # Ücretsiz katmanda görsel modellerine kota YOK — diğer modeller de aynı sonucu verir
+                        self.last_image_error = "quota"
+                        break
                     continue
                 data = resp.json()
                 for cand in data.get("candidates", []):
@@ -456,8 +460,23 @@ class GeminiService:
                 continue
 
         if last_error:
+            self.last_image_error = self.last_image_error or "other"
             print(f"[GeminiService] Görsel Üretim Hatası: {last_error}")
         return None
+
+    last_image_error: Optional[str] = None
+
+    def english_image_prompt(self, request: str) -> str:
+        """Türkçe çizim isteğini (Gemini metin modeliyle) kısa, ayrıntılı bir İngilizce görsel istemine çevirir.
+        Metin modeli de yanıt vermezse isteğin kendisi döner."""
+        payload = {"contents": [{"role": "user", "parts": [{"text": (
+            "Aşağıdaki Türkçe görsel isteğini, bir yapay zeka görsel üreticisi için tek cümlelik, "
+            "ayrıntılı bir İNGİLİZCE istemine çevir. Yalnızca istemi yaz, başka hiçbir şey yazma.\n"
+            f"İstek: {request}")}]}],
+            # Düşünen modeller token bütçesinin bir kısmını iç muhakemeye harcar — 120 token yanıtı kesiyordu
+            "generationConfig": {"maxOutputTokens": 1024, "temperature": 0.4}}
+        out = (self._stream_call(payload) or "").strip().strip('"')
+        return out[:400] if len(out) >= 12 else request
 
     def _stream_call(self, payload: dict) -> Optional[str]:
         """`streamGenerateContent` (SSE) uç noktasını yedek modelleri sırayla
@@ -494,6 +513,50 @@ class GeminiService:
         if last_error:
             print(f"[GeminiService] API Yanıt Hatası: {last_error}")
         return None
+
+    def test_key(self, api_key: Optional[str] = None) -> Tuple[bool, str]:
+        """
+        Ayarlar'daki 'API'yi Test Et': verilen (yoksa kayıtlı) anahtarı iki adımda sınar —
+        1) anahtar Google'da geçerli mi (model listesi), 2) gerçekten yanıt üretiyor mu
+        (çok kısa bir istek). Anahtarı kaydetmez. Döner: (başarılı_mı, kullanıcıya_mesaj).
+        """
+        key = (api_key if api_key is not None else get_api_key() or "").strip()
+        if not key:
+            return False, "API anahtarı girilmemiş."
+        q = urllib.parse.quote(key)
+        try:
+            r = requests.get(f"{GeminiConfig.API_BASE}/models?key={q}",
+                             timeout=(GeminiConfig.CONNECT_TIMEOUT, 15.0))
+        except requests.RequestException as e:
+            return False, f"Gemini'ye bağlanılamadı ({type(e).__name__}) — internet/güvenlik duvarını kontrol et."
+        if r.status_code in (400, 401, 403):
+            return False, "API anahtarı geçersiz ya da yetkisiz — anahtarı Google AI Studio'dan yeniden kopyala."
+        if r.status_code == 429:
+            return False, "Anahtar geçerli ama istek/kota sınırına takıldı (HTTP 429) — biraz sonra tekrar dene."
+        if r.status_code != 200:
+            return False, f"Beklenmeyen yanıt: HTTP {r.status_code}"
+
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": "Sadece 'tamam' yaz."}]}],
+            # Düşünen modeller bütçenin bir kısmını iç muhakemeye harcar; 32 token boş yanıt döndürüyordu
+            "generationConfig": {"maxOutputTokens": 1024, "temperature": 0},
+        }
+        last = ""
+        for model in GeminiConfig.FALLBACK_MODELS:
+            t1 = time.time()
+            try:
+                with requests.post(
+                    f"{GeminiConfig.API_BASE}/models/{model}:streamGenerateContent?alt=sse&key={q}",
+                    json=payload, timeout=(GeminiConfig.CONNECT_TIMEOUT, 25.0), stream=True,
+                ) as resp:
+                    if resp.status_code == 200 and self._parse_sse_stream(resp):
+                        return True, (f"Anahtar geçerli ve Gemini yanıt veriyor "
+                                      f"(model: {model}, {time.time() - t1:.1f} sn).")
+                    last = f"{model}: HTTP {resp.status_code}"
+            except requests.RequestException as e:
+                last = f"{model}: {type(e).__name__}"
+        return False, (f"Anahtar geçerli ama hiçbir model yanıt üretmedi ({last}). "
+                       "Kota/model erişimini kontrol et.")
 
     def quick_check(self) -> Tuple[bool, str]:
         """API anahtarının canlı çalışıp çalışmadığını kısa bir istekle test eder."""
@@ -641,6 +704,26 @@ class ImageStudio:
             return "generate"
         return None
 
+    # Ücretsiz, anahtarsız yedek üretici (yalnızca SIFIRDAN çizim için; fotoğraf düzenlemez).
+    # Not: çizim isteğinin METNİ bu üçüncü taraf servise gider — fotoğraf/kişisel veri gönderilmez.
+    FREE_GENERATOR_URL = "https://image.pollinations.ai/prompt/"
+    FREE_GENERATOR_NAME = "Pollinations"
+
+    @classmethod
+    def _free_generate(cls, prompt_en: str) -> Optional[Tuple[bytes, str]]:
+        try:
+            r = requests.get(
+                cls.FREE_GENERATOR_URL + urllib.parse.quote(prompt_en)
+                + f"?width=1024&height=1024&nologo=true&seed={int(time.time()) % 100000}",
+                headers={"User-Agent": TrustedSourceFetcher.USER_AGENT}, timeout=(10, 90),
+            )
+            ctype = (r.headers.get("content-type") or "").split(";")[0].strip()
+            if r.status_code == 200 and ctype.startswith("image/") and len(r.content) > 2000:
+                return r.content, ctype
+        except requests.RequestException:
+            pass
+        return None
+
     @classmethod
     def handle(
         cls, kind: str, prompt: str, gemini: "GeminiService",
@@ -650,17 +733,27 @@ class ImageStudio:
         if not get_api_key():
             return None, (
                 "🎨 Görsel oluşturma/düzenleme için bir Gemini API anahtarı gerekiyor. "
-                "Lütfen **Ayarlar** bölümünden bir anahtar girin."
+                "Lütfen Ayarlar bölümünden bir anahtar girin."
             )
 
         result = gemini.generate_image(
             prompt, source_image_path=source_image_path if kind == "edit" else None
         )
+        used_free = False
+        if not result and kind == "generate":
+            # Gemini görsel üretemedi (çoğunlukla ücretsiz katmanda görsel kotası yok) → ücretsiz yedek
+            result = cls._free_generate(gemini.english_image_prompt(prompt))
+            used_free = result is not None
+
         if not result:
-            return None, (
-                "🎨 Şu an görsel üretemedim — bu Gemini anahtarında görsel üretim modeli "
-                "aktif olmayabilir ya da geçici bir sorun oluştu. Lütfen tekrar dener misin?"
-            )
+            if getattr(gemini, "last_image_error", None) == "quota":
+                why = ("Gemini anahtarın ücretsiz katmanda ve Google bu katmanda görsel modellerine "
+                       "kota vermiyor (HTTP 429). Google AI Studio'da faturalandırmayı açarsan çalışır.")
+            else:
+                why = "Gemini görsel modeline şu an ulaşılamadı ya da geçici bir sorun oluştu."
+            extra = " (Fotoğraf düzenleme yalnızca Gemini görsel modeliyle yapılabiliyor.)" if kind == "edit" else \
+                    " Ücretsiz yedek üretici de yanıt vermedi, biraz sonra tekrar dene."
+            return None, f"🎨 Şu an görsel üretemedim — {why}{extra}"
 
         img_bytes, mime = result
         ext = ".png" if "png" in mime else (".webp" if "webp" in mime else ".jpg")
@@ -674,6 +767,9 @@ class ImageStudio:
             return None, "⚠️ Görsel oluşturuldu ama diske kaydedilemedi."
 
         caption = "🎨 İşte isteğin, efendim!" if kind == "generate" else "✨ Fotoğrafı düzenledim, işte sonucu:"
+        if used_free:
+            caption += (f"\n(Gemini görsel kotası kapalı olduğu için ücretsiz {cls.FREE_GENERATOR_NAME} "
+                        "ile çizildi.)")
         return path, caption
 
 

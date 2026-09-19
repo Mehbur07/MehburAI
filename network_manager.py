@@ -12,10 +12,11 @@ internet bağlantı durumu izleme mekanizması.
   • Thread-safe durum erişimi
 """
 
+import queue
 import socket
 import threading
 import time
-from typing import Callable, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from config import NetworkConfig
 
@@ -56,6 +57,12 @@ class NetworkMonitor:
         """
         self._host = host
         self._port = port
+        # Varsayılan hedefse Cloudflare + Google hedeflerinin hepsi, özel host/port verildiyse yalnızca o
+        if (host, port) == (NetworkConfig.CHECK_HOST, NetworkConfig.CHECK_PORT):
+            self._targets: List[Tuple[str, str, int]] = list(NetworkConfig.CHECK_TARGETS)
+        else:
+            self._targets = [("Özel hedef", host, port)]
+        self.last_target: Optional[str] = None   # son başarılı kontrolün hedefi (ör. "Cloudflare DNS 1.1.1.1:53")
         self._timeout = timeout
         self._interval = interval
         self._on_status_change = on_status_change
@@ -119,24 +126,62 @@ class NetworkMonitor:
     # Dahili Mekanizma
     # ─────────────────────────────────────────
 
+    def _probe(self, host: str, port: int) -> Tuple[bool, int]:
+        """Tek hedefe TCP bağlantısı dener. (başarılı_mı, gecikme_ms)"""
+        t0 = time.time()
+        try:
+            with socket.create_connection((host, port), timeout=self._timeout):
+                return True, int((time.time() - t0) * 1000)
+        except OSError:
+            return False, int((time.time() - t0) * 1000)
+
+    def _probe_all(self, wait_for_all: bool) -> List[Dict]:
+        """Tüm hedefleri PARALEL dener. `wait_for_all=False` ise ilk başarıda hemen döner."""
+        results: "queue.Queue[Dict]" = queue.Queue()
+
+        def worker(label: str, host: str, port: int) -> None:
+            ok, ms = self._probe(host, port)
+            results.put({"label": label, "host": host, "port": port, "ok": ok, "ms": ms})
+
+        for label, host, port in self._targets:
+            threading.Thread(target=worker, args=(label, host, port), daemon=True).start()
+
+        collected: List[Dict] = []
+        for _ in self._targets:
+            try:
+                r = results.get(timeout=self._timeout + 1.0)
+            except queue.Empty:
+                break
+            collected.append(r)
+            if r["ok"] and not wait_for_all:
+                break
+        order = {(h, p): i for i, (_, h, p) in enumerate(self._targets)}
+        return sorted(collected, key=lambda r: order.get((r["host"], r["port"]), 99))
+
     def _check_connection(self) -> bool:
         """
-        Cloudflare DNS'e socket bağlantısı açarak internet durumunu kontrol eder.
-
-        Bu yöntem HTTP isteği yapmaz, yalnızca TCP socket bağlantısı
-        dener — bu da onu ultra hızlı (~50ms) yapar.
-
-        Returns:
-            bool: True ise bağlantı başarılı, False ise başarısız.
+        İnternet var mı? Cloudflare (1.1.1.1) ve Google (8.8.8.8) hedeflerine paralel
+        TCP bağlantısı denenir; herhangi biri açılırsa çevrimiçi sayılır (~50 ms).
+        HTTP isteği yapılmaz, yalnızca soket bağlantısı denenir.
         """
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(self._timeout)
-            result = sock.connect_ex((self._host, self._port))
-            sock.close()
-            return result == 0
-        except (socket.error, OSError):
-            return False
+        for r in self._probe_all(wait_for_all=False):
+            if r["ok"]:
+                self.last_target = f"{r['label']} {r['host']}:{r['port']}"
+                return True
+        return False
+
+    def diagnose(self) -> List[Dict]:
+        """
+        Ayarlar'daki 'Bağlantıyı Şimdi Test Et' için: tüm hedefleri dener, durumu günceller ve
+        her hedef için {label, host, port, ok, ms} listesi döndürür.
+        """
+        results = self._probe_all(wait_for_all=True)
+        online = any(r["ok"] for r in results)
+        if online:
+            best = next(r for r in results if r["ok"])
+            self.last_target = f"{best['label']} {best['host']}:{best['port']}"
+        self._update_status(online)
+        return results
 
     def _update_status(self, new_status: bool) -> None:
         """

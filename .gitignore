@@ -73,3 +73,6 @@ assets/logo.ico
 # repoya girmez (yüzlerce MB ikili dosya)
 build/
 dist/
+
+# Üretilen / düzenlenen görseller (kişisel, repoya girmez)
+data/generated_images/

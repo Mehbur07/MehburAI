@@ -1471,7 +1471,34 @@ class MehburApp(ctk.CTk):
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold"),
             text_color=Theme.STATUS_ONLINE if current_key else Theme.STATUS_WARNING,
         )
-        self.api_status_lbl.pack(anchor="w", padx=16, pady=(0, 14))
+        self.api_status_lbl.pack(anchor="w", padx=16, pady=(0, 8))
+
+        # 🧪 API Testi — girilen (kaydedilmemiş olsa bile) anahtarı Google'a karşı sınar
+        test_row = ctk.CTkFrame(api_card, fg_color="transparent")
+        test_row.pack(fill="x", padx=16, pady=(0, 14))
+        self.api_test_btn = ctk.CTkButton(
+            test_row,
+            text="🧪 API'yi Test Et",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=Theme.BG_CARD_HOVER,
+            hover_color=Theme.CYAN_DARK,
+            text_color=Theme.CYAN_PRIMARY,
+            border_width=1,
+            border_color=Theme.CYAN_DARK,
+            width=140,
+            height=34,
+            command=self._test_api_key,
+        )
+        self.api_test_btn.pack(side="left")
+        self.api_test_lbl = ctk.CTkLabel(
+            test_row,
+            text="Anahtarın çalışıp çalışmadığını Gemini'ye kısa bir istek atarak dener.",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+            text_color=Theme.TEXT_SECONDARY,
+            justify="left",
+            wraplength=560,
+        )
+        self.api_test_lbl.pack(side="left", padx=12)
 
         # 2. 🛡️ Güvenlik Modu Kartı
         self._build_security_card(self.settings_scroll)
@@ -1495,13 +1522,13 @@ class MehburApp(ctk.CTk):
 
         net_title = ctk.CTkLabel(
             net_card,
-            text="🌐 Ağ & Bağlantı Kontrolü (Cloudflare 1.1.1.1)",
+            text="🌐 Ağ & Bağlantı Kontrolü (Cloudflare 1.1.1.1 + Google 8.8.8.8)",
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=14, weight="bold"),
             text_color=Theme.TEXT_PRIMARY,
         )
         net_title.pack(anchor="w", padx=16, pady=(14, 6))
 
-        btn_test_net = ctk.CTkButton(
+        self.net_test_btn = ctk.CTkButton(
             net_card,
             text="🔄 Bağlantıyı Şimdi Test Et",
             font=ctk.CTkFont(size=12),
@@ -1510,7 +1537,16 @@ class MehburApp(ctk.CTk):
             height=34,
             command=self._manual_network_check,
         )
-        btn_test_net.pack(anchor="w", padx=16, pady=(0, 14))
+        self.net_test_btn.pack(anchor="w", padx=16, pady=(0, 8))
+
+        self.net_status_lbl = ctk.CTkLabel(
+            net_card,
+            text="Cloudflare ve Google sunucularına ulaşılıp ulaşılamadığını dener.",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+            text_color=Theme.TEXT_SECONDARY,
+            justify="left",
+        )
+        self.net_status_lbl.pack(anchor="w", padx=16, pady=(0, 14))
 
         # 4. Hakkında Kartı
         about_card = ctk.CTkFrame(
@@ -2778,9 +2814,61 @@ class MehburApp(ctk.CTk):
             text_color=Theme.STATUS_WARNING
         )
 
+    def _test_api_key(self):
+        """'API'yi Test Et' — kutudaki anahtarı (boşsa kayıtlıyı) arka planda sınar."""
+        key = self.api_key_entry.get().strip() or (get_api_key() or "")
+        if not key:
+            self.api_test_lbl.configure(text="⚠️ Önce bir API anahtarı gir.", text_color=Theme.STATUS_WARNING)
+            return
+        self.api_test_btn.configure(state="disabled", text="⏳ Test ediliyor...")
+        self.api_test_lbl.configure(text="Gemini'ye bağlanılıyor...", text_color=Theme.TEXT_SECONDARY)
+
+        def work():
+            try:
+                ok, msg = self.ai.gemini.test_key(key)
+            except Exception as e:
+                ok, msg = False, f"Test sırasında hata: {type(e).__name__}"
+            self._ui_call(lambda: self._show_api_test_result(ok, msg))
+        threading.Thread(target=work, daemon=True, name="MehburAI-ApiTest").start()
+
+    def _show_api_test_result(self, ok: bool, msg: str):
+        if not self.api_test_btn.winfo_exists():
+            return
+        self.api_test_btn.configure(state="normal", text="🧪 API'yi Test Et")
+        self.api_test_lbl.configure(
+            text=("✅ " if ok else "❌ ") + msg,
+            text_color=Theme.STATUS_ONLINE if ok else Theme.STATUS_OFFLINE,
+        )
+
     def _manual_network_check(self):
-        """Manuel olarak ağ kontrolü yapar ve rozeti günceller."""
-        is_online = self.network.check_now()
+        """'Bağlantıyı Şimdi Test Et' — Cloudflare/Google hedeflerini arka planda dener, sonucu gösterir."""
+        self.net_test_btn.configure(state="disabled", text="⏳ Test ediliyor...")
+        self.net_status_lbl.configure(text="Bağlantı deneniyor...", text_color=Theme.TEXT_SECONDARY)
+
+        def work():
+            try:
+                results = self.network.diagnose()
+            except Exception:
+                results = []
+            self._ui_call(lambda: self._show_network_result(results))
+        threading.Thread(target=work, daemon=True, name="MehburAI-NetTest").start()
+
+    def _show_network_result(self, results: list):
+        if not self.net_test_btn.winfo_exists():
+            return
+        self.net_test_btn.configure(state="normal", text="🔄 Bağlantıyı Şimdi Test Et")
+        online = any(r["ok"] for r in results)
+        lines = [
+            f"{'✓' if r['ok'] else '✗'} {r['label']} {r['host']}:{r['port']} — "
+            + (f"{r['ms']} ms" if r["ok"] else "ulaşılamadı")
+            for r in results
+        ]
+        head = ("🟢 İnternet bağlantısı var." if online else
+                "🔴 Hiçbir hedefe ulaşılamadı — Wi-Fi/Ethernet, VPN veya güvenlik duvarını kontrol et.")
+        self.net_status_lbl.configure(
+            text=head + ("\n" + "\n".join(lines) if lines else ""),
+            text_color=Theme.STATUS_ONLINE if online else Theme.STATUS_OFFLINE,
+        )
         self._update_badges()
 
     # ─────────────────────────────────────────

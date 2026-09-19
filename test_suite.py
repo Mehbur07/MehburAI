@@ -1043,6 +1043,69 @@ def run_full_validation():
         ai.gemini.generate_response = _orig_gem19
         (_sk19(_saved_key19) if _saved_key19 else _rk19())
 
+    # 19g. Ağ denetimi: 1.1.1.1:53 kesik olsa bile diğer hedeflerden biri açıksa çevrimiçi; tanı listesi döner
+    import threading
+    from network_manager import NetworkMonitor as _NM
+    _nm = _NM.__new__(_NM)
+    _nm._timeout, _nm._interval, _nm._host, _nm._port = 1.0, 5.0, "1.1.1.1", 53
+    _nm._targets = list(_cfg19.NetworkConfig.CHECK_TARGETS)
+    _nm.last_target = None
+    _nm._lock, _nm._is_online, _nm._on_status_change = threading.Lock(), None, None
+    _nm._probe = lambda host, port: ((host, port) == ("8.8.8.8", 443), 7)     # yalnızca Google HTTPS açık
+    assert _nm._check_connection() is True and "Google HTTPS" in _nm.last_target
+    _diag = _nm.diagnose()
+    assert [r["ok"] for r in _diag] == [False, False, False, True] and _nm.is_online is True
+    _nm._probe = lambda host, port: (False, 1)
+    assert _nm._check_connection() is False and not any(r["ok"] for r in _nm.diagnose()) and _nm.is_online is False
+    print("  • Ağ denetimi Cloudflare+Google hedeflerini paralel deniyor; biri açıksa çevrimiçi, tanı listesi dönüyor ✓")
+
+    # 19h. Gemini API testi (anahtarsız/ geçersiz/ geçerli yanıtları — ağ çağrıları sahte)
+    import ai_engine as _ae19
+    _g19 = _ae19.GeminiService()
+    assert _g19.test_key("") == (False, "API anahtarı girilmemiş.")
+    _orig_get, _orig_post = _ae19.requests.get, _ae19.requests.post
+    try:
+        _ae19.requests.get = lambda *a, **k: type("R", (), {"status_code": 400, "text": ""})()
+        _ok, _msg = _g19.test_key("bozuk-anahtar")
+        assert not _ok and "geçersiz" in _msg
+        _ae19.requests.get = lambda *a, **k: type("R", (), {"status_code": 200, "text": ""})()
+
+        class _SSE:
+            status_code = 200
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def iter_lines(self): return [b'data: {"candidates":[{"content":{"parts":[{"text":"tamam"}]}}]}']
+        _ae19.requests.post = lambda *a, **k: _SSE()
+        _ok, _msg = _g19.test_key("gecerli-anahtar")
+        assert _ok and "yanıt veriyor" in _msg
+    finally:
+        _ae19.requests.get, _ae19.requests.post = _orig_get, _orig_post
+    print("  • 'API'yi Test Et': boş / geçersiz / geçerli anahtar doğru mesajlarla sınanıyor ✓")
+
+    # 19i. Görsel: Gemini kotası yoksa (429) ücretsiz yedekle çiziyor; düzenleme dürüst hata veriyor
+    class _QuotaGemini:
+        last_image_error = "quota"
+        def generate_image(self, prompt, source_image_path=None): return None
+        def english_image_prompt(self, request): return "a cat"
+    _saved_key19b = _gk19()
+    _sk19("AIzaSyD_TestValidGeminiKey1234567890XYZ")
+    _orig_free = _ae19.ImageStudio._free_generate
+    try:
+        _ae19.ImageStudio._free_generate = classmethod(lambda cls, p: (b"\\xff\\xd8fake-jpeg", "image/jpeg"))
+        _path, _cap = _ae19.ImageStudio.handle("generate", "bana kedi çiz", _QuotaGemini())
+        assert _path and _path.endswith(".jpg") and "Pollinations" in _cap
+        _os19.remove(_path)
+        _p2, _m2 = _ae19.ImageStudio.handle("edit", "düzenle", _QuotaGemini(), source_image_path="x.png")
+        assert _p2 is None and "429" in _m2 and "faturalandırma" in _m2
+        _ae19.ImageStudio._free_generate = classmethod(lambda cls, p: None)
+        _p3, _m3 = _ae19.ImageStudio.handle("generate", "bana kedi çiz", _QuotaGemini())
+        assert _p3 is None and "yedek üretici de yanıt vermedi" in _m3
+    finally:
+        _ae19.ImageStudio._free_generate = _orig_free
+        (_sk19(_saved_key19b) if _saved_key19b else _rk19())
+    assert "gemini-2.0-flash-preview-image-generation" not in _cfg19.GeminiConfig.IMAGE_MODELS
+    print("  • Görsel: Gemini kotası yokken ücretsiz yedekle çiziyor, düzenlemede gerçek sebebi söylüyor ✓")
+
     print("  ✅ TEST 19 BAŞARILI: Hassas bilgi filtresi, tema, otomatik öğrenme, ürün bilgisi, bas-konuş, /aramabaslat hazır.")
     passed_tests += 1
 

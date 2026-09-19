@@ -19,7 +19,7 @@ import sys
 #   • KÜÇÜK ekleme (ince ayar, küçük düzeltme/iyileştirme) → SON basamak artar: 1.2 → 1.2.1 → 1.2.2 → ...
 #     (bir sonraki BÜYÜK eklemede üçüncü basamak sıfırlanıp ORTA basamak artar, örn. 1.2.3 → 1.3)
 # (Elle güncellenir — kod her eklemede otomatik saymaz.)
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.3.3"
 
 # ─────────────────────────────────────────────
 # Proje Yolları
@@ -240,6 +240,16 @@ class NetworkConfig:
     CHECK_TIMEOUT = 2.0       # Saniye cinsinden zaman aşımı
     CHECK_INTERVAL = 5.0      # Periyodik kontrol aralığı (saniye)
 
+    # Hedeflerden HERHANGİ BİRİNE ulaşılırsa internet var sayılır (paralel denenir).
+    # Bazı ağlar/VPN/güvenlik duvarları yalnızca 1.1.1.1:53'ü kesebildiği için tek hedef
+    # yanlışlıkla "çevrimdışı" gösterebiliyordu.
+    CHECK_TARGETS = [
+        ("Cloudflare DNS", "1.1.1.1", 53),
+        ("Cloudflare HTTPS", "1.1.1.1", 443),
+        ("Google DNS", "8.8.8.8", 53),
+        ("Google HTTPS", "8.8.8.8", 443),
+    ]
+
 
 # ─────────────────────────────────────────────
 # Gemini API Ayarları
@@ -257,7 +267,10 @@ class GeminiConfig:
     # 🎨 Görsel üretim/düzenleme (metinden görsel + var olan görseli düzenleme).
     # Hesapta hangisi aktifse sırayla denenir; hiçbiri yoksa "Görsel Stüdyosu"
     # nazikçe devre dışı kalır.
-    IMAGE_MODELS = ["gemini-2.5-flash-image", "gemini-2.0-flash-preview-image-generation"]
+    IMAGE_MODELS = [
+        "gemini-3.1-flash-image", "gemini-2.5-flash-image", "gemini-3.1-flash-lite-image",
+        "gemini-3.1-flash-image-preview", "gemini-3-pro-image",
+    ]
 
     # REST akış (SSE) uç noktası ayarları
     API_BASE = "https://generativelanguage.googleapis.com/v1beta"
