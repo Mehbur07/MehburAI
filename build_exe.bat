@@ -70,7 +70,7 @@ if %ERRORLEVEL% NEQ 0 (
 echo.
 echo  [6/6] MehburAI.Setup.exe olusturuluyor (dist\MehburAI.Setup.exe)...
 python -m PyInstaller installer.py --noconfirm --onefile --windowed --name MehburAI.Setup ^
-    --icon "%CD%\assets\logo.ico" --add-data "%CD%\build\payload.zip;." --add-data "%CD%\assets\logo.ico;." ^
+    --icon "%CD%\assets\logo.ico" --add-data "%CD%\assets\logo.ico;." ^
     --distpath dist --workpath build\setup --specpath build
 if %ERRORLEVEL% NEQ 0 (
     echo  [HATA] Setup derlenemedi.
@@ -79,9 +79,25 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
+echo  [6b/6] GitHub Release dosyalari hazirlaniyor (dist\MehburAI.zip = yalnizca .exe, dist\MehburAI-payload.zip = uygulama dosyalari)...
+python -c "import shutil,zipfile; z=zipfile.ZipFile('dist/MehburAI.zip','w',zipfile.ZIP_DEFLATED); z.write('dist/MehburAI.Setup.exe','MehburAI.Setup.exe'); z.close(); shutil.copyfile('build/payload.zip','dist/MehburAI-payload.zip')"
+if %ERRORLEVEL% NEQ 0 (
+    echo  [HATA] Release dosyalari hazirlanamadi.
+    pause
+    exit /b 1
+)
+python scan_secrets.py --zip dist\MehburAI.zip
+if %ERRORLEVEL% NEQ 0 (
+    echo  [DURDU] MehburAI.zip icinde hassas bilgi var.
+    pause
+    exit /b 1
+)
+
+echo.
 echo  =============================================================
-echo   [OK] Kurulum dosyasi: dist\MehburAI.Setup.exe
-echo   Herhangi bir Windows bilgisayarda calistirinca %%APPDATA%%\MehburAI
+echo   [OK] Kurulum dosyasi: dist\MehburAI.Setup.exe  (kucuk, cevrimici kurucu)
+echo   GitHub Release'e yuklenecekler: dist\MehburAI.zip ve dist\MehburAI-payload.zip
+echo   Setup calisinca payload'i GitHub'dan indirip %%APPDATA%%\MehburAI
 echo   altina kurar, masaustune kisayol koyar ve baslatir.
 echo   Icinde API anahtari / bot token / Telegram ID YOKTUR.
 echo  =============================================================

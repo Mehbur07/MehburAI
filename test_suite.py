@@ -48,7 +48,7 @@ def run_full_validation():
     print("  🤖 MEHBUR AI — FAZ 5 ENTEGRASYON VE DOĞRULAMA TESTLERİ")
     print("=" * 65)
     passed_tests = 0
-    total_tests = 21
+    total_tests = 22
 
     memory = MemoryEngine()
     network = NetworkMonitor()
@@ -1221,6 +1221,81 @@ def run_full_validation():
     assert 'self.call_btn = ctk.CTkButton' in _gsrc21 and "command=self._toggle_jarvis_call" in _gsrc21
     assert "command=self._toggle_voice_from_chat" in _gsrc21 and "Dictation(" in _gsrc21
     print("  ✅ TEST 21 BAŞARILI: 📞 JARVIS görüşmesi hazır; 🎤 sesli mesaj olarak duruyor.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 22: Çevrimiçi kurucu (küçük .exe → dosyaları GitHub'dan indirir)
+    # ─────────────────────────────────────────
+    print("\n[TEST 22] Çevrimiçi Kurucu:")
+    import os as _os22
+    import io as _io22
+    import tempfile as _tf22
+    import zipfile as _zf22
+    import installer as _inst22
+    import config as _cfg22
+
+    # 22a. Adres config'tekiyle uyumlu, Release'in sabit 'latest' adresini gösteriyor
+    assert _inst22.GITHUB_REPO == _cfg22.GITHUB_REPO
+    assert _inst22.PAYLOAD_URL == f"https://github.com/{_cfg22.GITHUB_REPO}/releases/latest/download/MehburAI-payload.zip"
+    print("  • İndirme adresi config.GITHUB_REPO ile uyumlu ✓")
+
+    # 22b. İndirme: sahte GitHub yanıtı → dosya yazılıyor, ilerleme bildiriliyor, yarım/bozuk dosya reddediliyor
+    _buf22 = _io22.BytesIO()
+    with _zf22.ZipFile(_buf22, "w") as _z22:
+        _z22.writestr("MehburAI.exe", "exe")
+        _z22.writestr("data/config.json", "PAKETTEN")
+        _z22.writestr("assets/logo.png", "png")
+        _z22.writestr("../kacak.txt", "zip-slip")
+    _pay22 = _buf22.getvalue()
+
+    class _Resp22:
+        def __init__(self, data, length=None):
+            self._r = _io22.BytesIO(data)
+            self.headers = {"Content-Length": str(len(data) if length is None else length)}
+        def read(self, n=-1): return self._r.read(n)
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    _orig_open22 = _inst22.urllib.request.urlopen
+    _tmp22 = _tf22.mkdtemp()
+    try:
+        _seen22 = []
+        _inst22.urllib.request.urlopen = lambda req, timeout=0: _Resp22(_pay22)
+        _dl22 = _os22.path.join(_tmp22, "p.zip")
+        _inst22.download_payload(_dl22, lambda g, t: _seen22.append((g, t)))
+        assert open(_dl22, "rb").read() == _pay22 and _seen22[-1] == (len(_pay22), len(_pay22))
+        _inst22.urllib.request.urlopen = lambda req, timeout=0: _Resp22(_pay22, length=len(_pay22) + 5)
+        try:
+            _inst22.download_payload(_dl22, lambda g, t: None); raise SystemExit("yarım indirme kabul edildi")
+        except IOError:
+            pass
+        _inst22.urllib.request.urlopen = lambda req, timeout=0: _Resp22(b"bozuk veri")
+        try:
+            _inst22.download_payload(_dl22, lambda g, t: None); raise SystemExit("bozuk dosya kabul edildi")
+        except IOError:
+            pass
+    finally:
+        _inst22.urllib.request.urlopen = _orig_open22
+    print("  • İndirme + ilerleme çalışıyor; yarım ve bozuk dosya reddediliyor ✓")
+
+    # 22c. Açma: dosyalar kuruluyor, mevcut data/ ezilmiyor, '..' ile dışarı yazılamıyor
+    _inst_dir22 = _os22.path.join(_tmp22, "kurulum")
+    _os22.makedirs(_os22.path.join(_inst_dir22, "data"))
+    with open(_os22.path.join(_inst_dir22, "data", "config.json"), "w") as _f22:
+        _f22.write("KULLANICI")
+    _dl22 = _os22.path.join(_tmp22, "p.zip")
+    with open(_dl22, "wb") as _f22:
+        _f22.write(_pay22)
+    _inst22.extract_payload(_dl22, _inst_dir22, lambda f: None)
+    assert open(_os22.path.join(_inst_dir22, "MehburAI.exe")).read() == "exe"
+    assert open(_os22.path.join(_inst_dir22, "data", "config.json")).read() == "KULLANICI"
+    assert not _os22.path.exists(_os22.path.join(_tmp22, "kacak.txt"))
+    print("  • Dosyalar kuruluyor; kullanıcının data/ klasörü korunuyor; zip-slip engelleniyor ✓")
+
+    # 22d. Build betiği: Setup'a payload gömülmüyor, MehburAI.zip yalnızca .exe içeriyor
+    _bat22 = open(_os22.path.join(_os22.path.dirname(_os22.path.abspath(__file__)), "build_exe.bat"), encoding="utf-8").read()
+    assert "--add-data \"%CD%\\build\\payload.zip" not in _bat22 and "dist/MehburAI.zip" in _bat22
+    print("  ✅ TEST 22 BAŞARILI: Çevrimiçi kurucu hazır.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
