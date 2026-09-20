@@ -1160,7 +1160,10 @@ def run_full_validation():
     for m in ("_build_update_banner", "_check_for_updates", "_show_update_banner", "_open_update_page"):
         assert hasattr(_gui.MehburApp, m), f"gui_app.MehburApp.{m} eksik"
     assert _cfg19.UPDATE_PAGE_URL.startswith("https://github.com/") and _cfg19.GITHUB_REPO in _cfg19.UPDATE_PAGE_URL
-    print("  ✅ TEST 20 BAŞARILI: Güncelleme denetimi ve uyarı şeridi hazır.")
+    import inspect as _insp20
+    _src20 = _insp20.getsource(_gui.MehburApp._show_update_banner)
+    assert "Uyarı: Yeni sürüm yayınlandı." in _src20 and "bu bağlantıya tıklayın:" in _src20
+    print("  ✅ TEST 20BAŞARILI: Güncelleme denetimi ve uyarı şeridi hazır.")
     passed_tests += 1
 
     # ─────────────────────────────────────────

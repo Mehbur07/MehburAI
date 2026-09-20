@@ -318,8 +318,8 @@ class MehburApp(ctk.CTk):
             return
         self._update_url = info["url"]
         self.update_msg_lbl.configure(
-            text="Uyarı: MehburAI'a güncelleme geldi. Eğer yeni sürümü indirmek istiyorsanız "
-                 "bu adresten indirebilirsiniz:")
+            text="Uyarı: Yeni sürüm yayınlandı. Eğer yeni sürümü yüklemek istiyorsanız "
+                 "bu bağlantıya tıklayın:")
         self.update_link_lbl.configure(text=info["url"])
         self.update_ver_lbl.configure(text=f"Sizdeki sürüm: {info['current']}  •  Yeni sürüm: {info['latest']}")
         self.update_banner.grid()
