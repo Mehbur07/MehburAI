@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 import urllib.request
 import zipfile
@@ -100,6 +101,25 @@ def extract_payload(zip_path: str, install_dir: str, on_progress) -> None:
             on_progress(i / total)
 
 
+EXTRACT_ALLOWANCE = 5    # sn — indirme bittikten sonra dosyaları açmanın kabaca süresi (ilk tahmin için)
+
+
+def remaining_seconds(elapsed: float, fraction: float, min_elapsed: float = 1.5):
+    """Şimdiye kadarki hıza göre kalan süre (sn); yeterli veri yoksa None."""
+    if fraction <= 0 or elapsed < min_elapsed:
+        return None
+    return max(0.0, elapsed * (1 - fraction) / fraction)
+
+
+def format_eta(seconds) -> str:
+    if seconds is None:
+        return "hesaplanıyor…"
+    s = max(1, int(round(seconds)))
+    if s < 60:
+        return f"~{s} sn"
+    return f"~{s // 60} dk {s % 60} sn"
+
+
 def install(on_status, on_progress) -> None:
     """on_status(metin) durum yazısı; on_progress(0..1) çubuk."""
     bundled = payload_path()
@@ -110,11 +130,19 @@ def install(on_status, on_progress) -> None:
         else:
             tmp = os.path.join(tempfile.gettempdir(), "MehburAI-payload.zip")
             on_status("İndiriliyor… (uygulama dosyaları GitHub'dan alınıyor)")
+            t0 = time.monotonic()
 
             def dl(got, total):
                 mb = got / 1048576
-                on_status(f"İndiriliyor… {mb:.0f} / {total / 1048576:.0f} MB" if total
-                          else f"İndiriliyor… {mb:.0f} MB")
+                if total:
+                    # bağlantı ilk saniyelerde hızlandığı için 4 sn dolmadan tahmin verme
+                    left = remaining_seconds(time.monotonic() - t0, got / total, min_elapsed=4.0)
+                    if left is not None:
+                        left += EXTRACT_ALLOWANCE      # indirme + dosyaları açma
+                    on_status(f"İndiriliyor… {mb:.0f} / {total / 1048576:.0f} MB"
+                              f"  •  tahmini kalan süre: {format_eta(left)}")
+                else:
+                    on_status(f"İndiriliyor… {mb:.0f} MB")
                 on_progress(0.7 * got / total if total else 0.0)
 
             download_payload(tmp, dl)
@@ -123,7 +151,15 @@ def install(on_status, on_progress) -> None:
         stop_running_app()
         os.makedirs(INSTALL_DIR, exist_ok=True)
         base = 0.7 if tmp else 0.0
-        extract_payload(zip_path, INSTALL_DIR, lambda f: on_progress(base + (1 - base) * f))
+        t1 = time.monotonic()
+
+        def ex(f):
+            left = remaining_seconds(time.monotonic() - t1, f)
+            on_status(f"Kuruluyor… %{f * 100:.0f}"
+                      + (f"  •  tahmini kalan süre: {format_eta(left)}" if left is not None else ""))
+            on_progress(base + (1 - base) * f)
+
+        extract_payload(zip_path, INSTALL_DIR, ex)
         create_desktop_shortcut()
     finally:
         if tmp and os.path.isfile(tmp):
@@ -150,7 +186,7 @@ class SetupWindow(tk.Tk):
                  fg="#00e5ff", bg="#0a0e14").pack(pady=(18, 4))
         self.status = tk.Label(self, text=("Güncelleniyor… (ayarların ve verilerin korunur)" if is_update()
                                            else "Kuruluyor…"), font=("Segoe UI", 10),
-                               fg="#cfd8dc", bg="#0a0e14")
+                               fg="#cfd8dc", bg="#0a0e14", wraplength=410, justify="center")
         self.status.pack()
         self.bar = ttk.Progressbar(self, length=340, maximum=1.0)
         self.bar.pack(pady=16)

@@ -1292,6 +1292,15 @@ def run_full_validation():
     assert not _os22.path.exists(_os22.path.join(_tmp22, "kacak.txt"))
     print("  • Dosyalar kuruluyor; kullanıcının data/ klasörü korunuyor; zip-slip engelleniyor ✓")
 
+    # 22c2. Kalan süre tahmini
+    assert _inst22.remaining_seconds(1.0, 0.5) is None          # çok erken → hesaplanıyor
+    assert _inst22.remaining_seconds(10, 0.0) is None
+    assert abs(_inst22.remaining_seconds(10, 0.25) - 30) < 1e-6  # 10 sn'de %25 → 30 sn kaldı
+    assert _inst22.remaining_seconds(10, 1.0) == 0
+    assert _inst22.format_eta(None) == "hesaplanıyor…" and _inst22.format_eta(12.4) == "~12 sn"
+    assert _inst22.format_eta(125) == "~2 dk 5 sn" and _inst22.format_eta(0) == "~1 sn"
+    print("  • Kalan süre tahmini hıza göre hesaplanıyor, çok erken/eksik veride 'hesaplanıyor…' diyor ✓")
+
     # 22d. Build betiği: Setup'a payload gömülmüyor, MehburAI.zip yalnızca .exe içeriyor
     _bat22 = open(_os22.path.join(_os22.path.dirname(_os22.path.abspath(__file__)), "build_exe.bat"), encoding="utf-8").read()
     assert "--add-data \"%CD%\\build\\payload.zip" not in _bat22 and "dist/MehburAI.zip" in _bat22
