@@ -565,6 +565,131 @@ class Dictation:
             self._on_done(text, error)
 
 
+# ─────────────────────────────────────────────
+# 📞 JARVIS Görüşmesi (sohbet kutusundaki telefon butonu)
+# ─────────────────────────────────────────────
+
+CALL_END_PHRASES = ("görüşmeyi bitir", "görüşmeyi kapat", "aramayı bitir", "aramayı kapat",
+                    "görüşürüz", "hoşça kal", "hoşçakal", "kapat jarvis", "jarvis kapat",
+                    "tamam bu kadar", "bu kadar yeter")
+
+
+def is_call_end_phrase(text: str) -> bool:
+    t = _norm(text)
+    return any(_norm(p) in t for p in CALL_END_PHRASES)
+
+
+class JarvisCall:
+    """
+    Eller serbest sesli görüşme: "Emrinizdeyim efendim" der, sonra sırayla
+    dinle → düşün (`on_command(text) -> yanıt`) → yanıtı seslendir döngüsüne girer.
+    Uyandırma sözcüğü gerekmez. `stop()`, "görüşmeyi bitir / görüşürüz" denmesi ya da
+    art arda 3 kez hiç konuşulmaması görüşmeyi bitirir.
+
+    on_state(state, text="") — state: karsilama | dinliyor | duyuyor | islemde | yanit |
+        veda | hata (text: "mic" | "model" | "deps")
+    on_end() — görüşme bittiğinde (her durumda, bir kez) çağrılır.
+    Mikrofon konuşma sırasında kapalıdır (Dictation her tur açıp kapatır) → kendini duymaz.
+    """
+
+    MAX_SILENT_TURNS = 3
+
+    def __init__(self, on_command: Callable[[str], str],
+                 on_state: Optional[Callable[..., None]] = None,
+                 on_end: Optional[Callable[[], None]] = None):
+        self._on_command = on_command
+        self._on_state = on_state or (lambda *a, **k: None)
+        self._on_end = on_end or (lambda: None)
+        self._stop = threading.Event()
+        self._dictation: Optional[Dictation] = None
+        self._thread: Optional[threading.Thread] = None
+
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self) -> bool:
+        if self.is_running():
+            return False
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="MehburAI-Call", daemon=True)
+        self._thread.start()
+        return True
+
+    def stop(self) -> None:
+        self._stop.set()
+        d = self._dictation
+        if d is not None:
+            d.stop()
+        try:
+            if sd is not None:
+                sd.stop()       # konuşan yanıtı hemen kes
+        except Exception:
+            pass
+
+    def _say(self, text: str) -> None:
+        if text and not self._stop.is_set():
+            TextToSpeech.speak(text, blocking=True)
+
+    def _listen_turn(self) -> tuple:
+        """Bir konuşma dinler → (metin, hata)."""
+        done = threading.Event()
+        box = {"text": "", "error": ""}
+
+        def on_done(t, e):
+            box["text"], box["error"] = t, e
+            done.set()
+
+        self._dictation = Dictation(on_partial=lambda t: self._on_state("duyuyor", t), on_done=on_done)
+        self._dictation.start()
+        while not done.wait(0.2):
+            if self._stop.is_set():
+                self._dictation.stop()
+        self._dictation = None
+        return box["text"], box["error"]
+
+    def _run(self) -> None:
+        try:
+            if not voice_dependencies_ok():
+                self._on_state("hata", "deps")
+                return
+            self._on_state("karsilama", WAKE_RESPONSE)
+            self._say(WAKE_RESPONSE)
+            silent = 0
+            while not self._stop.is_set():
+                self._on_state("dinliyor")
+                text, error = self._listen_turn()
+                if self._stop.is_set():
+                    break
+                if error:
+                    self._on_state("hata", error)
+                    return
+                text = strip_wake_word(text)
+                if not text:
+                    silent += 1
+                    if silent >= self.MAX_SILENT_TURNS:
+                        self._on_state("veda", "Sesinizi duyamadım, görüşmeyi sonlandırıyorum efendim.")
+                        self._say("Sesinizi duyamadım, görüşmeyi sonlandırıyorum efendim.")
+                        return
+                    continue
+                silent = 0
+                if is_call_end_phrase(text):
+                    self._on_state("veda", "Görüşmek üzere efendim.")
+                    self._say("Görüşmek üzere efendim.")
+                    return
+                self._on_state("islemde", text)
+                try:
+                    reply = self._on_command(text) or ""
+                except Exception:
+                    reply = "Bir hata oluştu efendim."
+                spoken = _speakable(reply) or "Yanıt üretemedim efendim."
+                self._on_state("yanit", spoken)
+                self._say(spoken)
+        except Exception:
+            self._on_state("hata", "mic")
+        finally:
+            self._on_end()
+
+
 def _speakable(text: str) -> str:
     """Markdown / emoji / bağlantı kalabalığını seslendirmeye uygun sadeleştirir."""
     import re

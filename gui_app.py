@@ -74,6 +74,7 @@ from background import SingleInstance, is_autostart_enabled, restart_app, set_au
 try:
     from voice_engine import (
         Dictation,
+        JarvisCall,
         SpeechToText,
         TextToSpeech,
         VoiceAssistant,
@@ -82,6 +83,7 @@ try:
     )
 except Exception:  # ses bağımlılıkları hiç kurulu değilse uygulama yine açılsın
     Dictation = None
+    JarvisCall = None
     VoiceAssistant = None
     SpeechToText = TextToSpeech = None
     voice_dependencies_ok = lambda: False          # noqa: E731
@@ -150,6 +152,7 @@ class MehburApp(ctk.CTk):
         self.jarvis = None   # JARVIS overlay — ilk uyandırmada oluşturulur
         self._dictation = None      # 🎤 bas-konuş yazdırma oturumu
         self._dictating = False
+        self._call = None           # 📞 JARVIS görüşmesi (JarvisCall) — yoksa None
 
         # Tek örnek kilidi — ikinci açılış mevcut pencereyi öne getirir
         self._singleton = singleton or SingleInstance()
@@ -602,6 +605,23 @@ class MehburApp(ctk.CTk):
         )
         self.mic_btn.grid(row=0, column=2, sticky="e", padx=(0, 10))
 
+        # 📞 JARVIS Butonu — tam ekran JARVIS açılır, eller serbest sesli görüşme başlar
+        self.call_btn = ctk.CTkButton(
+            input_container,
+            text="📞",
+            font=ctk.CTkFont(size=17),
+            fg_color=Theme.BG_CARD,
+            text_color=Theme.CYAN_PRIMARY,
+            hover_color=Theme.BG_CARD_HOVER,
+            border_width=2,
+            border_color=Theme.CYAN_DARK,
+            width=48,
+            height=48,
+            corner_radius=10,
+            command=self._toggle_jarvis_call,
+        )
+        self.call_btn.grid(row=0, column=3, sticky="e", padx=(0, 10))
+
         # Gönder Butonu (Neon Cyan)
         self.send_btn = ctk.CTkButton(
             input_container,
@@ -615,7 +635,7 @@ class MehburApp(ctk.CTk):
             corner_radius=10,
             command=self._on_send_clicked,
         )
-        self.send_btn.grid(row=0, column=3, sticky="e")
+        self.send_btn.grid(row=0, column=4, sticky="e")
 
         # 📎 Eklenen dosya rozeti — dosya seçilince görünür, tıklayınca kaldırılır
         self.attachment_lbl = ctk.CTkLabel(
@@ -2661,6 +2681,8 @@ class MehburApp(ctk.CTk):
         if self._dictating and self._dictation is not None:
             self._dictation.stop()
             return
+        if self._call is not None:      # 📞 görüşmesi mikrofonu kullanıyor
+            return
         if Dictation is None or not voice_dependencies_ok():
             messagebox.showwarning(
                 "Sesli Sohbet",
@@ -2711,8 +2733,96 @@ class MehburApp(ctk.CTk):
         self.query_entry.insert(0, text)
         self._on_send_clicked()
 
+    # ── 📞 JARVIS Görüşmesi (telefon butonu) ──
+
+    def _ensure_jarvis(self):
+        if self.jarvis is None:
+            try:
+                from jarvis_overlay import JarvisOverlay
+                self.jarvis = JarvisOverlay(self)
+            except Exception:
+                self.jarvis = None
+        return self.jarvis
+
+    def _toggle_jarvis_call(self):
+        """📞 — JARVIS tam ekran açılır ve eller serbest görüşme başlar (uyandırma sözcüğü
+        gerekmez). Görüşme sürerken tekrar basmak / ESC / ekrana tıklamak / "görüşmeyi bitir"
+        demek onu bitirir."""
+        if self._call is not None:
+            self._call.stop()          # kapanış _on_call_end'de
+            return
+        if JarvisCall is None or not voice_dependencies_ok():
+            messagebox.showwarning(
+                "JARVIS Görüşmesi",
+                "Eksik kütüphane: " + ", ".join(voice_missing_deps()),
+                parent=self,
+            )
+            return
+        if self._dictating or self._is_processing:
+            return
+        j = self._ensure_jarvis()
+        if j is None:
+            return
+
+        if self.voice_assistant is not None:
+            self.voice_assistant.pause()
+        self._call_error = ""
+        call = JarvisCall(
+            on_command=self._voice_command,
+            on_state=lambda s, t="": self._ui_call(lambda: self._on_call_state(call, s, t)),
+            on_end=lambda: self._ui_call(lambda: self._on_call_end(call)),
+        )
+        self._call = call
+        j.on_close = call.stop
+        self.call_btn.configure(text_color=Theme.NEON_RED, border_color=Theme.NEON_RED)
+        j.show(mode="idle", title="Bağlanıyor…", subtitle="")
+        call.start()
+
+    def _on_call_state(self, call, state: str, text: str = ""):
+        j = self.jarvis
+        if call is not self._call or j is None:
+            return
+        try:
+            if state == "karsilama":
+                j.show(mode="idle", title="Emrinizdeyim efendim", subtitle="")
+            elif state == "dinliyor":
+                j.show(mode="listen", title="Dinliyorum…", subtitle=None)   # önceki yanıt ekranda kalsın
+            elif state == "duyuyor":
+                j.set_state(subtitle=f"🎤 {text}")
+            elif state == "islemde":
+                j.show(mode="think", title="Düşünüyorum…", subtitle=text)
+            elif state == "yanit":
+                j.show(mode="idle", title="", subtitle=text)
+            elif state == "veda":
+                j.show(mode="idle", title="", subtitle=text)
+            elif state == "hata":
+                self._call_error = text or "mic"
+                j.show(mode="error", title="Bir hata oluştu", subtitle="Mikrofona/ses modeline erişilemedi")
+        except Exception:
+            pass
+
+    def _on_call_end(self, call):
+        if call is not self._call:
+            return
+        self._call = None
+        error = getattr(self, "_call_error", "")
+        if self.jarvis is not None:
+            self.jarvis.on_close = None
+            self.jarvis.hide(delay_ms=0 if error else 1500)
+        if self.voice_assistant is not None:
+            self.voice_assistant.resume()
+        if self.call_btn.winfo_exists():
+            self.call_btn.configure(text_color=Theme.CYAN_PRIMARY, border_color=Theme.CYAN_DARK)
+        if error:
+            msg = self._MIC_ERRORS.get(error) or "Görüşme başlatılamadı."
+            if error == "deps":
+                msg = "Eksik kütüphane: " + ", ".join(voice_missing_deps())
+            messagebox.showwarning("JARVIS Görüşmesi", msg, parent=self)
+
     def _drive_jarvis(self, state: str, text: str = ""):
         """Sesli asistan durumunu JARVIS tam ekran görseline aktarır."""
+        if self._call is not None:      # 📞 görüşmesi ekranı kendisi yönetiyor
+            return
         if not get_voice_config().get("voice_overlay_enabled", True):
             return
         if self.jarvis is None:
@@ -3078,6 +3188,11 @@ class MehburApp(ctk.CTk):
             pass
         try:
             self.telegram_bot.stop()
+        except Exception:
+            pass
+        try:
+            if self._call is not None:
+                self._call.stop()
         except Exception:
             pass
         try:

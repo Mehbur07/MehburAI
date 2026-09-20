@@ -48,7 +48,7 @@ def run_full_validation():
     print("  🤖 MEHBUR AI — FAZ 5 ENTEGRASYON VE DOĞRULAMA TESTLERİ")
     print("=" * 65)
     passed_tests = 0
-    total_tests = 20
+    total_tests = 21
 
     memory = MemoryEngine()
     network = NetworkMonitor()
@@ -1163,7 +1163,64 @@ def run_full_validation():
     import inspect as _insp20
     _src20 = _insp20.getsource(_gui.MehburApp._show_update_banner)
     assert "Uyarı: Yeni sürüm yayınlandı." in _src20 and "bu bağlantıya tıklayın:" in _src20
-    print("  ✅ TEST 20BAŞARILI: Güncelleme denetimi ve uyarı şeridi hazır.")
+    print("  ✅ TEST 20 BAŞARILI: Güncelleme denetimi ve uyarı şeridi hazır.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 21: 📞 JARVIS görüşmesi (telefon butonu) — 🎤 bas-konuş yerinde kalır
+    # ─────────────────────────────────────────
+    print("\n[TEST 21] JARVIS Görüşmesi (📞):")
+    import threading as _th21
+    import voice_engine as _ve21
+
+    # 21a. Bitirme cümleleri
+    assert _ve21.is_call_end_phrase("tamam görüşmeyi bitir") and _ve21.is_call_end_phrase("Görüşürüz Mehbur")
+    assert not _ve21.is_call_end_phrase("saat kaç") and not _ve21.is_call_end_phrase("")
+    print("  • 'görüşmeyi bitir / görüşürüz' anlaşılıyor, normal cümleler bitirmiyor ✓")
+
+    # 21b. Döngü: karşılama → dinle → işle → yanıt → veda (mikrofon/ses/TTS sahte)
+    _orig21 = (_ve21.Dictation, _ve21.TextToSpeech, _ve21.voice_dependencies_ok)
+    _said21, _states21, _cmds21 = [], [], []
+    _turns21 = ["hey mehbur saat kaç", "", "görüşmeyi bitir"]
+
+    class _FakeDict21:
+        def __init__(self, on_partial=None, on_done=None):
+            self._done = on_done
+        def start(self):
+            t = _turns21.pop(0)
+            _th21.Thread(target=lambda: self._done(t, ""), daemon=True).start()
+        def stop(self):
+            pass
+
+    class _FakeTTS21:
+        @staticmethod
+        def speak(text, voice=None, blocking=True):
+            _said21.append(text)
+
+    _ve21.Dictation, _ve21.TextToSpeech = _FakeDict21, _FakeTTS21
+    _ve21.voice_dependencies_ok = lambda: True
+    try:
+        _ended21 = _th21.Event()
+        _c21 = _ve21.JarvisCall(
+            on_command=lambda t: (_cmds21.append(t) or "Saat 22:15."),
+            on_state=lambda s, t="": _states21.append(s),
+            on_end=_ended21.set,
+        )
+        assert _c21.start() and _ended21.wait(10), "görüşme bitmedi"
+        assert _cmds21 == ["saat kaç"], _cmds21          # uyandırma sözcüğü ayıklandı, sessiz tur atlandı
+        assert _said21[0] == _ve21.WAKE_RESPONSE and "Saat 22:15." in _said21 and _said21[-1].startswith("Görüşmek")
+        assert _states21[0] == "karsilama" and "islemde" in _states21 and "yanit" in _states21 and _states21[-1] == "veda"
+    finally:
+        _ve21.Dictation, _ve21.TextToSpeech, _ve21.voice_dependencies_ok = _orig21
+    print("  • Karşılama → dinle → işle → seslendir → veda döngüsü çalışıyor, bitince on_end çağrılıyor ✓")
+
+    # 21c. Arayüz: 📞 butonu eklendi, 🎤 hâlâ bas-konuş
+    for m in ("_toggle_jarvis_call", "_on_call_state", "_on_call_end", "_ensure_jarvis", "_toggle_voice_from_chat"):
+        assert hasattr(_gui.MehburApp, m), f"gui_app.MehburApp.{m} eksik"
+    _gsrc21 = open(_gui.__file__, encoding="utf-8").read()
+    assert 'self.call_btn = ctk.CTkButton' in _gsrc21 and "command=self._toggle_jarvis_call" in _gsrc21
+    assert "command=self._toggle_voice_from_chat" in _gsrc21 and "Dictation(" in _gsrc21
+    print("  ✅ TEST 21 BAŞARILI: 📞 JARVIS görüşmesi hazır; 🎤 sesli mesaj olarak duruyor.")
     passed_tests += 1
 
     # ─────────────────────────────────────────

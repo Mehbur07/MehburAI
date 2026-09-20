@@ -61,6 +61,7 @@ class JarvisOverlay:
         self._alpha = 0.0
         self._target_alpha = 0.0
         self.visible = False
+        self.on_close = None   # kullanıcı ESC/tıkla kapatınca çağrılır (opsiyonel)
 
     # ── küre noktaları (Fibonacci) ──
     @staticmethod
@@ -114,8 +115,8 @@ class JarvisOverlay:
             self._cx, sh - 38, text="kapatmak için ESC ya da tıkla",
             fill="#33333F", font=("Segoe UI", 11))
 
-        self.top.bind("<Escape>", lambda e: self.hide())
-        self.canvas.bind("<Button-1>", lambda e: self.hide())
+        self.top.bind("<Escape>", lambda e: self._user_close())
+        self.canvas.bind("<Button-1>", lambda e: self._user_close())
 
     # ── genel API (ANA thread) ──
     def show(self, mode: str = "idle", title: str = "", subtitle: str = ""):
@@ -151,6 +152,15 @@ class JarvisOverlay:
         self._cancel_hide()
         self._target_alpha = 0.0
         self.visible = False
+
+    def _user_close(self):
+        """ESC / tıklama ile kapatma — 📞 görüşmesi sürüyorsa on_close onu da bitirir."""
+        self.hide()
+        if self.on_close is not None:
+            try:
+                self.on_close()
+            except Exception:
+                pass
 
     def destroy(self):
         self._cancel_hide()
