@@ -12,7 +12,7 @@ Tüm sistem bileşenlerini otomatik olarak test eder:
   7. Gemini API Anahtarı Ayarları & Konfigürasyon
   8. Küfür / Hakaret Algılama (yazım hatası toleranslı)
   9. Genişletilmiş Bilgisayar Erişimi (program açma, dosya/klasör, ses, parlaklık, güç)
- 10. 🛡️ Güvenlik Modu (parola hash'i, yol izleme, alarm akışı)
+ 10. 🤖 Telegram Uzaktan Kontrol (yetkilendirme, komutlar, bot token doğrulama)
 """
 
 import io
@@ -25,6 +25,7 @@ if sys.stdout.encoding != "utf-8":
 from ai_engine import (
     AIEngine,
     ImageStudio,
+    MathSolver,
     ProfanityComeback,
     ProfanityFilter,
     TrustedSourceFetcher,
@@ -298,136 +299,16 @@ def run_full_validation():
     passed_tests += 1
 
     # ─────────────────────────────────────────
-    # TEST 10: 🛡️ Güvenlik Modu
+    # TEST 10: 🤖 Telegram Uzaktan Kontrol
     # ─────────────────────────────────────────
-    print("\n[TEST 10] 🛡️ Güvenlik Modu:")
+    print("\n[TEST 10] 🤖 Telegram Uzaktan Kontrol:")
     import config as _cfg
-    import security_guard as _sg
-
-    _prev = _cfg.load_config()
-
-    # 10a. Parola tuzlu SHA-256 olarak saklanıyor, düz metin yok
-    _cfg.set_security_password("GizliParola!42")
-    assert _cfg.verify_security_password("GizliParola!42")
-    assert not _cfg.verify_security_password("yanlis")
-    sc = _cfg.get_security_config()
-    assert sc["security_password_hash"] and "GizliParola" not in str(sc)
-    assert len(sc["security_password_hash"]) == 64
-    print("  • Parola tuzlu SHA-256 olarak saklanıyor (düz metin yok) ✓")
-
-    # 10b. update_security_config parola alanlarını ezemez
-    _cfg.update_security_config(security_password_hash="EZILDI", security_enabled=True,
-                                security_watch_paths=[r"C:\Test\Gizli", r"D:\a\b.exe"])
-    assert _cfg.get_security_config()["security_password_hash"] != "EZILDI"
-    print("  • Parola alanı ayar güncellemesiyle ezilemiyor ✓")
-
-    # 10c. Klasör izleme: sadece "kapalı → açık" geçişinde sorar
-    fired = []
-    guard = _sg.SecurityGuard(on_access=lambda p: fired.append(p))
-    giz = _sg.SecurityGuard._norm(r"C:\Test\Gizli")
-    _state = {"explorer": [], "exes": []}
-    _sg.SecurityGuard._scan = classmethod(
-        lambda cls: (list(_state["explorer"]), list(_state["exes"]))
-    )
-    _sg._foreground_exe_path = lambda: (_state["exes"][0] if _state["exes"] else None)
-
-    guard._check_once()                                   # priming
-    assert fired == []
-    _state["explorer"] = [r"C:\Test\Gizli\ic"]
-    guard._check_once()
-    assert fired == [giz], f"yeni açılan klasör: {fired}"
-    fired.clear(); guard.mark_passed(r"C:\Test\Gizli"); guard._cooldown.clear()
-    guard._check_once()
-    assert fired == [], "doğrulama sonrası açıkken sormamalı"
-    _state["explorer"] = []; guard._check_once(); guard._cooldown.clear()
-    _state["explorer"] = [r"C:\Test\Gizli"]; guard._check_once()
-    assert fired == [giz], f"kapanıp tekrar açılınca: {fired}"
-    print("  • Klasör izleme yalnızca 'kapalı→açık' geçişinde soruyor ✓")
-
-    # 10c-2. Tepsi (tray) programı: kapatıp tekrar odağa gelince yeniden sorar
-    _cfg.update_security_config(
-        security_enabled=True,
-        security_watch_paths=[r"C:\Test\Gizli", r"C:\Apps\Telegram.exe"],
-    )
-    fired.clear()
-    g2 = _sg.SecurityGuard(on_access=lambda p: fired.append(p))
-    tg = _sg.SecurityGuard._norm(r"C:\Apps\Telegram.exe")
-    _state["explorer"] = []
-    _state["exes"] = []
-    _sg._foreground_exe_path = lambda: _state.get("fg")
-    _state["fg"] = None
-    g2._check_once()                                      # priming: telegram kapalı
-    _state["exes"] = [r"C:\Apps\Telegram.exe"]; _state["fg"] = r"C:\Apps\Telegram.exe"
-    g2._check_once()
-    assert fired == [tg], f"telegram açılınca sormalı: {fired}"
-    fired.clear(); g2.mark_passed(r"C:\Apps\Telegram.exe"); g2._cooldown.clear()
-    _state["fg"] = None; g2._check_once()                 # tepsiye indi (hâlâ çalışıyor)
-    _state["fg"] = r"C:\Apps\Telegram.exe"; g2._check_once()   # tepsiden geri açıldı
-    assert fired == [], "aynı oturumda tekrar odağa gelince sormamalı (passed)"
-    # gerçekten kapandı, sonra tekrar açıldı
-    _state["exes"] = []; _state["fg"] = None; g2._check_once(); g2._cooldown.clear()
-    _state["exes"] = [r"C:\Apps\Telegram.exe"]; _state["fg"] = r"C:\Apps\Telegram.exe"
-    g2._check_once()
-    assert fired == [tg], f"tam kapatıp açınca yeniden sormalı: {fired}"
-    print("  • Tepsi programı kapatılıp tekrar açılınca yeniden soruyor ✓")
-
-    # 10c-3. Korumalı dosya silinince "delete" olayı tetiklenir + yedekten geri yüklenir
-    import tempfile as _tf
-    _sdir = _tf.mkdtemp()
-    _sfile = _os.path.join(_sdir, "gizli_belge.txt")
-    open(_sfile, "w", encoding="utf-8").write("cok onemli veri")
-    _cfg.update_security_config(security_enabled=True, security_watch_paths=[_sfile])
-    _sg._foreground_exe_path = lambda: None
-    _sg.SecurityGuard._scan = classmethod(lambda cls: ([], []))
-    _devents = []
-    g3 = _sg.SecurityGuard(on_access=lambda p, e="access": _devents.append((e, p)))
-    g3.BACKUP_EVERY = 0.0
-    g3._check_once()                                      # priming + yedek
-    assert _sg.FileBackup.has(_sfile), "korumalı dosyanın gizli yedeği alınmalı"
-    _os.remove(_sfile)                                    # dosyayı sil
-    g3._check_once()
-    assert _devents == [("delete", _sg.SecurityGuard._norm(_sfile))], f"silme olayı: {_devents}"
-    assert _sg.FileBackup.restore(_sfile) and _os.path.isfile(_sfile), "yedekten geri yüklenmeli"
-    assert open(_sfile, encoding="utf-8").read() == "cok onemli veri"
-    _sg.FileBackup.discard(_sfile)
-    import shutil as _sh
-    _sh.rmtree(_sdir, ignore_errors=True)
-    _sh.rmtree(_sg.FileBackup.DIR, ignore_errors=True)
-    print("  • Korumalı dosya silinince 'delete' sorulur ve yedekten geri yüklenir ✓")
-
-    # 10d. Alarm akışı: hedefi kapatır + kamera yoksa Telegram metnine düşer
-    _sg.CameraCapture.snapshot = staticmethod(lambda save_dir=None: None)
-    _sg.TelegramNotifier.is_configured = classmethod(lambda cls: True)
-    _sg.TelegramNotifier.send_message = classmethod(lambda cls, t: True)
-    _sg.TelegramNotifier.send_photo = classmethod(lambda cls, p, caption="": False)
-    _closed = []
-    _sg.close_target = lambda p: (_closed.append(p) or True)
-    res = _sg.trigger_intruder_alert("yanlış şifre (test)", close_path=r"C:\Apps\Telegram.exe")
-    assert res["telegram"] is True and res["photo"] is None and res["closed"] is True
-    assert _closed == [r"C:\Apps\Telegram.exe"]
-    print(f"  • Alarm akışı (hedef kapatma dahil): {res['detail']} ✓")
-
-    # Ayarları eski haline getir
-    try:
-        with open(_cfg.CONFIG_FILE, "w", encoding="utf-8") as _f:
-            import json as _json
-            _json.dump(_prev, _f, indent=2, ensure_ascii=False)
-    except Exception:
-        pass
-    print("  ✅ TEST 10 BAŞARILI: Güvenlik modu bileşenleri çalışıyor.")
-    passed_tests += 1
-
-    # ─────────────────────────────────────────
-    # TEST 11: 🤖 Telegram Uzaktan Kontrol
-    # ─────────────────────────────────────────
-    print("\n[TEST 11] 🤖 Telegram Uzaktan Kontrol:")
     import telegram_bot as _tb
 
     _out = []
     _bot = _tb.TelegramControlBot(
         query_handler=lambda t: f"cevap<{t}>",
         security_status=lambda: "DURUM-OK",
-        security_toggle=lambda w: f"guvenlik={'ac' if w else 'kapat'}",
     )
     _bot._creds = lambda: ("TESTTOKEN", "555")
     _bot._is_owner = lambda cid: str(cid) == "555"
@@ -439,14 +320,14 @@ def run_full_validation():
     _tb.SystemTools.save_screenshot = staticmethod(lambda dest_dir=None: "ss.png")
     _tb.CameraCapture.snapshot = staticmethod(lambda save_dir=None: "cam.jpg")
 
-    # 11a. Yetkisiz chat ID: komut İŞLENMEZ ama tek seferlik ret mesajı alır
+    # 10a. Yetkisiz chat ID: komut İŞLENMEZ ama tek seferlik ret mesajı alır
     _bot._handle_update({"message": {"chat": {"id": 111}, "text": "merhaba"}})
     _bot._handle_update({"message": {"chat": {"id": 111}, "text": "hala buradayım"}})
     assert _out == [], "yetkisiz komut asla işlenmemeli"
     assert len(_rej) == 1 and str(_rej[0][0]) == "111" and "özel" in _rej[0][1].lower(), _rej
     print("  • Yetkisiz chat ID engelleniyor + tek ret mesajı gönderiliyor ✓")
 
-    # 11a-2. Sahip ID'si kodda YOK; yalnızca ayarlardaki ID yetkili, bozuk/boş ID kimseyi yetkilendirmez
+    # 10a-2. Sahip ID'si kodda YOK; yalnızca ayarlardaki ID yetkili, bozuk/boş ID kimseyi yetkilendirmez
     assert not hasattr(_cfg, "OWNER_TELEGRAM_ID"), "sabit Telegram ID'si kodda kalmamalı"
     _bot2 = _tb.TelegramControlBot(query_handler=lambda t: "ok")
     _real_raw = open(_cfg.CONFIG_FILE, "r", encoding="utf-8").read() \
@@ -463,26 +344,25 @@ def run_full_validation():
             open(_cfg.CONFIG_FILE, "w", encoding="utf-8").write(_real_raw)
     print("  • Sahip ID'si yalnızca ayarlardan geliyor; bozuk/boş ID kimseyi yetkilendirmiyor ✓")
 
-    # 11b. Düz metin → zeka motoruna gider
+    # 10b. Düz metin → zeka motoruna gider
     _bot._handle_update({"message": {"chat": {"id": 555}, "text": "einstein kimdir"}})
     assert any(k == "send" and "cevap<einstein kimdir>" in v for k, v in _out), _out
     print("  • Düz mesaj MehburAI zeka motoruna yönleniyor ✓")
 
-    # 11c. /ekran ve /foto fotoğraf gönderiyor
+    # 10c. /ekran ve /foto fotoğraf gönderiyor
     _out.clear()
     _bot._handle_update({"message": {"chat": {"id": 555}, "text": "/ekran"}})
     _bot._handle_update({"message": {"chat": {"id": 555}, "text": "/foto"}})
     assert sum(1 for k, _ in _out if k == "photo") == 2, _out
     print("  • /ekran ve /foto komutları görüntü gönderiyor ✓")
 
-    # 11d. /durum ve /guvenlik komutları
+    # 10d. /durum komutu
     _out.clear()
     _bot._handle_update({"message": {"chat": {"id": 555}, "text": "/durum"}})
-    _bot._handle_update({"message": {"chat": {"id": 555}, "text": "/guvenlik kapat"}})
-    assert ("send", "DURUM-OK") in _out and ("send", "guvenlik=kapat") in _out, _out
-    print("  • /durum ve /guvenlik ac|kapat komutları çalışıyor ✓")
+    assert ("send", "DURUM-OK") in _out, _out
+    print("  • /durum komutu çalışıyor ✓")
 
-    # 11e. Bozuk/maskeli token geçerli token'ı EZEMEZ (regression: '••••' hatası)
+    # 10e. Bozuk/maskeli token geçerli token'ı EZEMEZ (regression: '••••' hatası)
     #      (gerçek config.json'ı bozmamak için dosyayı ham olarak sakla-geri yükle)
     _cfg_raw = open(_cfg.CONFIG_FILE, "r", encoding="utf-8").read() \
         if _os.path.exists(_cfg.CONFIG_FILE) else None
@@ -500,13 +380,13 @@ def run_full_validation():
             open(_cfg.CONFIG_FILE, "w", encoding="utf-8").write(_cfg_raw)
     print("  • Bozuk/maskeli bot token geçerli token'ı ezemiyor ✓")
 
-    print("  ✅ TEST 11 BAŞARILI: Telegram uzaktan kontrol bileşenleri çalışıyor.")
+    print("  ✅ TEST 10 BAŞARILI: Telegram uzaktan kontrol bileşenleri çalışıyor.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
-    # TEST 12: 🎙️ Sesli Sohbet (uyandırma sözcüğü + STT)
+    # TEST 11: 🎙️ Sesli Sohbet (uyandırma sözcüğü + STT)
     # ─────────────────────────────────────────
-    print("\n[TEST 12] 🎙️ Sesli Sohbet:")
+    print("\n[TEST 11] 🎙️ Sesli Sohbet:")
     import voice_engine as _ve
     from telegram_bot import _file_send_query as _fsq
 
@@ -604,13 +484,13 @@ def run_full_validation():
     else:
         print("  • STT döngü testi atlandı (model/kütüphane yok) — çekirdek mantık doğrulandı")
 
-    print("  ✅ TEST 12 BAŞARILI: Sesli sohbet bileşenleri çalışıyor.")
+    print("  ✅ TEST 11 BAŞARILI: Sesli sohbet bileşenleri çalışıyor.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
-    # TEST 13: 🤬 Küfüre Misilleme ("asıl sen / asıl ben")
+    # TEST 12: 🤬 Küfüre Misilleme ("asıl sen / asıl ben")
     # ─────────────────────────────────────────
-    print("\n[TEST 13] Küfüre Misilleme Yanıtı:")
+    print("\n[TEST 12] Küfüre Misilleme Yanıtı:")
 
     update_profanity_config(profanity_comeback_enabled=True)
     assert get_profanity_config()["profanity_comeback_enabled"] is True
@@ -630,20 +510,20 @@ def run_full_validation():
     assert ProfanityComeback.generate("aptalsın").lower().startswith("asıl sen aptal"), "ünlü uyumu: aptalsın"
 
     # 13c. Sohbet bağlamı YOKKEN (conversation_id verilmemiş) küfür → nazik uyarı
-    #      (Misilleme yalnızca sohbet 'kaba' moduna geçtiğinde devreye girer — bkz. TEST 15)
+    #      (Misilleme yalnızca sohbet 'kaba' moduna geçtiğinde devreye girer — bkz. TEST 14)
     res = ai.process_query("sen tam bir oç'sun")
     assert res["source"] == "profanity_filter", res["source"]
     assert res["answer"] == PROFANITY_RESPONSE, res["answer"]
 
     print("  • 'ananı sikeyim' →", cb_family)
     print("  • \"oç'sun\" →", cb_oc)
-    print("  ✅ TEST 13 BAŞARILI: Küfüre misilleme üreteci çalışıyor.")
+    print("  ✅ TEST 12 BAŞARILI: Küfüre misilleme üreteci çalışıyor.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
-    # TEST 14: 🎨 Uygulama Logosu & İkon Üretimi
+    # TEST 13: 🎨 Uygulama Logosu & İkon Üretimi
     # ─────────────────────────────────────────
-    print("\n[TEST 14] Uygulama Logosu & İkon:")
+    print("\n[TEST 13] Uygulama Logosu & İkon:")
     import os as _os2
     from config import ICON_PATH, LOGO_PATH, ensure_app_icon, get_logo_path
 
@@ -676,13 +556,13 @@ def run_full_validation():
                 except OSError:
                     pass
 
-    print("  ✅ TEST 14 BAŞARILI: Logo / ikon sistemi çalışıyor.")
+    print("  ✅ TEST 13 BAŞARILI: Logo / ikon sistemi çalışıyor.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
-    # TEST 15: 💬 Sohbetler + Sohbete Özel Ruh Hali (normal→kızgın→kaba)
+    # TEST 14: 💬 Sohbetler + Sohbete Özel Ruh Hali (normal→kızgın→kaba)
     # ─────────────────────────────────────────
-    print("\n[TEST 15] Sohbet Bazlı Ruh Hali Makinesi:")
+    print("\n[TEST 14] Sohbet Bazlı Ruh Hali Makinesi:")
     from ai_engine import MoodFilter, RudeFlavor
 
     # 15a. MoodFilter — "yakışıyor" onay/ret sınıflandırması
@@ -734,13 +614,13 @@ def run_full_validation():
     assert ai.process_query("piç")["answer"] == PROFANITY_RESPONSE
 
     print("  • normal → küfür → 'yakışıyor mu?' → 'yakışıyor' → misilleme akışı ✓")
-    print("  ✅ TEST 15 BAŞARILI: Sohbet bazlı ruh hali makinesi çalışıyor.")
+    print("  ✅ TEST 14 BAŞARILI: Sohbet bazlı ruh hali makinesi çalışıyor.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
-    # TEST 16: 🔢 Sürüm Numarası + Wikipedia/Reddit Yedeği
+    # TEST 15: 🔢 Sürüm Numarası + Wikipedia/Reddit Yedeği
     # ─────────────────────────────────────────
-    print("\n[TEST 16] Sürüm Numarası & Uzun Wikipedia Yanıtı (Reddit yok):")
+    print("\n[TEST 15] Sürüm Numarası & Uzun Wikipedia Yanıtı (Reddit yok):")
     import re as _re16
 
     assert _re16.fullmatch(r"\d+\.\d+(\.\d+)?", APP_VERSION), f"APP_VERSION biçimi geçersiz: {APP_VERSION!r}"
@@ -791,13 +671,13 @@ def run_full_validation():
     else:
         print("  • Wikipedia'ya ulaşılamadı (ağ yok olabilir) — güvenli şekilde None ✓")
 
-    print("  ✅ TEST 16 BAŞARILI: Sürüm sabiti ve uzun/güvenilir Wikipedia yanıtı çalışıyor.")
+    print("  ✅ TEST 15 BAŞARILI: Sürüm sabiti ve uzun/güvenilir Wikipedia yanıtı çalışıyor.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
-    # TEST 17: 🎤📞👁️ Mikrofon Butonu · Telegram Sesli Görüşme · Kamera/Görsel Anlama
+    # TEST 16: 🎤📞👁️ Mikrofon Butonu · Telegram Sesli Görüşme · Kamera/Görsel Anlama
     # ─────────────────────────────────────────
-    print("\n[TEST 17] Mikrofon Butonu, Telegram Sesli Görüşme ve Görsel Anlama:")
+    print("\n[TEST 16] Mikrofon Butonu, Telegram Sesli Görüşme ve Görsel Anlama:")
     import gui_app as _gui
     import telegram_bot as _tb17
 
@@ -839,13 +719,13 @@ def run_full_validation():
     assert "API anahtarı" in no_key_msg or "Gemini" in no_key_msg, no_key_msg
     print("  • 'kafama ne tıraş yakışır' / 'elimde ne var' niyetleri doğru algılanıyor ✓")
 
-    print("  ✅ TEST 17 BAŞARILI: Mikrofon butonu, Telegram sesli görüşme ve görsel anlama hazır.")
+    print("  ✅ TEST 16 BAŞARILI: Mikrofon butonu, Telegram sesli görüşme ve görsel anlama hazır.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
-    # TEST 18: 📎🎨 Dosya Ekleme (metin/görsel) + Görsel Stüdyosu
+    # TEST 17: 📎🎨 Dosya Ekleme (metin/görsel) + Görsel Stüdyosu
     # ─────────────────────────────────────────
-    print("\n[TEST 18] Dosya Ekleme ve Görsel Stüdyosu:")
+    print("\n[TEST 17] Dosya Ekleme ve Görsel Stüdyosu:")
 
     # 18a. Görsel isteği niyet algılama
     assert ImageStudio.detect_intent("bana mutlu bir aile çiz") == "generate"
@@ -895,14 +775,14 @@ def run_full_validation():
     _bot18_img._dispatch("bana bir kedi çiz")   # yol yok → güvenli şekilde metne düşer, çökmez
     print("  • Telegram (metin, görsel_yolu) tuple yanıtını çökmeden işliyor ✓")
 
-    print("  ✅ TEST 18 BAŞARILI: Dosya ekleme ve görsel stüdyosu güvenli şekilde çalışıyor.")
+    print("  ✅ TEST 17 BAŞARILI: Dosya ekleme ve görsel stüdyosu güvenli şekilde çalışıyor.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
-    # TEST 19: 🔒 Hassas bilgi tarayıcı, 🎨 tema, 🧠 boşta öğrenme, 🛒 ürün bilgisi,
+    # TEST 18: 🔒 Hassas bilgi tarayıcı, 🎨 tema, 🧠 boşta öğrenme, 🛒 ürün bilgisi,
     #          🎤 bas-konuş, /aramabaslat
     # ─────────────────────────────────────────
-    print("\n[TEST 19] Hassas Bilgi Filtresi, Tema, Otomatik Öğrenme, Ürün Bilgisi, Bas-Konuş, /aramabaslat:")
+    print("\n[TEST 18] Hassas Bilgi Filtresi, Tema, Otomatik Öğrenme, Ürün Bilgisi, Bas-Konuş, /aramabaslat:")
     import json as _json19
     import os as _os19
     import tempfile as _tmp19
@@ -1106,13 +986,13 @@ def run_full_validation():
     assert "gemini-2.0-flash-preview-image-generation" not in _cfg19.GeminiConfig.IMAGE_MODELS
     print("  • Görsel: Gemini kotası yokken ücretsiz yedekle çiziyor, düzenlemede gerçek sebebi söylüyor ✓")
 
-    print("  ✅ TEST 19 BAŞARILI: Hassas bilgi filtresi, tema, otomatik öğrenme, ürün bilgisi, bas-konuş, /aramabaslat hazır.")
+    print("  ✅ TEST 18 BAŞARILI: Hassas bilgi filtresi, tema, otomatik öğrenme, ürün bilgisi, bas-konuş, /aramabaslat hazır.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
-    # TEST 20: 🔔 Güncelleme uyarısı (yeni sürüm denetimi)
+    # TEST 19: 🔔 Güncelleme uyarısı (yeni sürüm denetimi)
     # ─────────────────────────────────────────
-    print("\n[TEST 20] Güncelleme Uyarısı:")
+    print("\n[TEST 19] Güncelleme Uyarısı:")
     import updater as _up
 
     # 20a. Sürüm ayrıştırma / karşılaştırma
@@ -1163,13 +1043,13 @@ def run_full_validation():
     import inspect as _insp20
     _src20 = _insp20.getsource(_gui.MehburApp._show_update_banner)
     assert "Uyarı: Yeni sürüm yayınlandı." in _src20 and "bu bağlantıya tıklayın:" in _src20
-    print("  ✅ TEST 20 BAŞARILI: Güncelleme denetimi ve uyarı şeridi hazır.")
+    print("  ✅ TEST 19 BAŞARILI: Güncelleme denetimi ve uyarı şeridi hazır.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
-    # TEST 21: 📞 JARVIS görüşmesi (telefon butonu) — 🎤 bas-konuş yerinde kalır
+    # TEST 20: 📞 JARVIS görüşmesi (telefon butonu) — 🎤 bas-konuş yerinde kalır
     # ─────────────────────────────────────────
-    print("\n[TEST 21] JARVIS Görüşmesi (📞):")
+    print("\n[TEST 20] JARVIS Görüşmesi (📞):")
     import threading as _th21
     import voice_engine as _ve21
 
@@ -1220,13 +1100,13 @@ def run_full_validation():
     _gsrc21 = open(_gui.__file__, encoding="utf-8").read()
     assert 'self.call_btn = ctk.CTkButton' in _gsrc21 and "command=self._toggle_jarvis_call" in _gsrc21
     assert "command=self._toggle_voice_from_chat" in _gsrc21 and "Dictation(" in _gsrc21
-    print("  ✅ TEST 21 BAŞARILI: 📞 JARVIS görüşmesi hazır; 🎤 sesli mesaj olarak duruyor.")
+    print("  ✅ TEST 20 BAŞARILI: 📞 JARVIS görüşmesi hazır; 🎤 sesli mesaj olarak duruyor.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
-    # TEST 22: Çevrimiçi kurucu (küçük .exe → dosyaları GitHub'dan indirir)
+    # TEST 21: Çevrimiçi kurucu (küçük .exe → dosyaları GitHub'dan indirir)
     # ─────────────────────────────────────────
-    print("\n[TEST 22] Çevrimiçi Kurucu:")
+    print("\n[TEST 21] Çevrimiçi Kurucu:")
     import os as _os22
     import io as _io22
     import tempfile as _tf22
@@ -1304,13 +1184,13 @@ def run_full_validation():
     # 22d. Build betiği: Setup'a payload gömülmüyor, MehburAI.zip yalnızca .exe içeriyor
     _bat22 = open(_os22.path.join(_os22.path.dirname(_os22.path.abspath(__file__)), "build_exe.bat"), encoding="utf-8").read()
     assert "--add-data \"%CD%\\build\\payload.zip" not in _bat22 and "dist/MehburAI.zip" in _bat22
-    print("  ✅ TEST 22 BAŞARILI: Çevrimiçi kurucu hazır.")
+    print("  ✅ TEST 21 BAŞARILI: Çevrimiçi kurucu hazır.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
-    # TEST 23: 📞 Görüşmede ✕ çık / 🎤 sustur / 📷 kamera + ⏭ atla + 📋 kopyala
+    # TEST 22: 📞 Görüşmede ✕ çık / 🎤 sustur / 📷 kamera + ⏭ atla + 📋 kopyala
     # ─────────────────────────────────────────
-    print("\n[TEST 23] Görüşme Kontrolleri, Yazma Animasyonunu Atla, Panoya Kopyala:")
+    print("\n[TEST 22] Görüşme Kontrolleri, Yazma Animasyonunu Atla, Panoya Kopyala:")
     import threading as _th23
     import time as _time23
     import tkinter as _tk23
@@ -1432,13 +1312,13 @@ def run_full_validation():
     _tw_sig23 = str(_insp23.signature(_gui.MehburApp._run_typewriter))
     assert "skip_btn" in _tw_sig23
     print("  • ⏭ Atla yazma animasyonunu anında bitiriyor; 📋 Kopyala cevabı panoya kopyalıyor ✓")
-    print("  ✅ TEST 23 BAŞARILI: Görüşme kontrolleri + atla/kopyala hazır.")
+    print("  ✅ TEST 22 BAŞARILI: Görüşme kontrolleri + atla/kopyala hazır.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
-    # TEST 24: .exe'lere gömülen Win32 sürüm bilgisi (SmartScreen/AV yanlış pozitif azaltma)
+    # TEST 23: .exe'lere gömülen Win32 sürüm bilgisi (SmartScreen/AV yanlış pozitif azaltma)
     # ─────────────────────────────────────────
-    print("\n[TEST 24] .exe Sürüm Bilgisi (version_info.py):")
+    print("\n[TEST 23] .exe Sürüm Bilgisi (version_info.py):")
     import os as _os24
     import version_info as _vi24
 
@@ -1471,7 +1351,55 @@ def run_full_validation():
     _bat24 = open(_os24.path.join(_os24.path.dirname(_os24.path.abspath(__file__)), "build_exe.bat"), encoding="utf-8").read()
     assert "version_info.py --version" in _bat24 and "--version-file" in _bat24 and "--noupx" in _bat24
     print("  • MehburAI.spec + build_exe.bat sürüm bilgisini gömüyor, UPX kapalı (her ikisinde de) ✓")
-    print("  ✅ TEST 24 BAŞARILI: .exe'ler Yayımcı/Ürün bilgisiyle deriniyor, UPX kapalı.")
+    print("  ✅ TEST 23 BAŞARILI: .exe'ler Yayımcı/Ürün bilgisiyle deriniyor, UPX kapalı.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 24: 🔢 Yerel Matematik (Gemini'ye sormadan çözülür, token israfı yok)
+    # ─────────────────────────────────────────
+    print("\n[TEST 24] 🔢 Yerel Matematik:")
+    _MS = MathSolver
+
+    # 24a. Sembol + Türkçe işlem sözcükleriyle doğru sonuç
+    for _q, _want in (
+        ("2+2", "Sonuç: 4"), ("125*8-4", "Sonuç: 996"), ("(3+5)/2", "Sonuç: 4"),
+        ("3 artı 5", "Sonuç: 8"), ("125 çarpı 8 kaç eder", "Sonuç: 1000"),
+        ("100 bölü 4 nedir", "Sonuç: 25"), ("2 üzeri 10", "Sonuç: 1024"),
+        ("7 mod 3", "Sonuç: 1"), ("3,5+1,5", "Sonuç: 5"), ("-5+10", "Sonuç: 5"),
+    ):
+        _d = _MS.detect(_q)
+        assert _d, f"algılanamadı: {_q!r}"
+        assert _MS.solve(_d) == _want, f"{_q!r} -> {_MS.solve(_d)!r} (beklenen {_want!r})"
+    assert _MS.solve(_MS.detect("10 bölü 0")) == "Sıfıra bölme tanımsızdır."
+    print("  • Sembol ve Türkçe işlem sözcükleriyle ('artı/çarpı/bölü/üzeri/mod', 'kaç eder/nedir') doğru çözülüyor ✓")
+
+    # 24b. Matematik OLMAYAN metinlerde asla tetiklenmiyor (Wikipedia/sohbet akışını bozmaz)
+    for _q in ("saat kaç", "2. Dünya Savaşı ne zaman bitti", "42", "Albert Einstein kimdir",
+               "merhaba nasılsın", "12 Eylül 1980", "0090 555 123 45 67", "3 tane elma aldım",
+               "", "   ", "5 tl", "2+2 değil felsefe"):
+        assert _MS.detect(_q) is None, f"yanlışlıkla matematik sayıldı: {_q!r}"
+    print("  • Sıradan sorular (tarih, telefon, tek sayı, kimlik sorusu ...) matematik sayılmıyor ✓")
+
+    # 24c. Güvenlik: eval() değil ast beyaz listesi — kod çalıştırma imkânsız; aşırı üs (DoS) engellenir
+    assert _MS.detect("__import__('os').system('dir')") is None
+    assert _MS.detect("1 and 2") is None and _MS.detect("1;2") is None
+    _huge = _MS.detect("2**99999999")
+    assert _huge and _MS.solve(_huge) is None, "aşırı büyük üs sınırlanmalı"
+    assert _MS.solve("()") is None and _MS.solve("5/") is None
+    print("  • Kod enjeksiyonu imkânsız (ast beyaz listesi), aşırı büyük üs (DoS) engelleniyor ✓")
+
+    # 24d. AIEngine.process_query matematiği Gemini'ye SORMADAN yanıtlıyor
+    _orig_gen24 = ai.gemini.generate_response
+    _gemini_called24 = []
+    ai.gemini.generate_response = lambda *a, **k: (_gemini_called24.append(1) or "GEMINI ÇAĞRILDI")
+    try:
+        _r24 = ai.process_query("125 çarpı 8 kaç eder")
+        assert _r24["answer"] == "Sonuç: 1000" and _r24["source"] == "🔢 Yerel Matematik", _r24
+        assert not _gemini_called24, "matematik sorusu Gemini'ye gitmemeli"
+    finally:
+        ai.gemini.generate_response = _orig_gen24
+    print("  • AIEngine matematik sorularını Gemini'ye hiç sormadan yanıtlıyor ✓")
+    print("  ✅ TEST 24 BAŞARILI: Yerel matematik çözücü hazır, Gemini token'ı israf etmiyor.")
     passed_tests += 1
 
     # ─────────────────────────────────────────

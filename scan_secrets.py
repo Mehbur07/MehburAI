@@ -2,9 +2,9 @@
 """
 MehburAI - Hassas Bilgi Tarayıcı
 ================================
-Gemini API anahtarı, Telegram bot token'ı, Telegram ID'si, güvenlik parolası özeti
-gibi hassas bilgilerin GitHub'a push'lanan koda ya da .exe/Setup paketine
-SIZMASINI engeller. Bulursa çıkış kodu 1 ile biter (commit/derleme durur).
+Gemini API anahtarı, Telegram bot token'ı, Telegram ID'si gibi hassas bilgilerin
+GitHub'a push'lanan koda ya da .exe/Setup paketine SIZMASINI engeller.
+Bulursa çıkış kodu 1 ile biter (commit/derleme durur).
 
 Nasıl arar:
   1. Genel kalıplar (AIza…, AQ.…, <sayı>:<token>, gh?_…, özel anahtar).
@@ -41,7 +41,7 @@ PATTERNS = {
 ALLOW_SUBSTRINGS = ("Test", "TEST", "example", "EXAMPLE", "XXXX")
 
 FORBIDDEN_PATH = re.compile(
-    r"(^|/)(data/(config\.json|security_snapshots|security_backups|remote_captures|generated_images)"
+    r"(^|/)(data/(config\.json|camera_captures|vision_captures|remote_captures|generated_images)"
     r"|[^/]*\.db(-wal|-shm|-journal)?|\.env(\..*)?|last_error\.log|selftest\.txt)(/|$)",
     re.IGNORECASE,
 )
@@ -49,8 +49,7 @@ FORBIDDEN_PATH = re.compile(
 TEXT_EXT = {".py", ".md", ".txt", ".bat", ".spec", ".json", ".yml", ".yaml", ".cfg", ".ini",
             ".toml", ".html", ".js", ".css", ".sh", ".ps1", ".gitignore", ".gitkeep"}
 SKIP_DIRS = {".git", "build", "dist", "__pycache__", "venv", ".venv", "node_modules"}
-SECRET_KEYS = ("gemini_api_key", "telegram_bot_token", "telegram_chat_id",
-               "security_password_hash", "security_password_salt")
+SECRET_KEYS = ("gemini_api_key", "telegram_bot_token", "telegram_chat_id")
 
 
 def known_secret_values() -> set:

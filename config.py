@@ -19,7 +19,7 @@ import sys
 #   • KÜÇÜK ekleme (ince ayar, küçük düzeltme/iyileştirme) → SON basamak artar: 1.2 → 1.2.1 → 1.2.2 → ...
 #     (bir sonraki BÜYÜK eklemede üçüncü basamak sıfırlanıp ORTA basamak artar, örn. 1.2.3 → 1.3)
 # (Elle güncellenir — kod her eklemede otomatik saymaz.)
-APP_VERSION = "1.6.1"
+APP_VERSION = "1.7"
 
 # Güncelleme denetimi (updater.py): yeni sürüm GitHub'da yayınlanınca eski sürümü olan
 # bilgisayarlarda uygulama açılınca uyarı çıkar. Depo herkese açık değilse denetim sessizce atlanır.
@@ -455,23 +455,20 @@ def remove_api_key() -> None:
 
 
 # ─────────────────────────────────────────────
-# 🛡️ Güvenlik Modu (Yetkisiz Erişim Alarmı)
+# 🤖 Telegram Uzaktan Kontrol Ayarları
 # ─────────────────────────────────────────────
-# Kullanıcı ayarlardan korumalı yol(lar), bir şifre ve Telegram bilgileri girer.
-# Korunan yol açıldığında MehburAI şifre sorar; şifre yanlışsa / ekran kapatılırsa
-# kameradan fotoğraf çekilip cihaz sahibine Telegram'dan gönderilir ve ekranda
-# "fotoğrafınız çekildi ve cihaz sahibine iletildi" uyarısı gösterilir.
-# Bu ayarlar yalnızca yerel `data/config.json` içinde tutulur (repoya girmez).
+# Kullanıcı ayarlardan Telegram bilgilerini girer; bota yazarak MehburAI'ı uzaktan
+# yönetebilir (soru sor, /ekran, /foto, /aramabaslat ...). Bu ayarlar yalnızca yerel
+# `data/config.json` içinde tutulur (repoya girmez).
 
 # Cihaz sahibinin Telegram ID'si KODDA TUTULMAZ (kaynak koda / .exe'ye / GitHub'a
-# hassas bilgi girmesin diye) — Ayarlar > Güvenlik Modu'ndan girilir ve yalnızca
-# yerel `data/config.json` içinde durur. Bot yalnızca bu ID'den komut alır.
+# hassas bilgi girmesin diye) — Ayarlar > Telegram'dan girilir ve yalnızca yerel
+# `data/config.json` içinde durur. Bot yalnızca bu ID'den komut alır.
+# (🛡️ Güvenlik Modu — yetkisiz erişim alarmı — kullanıcı isteğiyle kaldırıldı; bu
+# fonksiyon adları geriye dönük uyum için "security" kalsa da artık yalnızca
+# Telegram uzaktan kontrol ayarlarını tutar.)
 
 SECURITY_DEFAULTS = {
-    "security_enabled": False,
-    "security_watch_paths": [],       # ["C:\\Users\\...\\Gizli", "D:\\bir.exe"]
-    "security_password_hash": "",     # sha256(salt + parola)
-    "security_password_salt": "",
     "telegram_bot_token": "",         # BotFather'dan alınır ("MehburAI (Telegram)" botu)
     "telegram_chat_id": "",           # cihaz sahibinin Telegram sohbet ID'si (ayarlardan girilir)
     "telegram_remote_enabled": False, # bota yazarak MehburAI'ı uzaktan yönetme
@@ -479,15 +476,13 @@ SECURITY_DEFAULTS = {
 
 
 def get_security_config() -> dict:
-    """Kayıtlı güvenlik modu ayarlarını (varsayılanlarla birleştirilmiş) döndürür."""
+    """Kayıtlı Telegram uzaktan kontrol ayarlarını (varsayılanlarla birleştirilmiş) döndürür."""
     import re
     config = load_config()
     result = dict(SECURITY_DEFAULTS)
     for key in SECURITY_DEFAULTS:
         if key in config and config[key] not in (None, ""):
             result[key] = config[key]
-    if not isinstance(result["security_watch_paths"], list):
-        result["security_watch_paths"] = []
     # Chat ID geçerli bir Telegram ID değilse (bozuk/maskeli) boş say — bot kimseyi yetkilendirmez
     if not re.fullmatch(r"-?\d{5,}", str(result.get("telegram_chat_id", "")).strip()):
         result["telegram_chat_id"] = ""
@@ -502,10 +497,10 @@ def is_valid_bot_token(token: str) -> bool:
 
 
 def update_security_config(**changes) -> None:
-    """Verilen güvenlik ayarı anahtarlarını kaydeder (parola hariç)."""
+    """Verilen Telegram ayarı anahtarlarını kaydeder."""
     config = load_config()
     for key, value in changes.items():
-        if key not in SECURITY_DEFAULTS or key.startswith("security_password"):
+        if key not in SECURITY_DEFAULTS:
             continue
         # Bot token: yalnızca GEÇERLİ biçimde bir token yazılabilir.
         # Boş / maskeli / bozuk değerler yok sayılır (mevcut token korunur) —
@@ -580,43 +575,6 @@ def update_profanity_config(**changes) -> None:
             continue
         config[key] = bool(value)
     save_config(config)
-
-
-def set_security_password(plaintext: str) -> None:
-    """Güvenlik modu parolasını tuzlu SHA-256 özeti olarak kaydeder (düz metin saklanmaz)."""
-    import hashlib
-    import secrets
-
-    config = load_config()
-    plaintext = (plaintext or "").strip()
-    if not plaintext:
-        config["security_password_hash"] = ""
-        config["security_password_salt"] = ""
-    else:
-        salt = secrets.token_hex(16)
-        digest = hashlib.sha256((salt + plaintext).encode("utf-8")).hexdigest()
-        config["security_password_hash"] = digest
-        config["security_password_salt"] = salt
-    save_config(config)
-
-
-def verify_security_password(plaintext: str) -> bool:
-    """Girilen parolanın kayıtlı özetle eşleşip eşleşmediğini kontrol eder."""
-    import hashlib
-    import hmac
-
-    cfg = get_security_config()
-    stored = cfg.get("security_password_hash") or ""
-    salt = cfg.get("security_password_salt") or ""
-    if not stored or not salt:
-        return False
-    digest = hashlib.sha256((salt + (plaintext or "")).encode("utf-8")).hexdigest()
-    return hmac.compare_digest(digest, stored)
-
-
-def has_security_password() -> bool:
-    cfg = get_security_config()
-    return bool(cfg.get("security_password_hash") and cfg.get("security_password_salt"))
 
 
 # ─────────────────────────────────────────────

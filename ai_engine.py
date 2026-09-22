@@ -14,6 +14,7 @@ MehburAI'nin ana zeka modülü. Ağ durumuna göre dinamik olarak:
      - Eşleşme yoksa kullanıcıyı nazikçe bilgilendirir.
 """
 
+import ast
 import base64
 import difflib
 import json
@@ -1226,6 +1227,100 @@ class GeminiStatusChecker:
 
 
 # ─────────────────────────────────────────────
+# 🔢 Yerel Matematik Çözücü (Gemini'ye sormadan, token israf etmeden)
+# ─────────────────────────────────────────────
+
+class MathSolver:
+    """Basit aritmetik ifadeleri ('125*8-4', '3 artı 5 kaç eder' ...) YEREL
+    olarak çözer — bunun için Gemini'ye gidilmez (gereksiz token/istek israfı).
+    'artı/eksi/çarpı/bölü/mod/üzeri' gibi Türkçe işlem sözcüklerini ve
+    'kaç eder/nedir' gibi soru eklerini tanır; internet gerektirmez.
+
+    Güvenlik: `eval()` KULLANMAZ. İfade `ast` ile ayrıştırılır ve yalnızca sayı
+    + aritmetik operatör düğümlerinden oluştuğu doğrulanır (Name/Call/Attribute
+    gibi kod çalıştırabilecek hiçbir düğüme izin verilmez) — kullanıcı girdisi
+    asla rastgele Python kodu çalıştıramaz.
+    """
+
+    _WORD_OPS = (
+        (re.compile(r"\bartı\b"), "+"),
+        (re.compile(r"\beksi\b"), "-"),
+        (re.compile(r"\bçarpı\b|\bkere\b"), "*"),
+        (re.compile(r"\bbölü\b"), "/"),
+        (re.compile(r"\büzeri\b|\büssü\b"), "**"),
+        (re.compile(r"\bmod\b"), "%"),
+    )
+    # Sondaki (bazen baştaki) soru kalıntısı: "... kaç eder", "... nedir" vb.
+    _TAIL_RE = re.compile(
+        r"^(kaç\s*eder\s*|kaç\s*yapar\s*)|"
+        r"(\s*kaç\s*eder|\s*kaç\s*yapar|\s*kaçtır|\s*sonucu\s*ne(dir)?|\s*nedir|\s*eder)\s*\??\.?\s*$"
+    )
+    _SAFE_RE = re.compile(r"^[\d.\+\-\*/%() ]+$")
+    _OP_RE = re.compile(r"[+\-*/%]")
+
+    _ALLOWED_NODES = (
+        ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
+        ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow,
+        ast.USub, ast.UAdd,
+    )
+
+    @classmethod
+    def detect(cls, text: str) -> Optional[str]:
+        """Metin yerel çözülebilecek bir aritmetik ifadeyse normalize edilmiş
+        hâlini ('125*8-4' gibi) döndürür; değilse None (başka bir yol izlenir)."""
+        if not text or not text.strip():
+            return None
+        norm = turkish_lower(text.strip())
+        norm = cls._TAIL_RE.sub("", norm).strip()
+        norm = norm.replace(",", ".")
+        for pat, repl in cls._WORD_OPS:
+            norm = pat.sub(repl, norm)
+        norm = norm.strip()
+        if not norm or not cls._SAFE_RE.match(norm):
+            return None
+        # En az bir rakam VE en az bir işlem olmalı — yalnız "42" gibi tek bir
+        # sayı ya da boş/işaretsiz metin matematik sorusu sayılmaz.
+        if not any(ch.isdigit() for ch in norm) or not cls._OP_RE.search(norm):
+            return None
+        return norm
+
+    @classmethod
+    def solve(cls, expr: str) -> Optional[str]:
+        """Güvenli (yalnızca aritmetik) bir ifadeyi değerlendirir; olmazsa None döner."""
+        try:
+            tree = ast.parse(expr, mode="eval")
+        except (SyntaxError, ValueError):
+            return None
+        for node in ast.walk(tree):
+            if not isinstance(node, cls._ALLOWED_NODES):
+                return None
+            if isinstance(node, ast.Constant) and not isinstance(node.value, (int, float)):
+                return None
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow):
+                # Aşırı büyük üs / taban — donma/aşırı büyük sayıya (DoS) karşı sınırla
+                if not (isinstance(node.right, ast.Constant) and abs(node.right.value) <= 1000):
+                    return None
+        try:
+            # Yukarıda beyaz listelenen düğümler dışında hiçbir şey barındırmadığı
+            # doğrulandı (Name/Call/Attribute yok) — bu yüzden eval() burada
+            # rastgele kod çalıştırma riski taşımaz, yalnızca aritmetik yapar.
+            result = eval(compile(tree, "<MathSolver>", "eval"))  # noqa: S307
+        except ZeroDivisionError:
+            return "Sıfıra bölme tanımsızdır."
+        except OverflowError:
+            return None
+        except Exception:
+            return None
+        if isinstance(result, bool):
+            return None
+        if isinstance(result, float):
+            if result != result or result in (float("inf"), float("-inf")):  # NaN/inf
+                return None
+            result = int(result) if result.is_integer() else round(result, 10)
+        return f"Sonuç: {result}"
+
+
+# ─────────────────────────────────────────────
 # Ana Yapay Zeka Karar Motoru (AIEngine)
 # ─────────────────────────────────────────────
 
@@ -1472,6 +1567,23 @@ class AIEngine:
                 "source": "👁️ Kamera / Görsel Anlama",
                 "learned": False,
             }
+
+        # 3-C. ADIM: 🔢 Yerel Matematik ("125*8-4", "3 artı 5 kaç eder" ...) —
+        # Gemini'ye SORULMAZ (gereksiz token israfı); internet gerekmez, çevrimdışı
+        # da çalışır. GUI, sesli sohbet ve Telegram hepsi buradan geçtiği için otomatik.
+        math_expr = MathSolver.detect(query)
+        if math_expr:
+            math_result = MathSolver.solve(math_expr)
+            if math_result is not None:
+                is_online = self.network.is_online
+                log("user", query, is_online)
+                log("mehbur", math_result, is_online, source="math")
+                return {
+                    "answer": math_result,
+                    "is_online": is_online,
+                    "source": "🔢 Yerel Matematik",
+                    "learned": False,
+                }
 
         # 4. ADIM: İnternet Bağlantı Kontrolü (Cloudflare 1.1.1.1)
         is_online = self.network.check_now()

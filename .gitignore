@@ -54,11 +54,10 @@ Desktop.ini
 data/mehbur_memory.db
 data/*.db
 
-# Güvenlik modu — kameradan çekilen kareler (kişisel, repoya girmez)
+# 👁️ Kamera görüntüleri (görsel anlama + /foto, kişisel, repoya girmez)
+data/camera_captures/
+data/vision_captures/
 data/security_snapshots/
-
-# Güvenlik modu — korumalı dosyaların gizli yedekleri (kişisel, repoya girmez)
-data/security_backups/
 
 # Telegram uzaktan kontrol — geçici ekran görüntüleri (kişisel, repoya girmez)
 data/remote_captures/

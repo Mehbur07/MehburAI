@@ -3,16 +3,14 @@
 MehburAI - Telegram Uzaktan Kontrol (Remote Control Bot)
 =======================================================
 Cihaz sahibi, "MehburAI (Telegram)" botuna yazarak MehburAI'a uzaktan erişir:
-soru sorabilir, program açtırabilir, ekran görüntüsü / kamera karesi isteyebilir,
-güvenlik modunu yönetebilir — kısaca GUI'deki sohbet kutusunun yaptığı her şeyi
-Telegram üzerinden yapabilir.
+soru sorabilir, program açtırabilir, ekran görüntüsü / kamera karesi isteyebilir
+— kısaca GUI'deki sohbet kutusunun yaptığı her şeyi Telegram üzerinden yapabilir.
 
 Güvenlik:
   • Yalnızca ayarlardaki `telegram_chat_id` (cihaz sahibi) komut verebilir.
     Başka bir sohbetten mesaj gelirse yalnızca kısa bir "bu bot özeldir" yanıtı
     döner (aynı kişiye 10 dk'da bir kez) ve komut asla işlenmez.
-  • Bot yalnızca "Ayarlar > 🛡️ Güvenlik Modu > 🤖 Telegram'dan uzaktan kontrol"
-    anahtarı açıkken çalışır.
+  • Bot yalnızca "Ayarlar > 🤖 Telegram'dan Uzaktan Kontrol" anahtarı açıkken çalışır.
   • Uzun anket (long-polling) kullanır — dinlenen bir port / web sunucusu açmaz.
   • Başlarken bota daha önce yazılmış birikmiş mesajları atlar (offset drenajı),
     böylece kapalıyken yollanan eski komutlar çalışmaz.
@@ -30,6 +28,77 @@ import requests
 from config import DATA_DIR, get_security_config, get_voice_config
 from security_guard import CameraCapture
 from system_tools import SystemTools
+
+
+# ─────────────────────────────────────────────
+# Telegram Bağlantı Yardımcısı (Ayarlar'daki "Otomatik Bul" / "Test Gönder")
+# ─────────────────────────────────────────────
+
+class TelegramNotifier:
+    """Ayarlar sayfasında bot bağlantısını kurarken/test ederken kullanılır
+    (chat ID otomatik bulma + test mesajı) — `TelegramControlBot`'un kendisi
+    değil, kurulum sırasındaki küçük bir yardımcıdır."""
+
+    API = "https://api.telegram.org"
+
+    @classmethod
+    def _creds(cls):
+        cfg = get_security_config()
+        return cfg.get("telegram_bot_token", "").strip(), cfg.get("telegram_chat_id", "").strip()
+
+    @classmethod
+    def is_configured(cls) -> bool:
+        token, chat_id = cls._creds()
+        return bool(token and chat_id)
+
+    @classmethod
+    def send_message(cls, text: str) -> bool:
+        token, chat_id = cls._creds()
+        if not token or not chat_id:
+            return False
+        try:
+            r = requests.post(
+                f"{cls.API}/bot{token}/sendMessage",
+                data={"chat_id": chat_id, "text": text},
+                timeout=15,
+            )
+            return r.ok
+        except requests.RequestException:
+            return False
+
+    @classmethod
+    def test(cls) -> tuple:
+        """Ayarlardaki 'Test Gönder' butonu için. (başarı, mesaj)"""
+        token, chat_id = cls._creds()
+        if not token or not chat_id:
+            return False, "Bot token veya chat ID girilmemiş."
+        ok = cls.send_message("✅ MehburAI — Telegram bağlantısı çalışıyor.")
+        return (ok, "Test mesajı gönderildi." if ok else "Gönderilemedi (token/chat ID hatalı olabilir).")
+
+    @classmethod
+    def detect_chat_id(cls, token: str = "") -> tuple:
+        """
+        Bota yazılan son mesajdan chat ID'yi otomatik bulur.
+        Kullanıcının önceden bota bir mesaj ('merhaba' / /start) atması gerekir.
+        Returns: (chat_id|None, açıklama)
+        """
+        token = (token or cls._creds()[0]).strip()
+        if not token:
+            return None, "Önce Bot Token gir."
+        try:
+            r = requests.get(f"{cls.API}/bot{token}/getUpdates", timeout=15)
+            data = r.json()
+        except (requests.RequestException, ValueError):
+            return None, "Telegram'a bağlanılamadı."
+        if not data.get("ok"):
+            return None, "Bot Token geçersiz görünüyor."
+        for upd in reversed(data.get("result", [])):
+            msg = upd.get("message") or upd.get("edited_message") or upd.get("channel_post")
+            chat = (msg or {}).get("chat") or {}
+            if chat.get("id") is not None:
+                who = chat.get("username") or chat.get("first_name") or chat.get("title") or chat["id"]
+                return str(chat["id"]), f"Chat ID bulundu ({who})."
+        return None, "Bota henüz mesaj yazmamışsın. Telegram'da botuna bir 'merhaba' yaz, sonra tekrar dene."
 
 
 def _chunks(text: str, size: int = 3900) -> List[str]:
@@ -85,8 +154,7 @@ HELP_TEXT = (
     "• /foto — web kameradan bir kare gönder\n"
     "• /dosya <isim> — bilgisayardan (Masaüstü…, AppData) dosya/klasör ara-gönder;\n"
     "     birden çok eşleşirse hangisini istediğini butonla sorar\n"
-    "• /durum — güvenlik modu durumu\n"
-    "• /guvenlik ac | /guvenlik kapat — güvenlik modunu aç/kapat\n"
+    "• /durum — botun durumu\n"
     "• /aramabaslat — 🎙️ sesli görüşmeyi başlat: yazsan da sessen de yanıtı ayrıca "
     "sesli mesaj olarak da alırsın (Telegram Bot API gerçek arama/çağrı başlatamaz — "
     "bu, sesli mesaj alışverişiyle çağrı hissi veren bir moddur)\n"
@@ -101,8 +169,7 @@ BOT_COMMANDS = [
     ("ekran", "🖥️ Ekran görüntüsü gönder"),
     ("foto", "📷 Kameradan fotoğraf gönder"),
     ("dosya", "📁 Dosya ara ve gönder"),
-    ("durum", "🛡️ Güvenlik modu durumu"),
-    ("guvenlik", "🔒 Güvenlik modunu aç/kapat"),
+    ("durum", "🤖 Bot durumu"),
     ("yardim", "❓ Komut listesi"),
 ]
 
@@ -118,13 +185,13 @@ class TelegramControlBot:
         self,
         query_handler: Callable[[str], str],
         security_status: Optional[Callable[[], str]] = None,
-        security_toggle: Optional[Callable[[bool], str]] = None,
     ):
         # query_handler(text) -> yanıt metni, veya (metin, 🎨 görsel_yolu) tuple'ı
         # (AIEngine.process_query sarmalayıcısı — görsel üretim/düzenleme sonucunu taşır)
+        # security_status() -> /durum komutunun döndürdüğü metin (bot/uzaktan kontrol durumu;
+        # ad geriye dönük uyum için "security" kalıyor, 🛡️ Güvenlik Modu artık yok)
         self._query_handler = query_handler
         self._security_status = security_status
-        self._security_toggle = security_toggle
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._offset: Optional[int] = None
@@ -341,12 +408,6 @@ class TelegramControlBot:
                 self._send(self._security_status() if self._security_status
                            else "Durum bilgisi mevcut değil.")
                 return
-            if cmd in ("guvenlik", "güvenlik"):
-                if rest:
-                    self._toggle_security(rest.lower())
-                else:
-                    self._send("Kullanım: /guvenlik ac  •  /guvenlik kapat  (durum için /durum)")
-                return
             if cmd in ("dosya", "dosyagonder", "gonder", "gönder"):
                 if rest:
                     self._send_file_search(rest)
@@ -463,17 +524,6 @@ class TelegramControlBot:
             return r.ok
         except (requests.RequestException, OSError):
             return False
-
-    def _toggle_security(self, arg: str) -> None:
-        if not self._security_toggle:
-            self._send("Güvenlik modu bu sürümde uzaktan değiştirilemiyor.")
-            return
-        want = arg in ("ac", "aç", "aktif", "on", "1", "true", "baslat", "başlat")
-        off = arg in ("kapat", "kapa", "durdur", "off", "0", "false")
-        if not want and not off:
-            self._send("Kullanım: /guvenlik ac  •  /guvenlik kapat")
-            return
-        self._send(self._security_toggle(want))
 
     # ── giden mesaj / medya ──────────────────
     def _send(self, text: str) -> None:
@@ -757,7 +807,6 @@ if __name__ == "__main__":
     bot = TelegramControlBot(
         query_handler=lambda t: f"(test yankı) {t}",
         security_status=lambda: "🟢 test durumu",
-        security_toggle=lambda w: f"güvenlik {'açıldı' if w else 'kapandı'} (test)",
     )
     print("Telegram yapılandırılmış mı:", bot.is_configured())
     if bot.is_configured():
