@@ -48,7 +48,7 @@ def run_full_validation():
     print("  🤖 MEHBUR AI — FAZ 5 ENTEGRASYON VE DOĞRULAMA TESTLERİ")
     print("=" * 65)
     passed_tests = 0
-    total_tests = 23
+    total_tests = 24
 
     memory = MemoryEngine()
     network = NetworkMonitor()
@@ -1433,6 +1433,45 @@ def run_full_validation():
     assert "skip_btn" in _tw_sig23
     print("  • ⏭ Atla yazma animasyonunu anında bitiriyor; 📋 Kopyala cevabı panoya kopyalıyor ✓")
     print("  ✅ TEST 23 BAŞARILI: Görüşme kontrolleri + atla/kopyala hazır.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 24: .exe'lere gömülen Win32 sürüm bilgisi (SmartScreen/AV yanlış pozitif azaltma)
+    # ─────────────────────────────────────────
+    print("\n[TEST 24] .exe Sürüm Bilgisi (version_info.py):")
+    import os as _os24
+    import version_info as _vi24
+
+    assert _vi24._version_tuple("1.6.1") == (1, 6, 1, 0)
+    assert _vi24._version_tuple("2.0") == (2, 0, 0, 0)
+    assert _vi24._version_tuple("1.10.2.5.9") == (1, 10, 2, 5)   # fazlası kesilir
+    print("  • 'X.Y[.Z]' → 4'lü Win32 sürüm demetine doğru çevriliyor ✓")
+
+    _info24 = _vi24.build_version_info("1.6.1", "MehburAI Kurulum", "MehburAI.Setup.exe")
+    from PyInstaller.utils.win32.versioninfo import VSVersionInfo as _VSV24
+    assert isinstance(_info24, _VSV24)
+    _txt24 = str(_info24)
+    assert "MehburAI Kurulum" in _txt24 and "MehburAI.Setup.exe" in _txt24 and "'1.6.1'" in _txt24
+    assert "Mehbur07" in _txt24                                  # CompanyName
+
+    import tempfile as _tf24
+    _tmp24 = _tf24.mkdtemp()
+    _out24 = _os24.path.join(_tmp24, "vi24.txt")
+    with open(_out24, "w", encoding="utf-8") as _f24:
+        _f24.write(_txt24)
+    from PyInstaller.utils.win32.versioninfo import load_version_info_from_text_file as _load24
+    _reloaded24 = _load24(_out24)                                 # PyInstaller'ın kendi --version-file yolu
+    assert isinstance(_reloaded24, _VSV24)
+    print("  • Üretilen sürüm bilgisi PyInstaller'ın --version-file'ıyla (eval tabanlı) geri okunabiliyor ✓")
+
+    # 24b. MehburAI.spec ve build_exe.bat gerçekten kullanıyor; UPX kapalı
+    _spec24 = open(_os24.path.join(_os24.path.dirname(_os24.path.abspath(__file__)), "MehburAI.spec"), encoding="utf-8").read()
+    assert "from version_info import build_version_info" in _spec24 and "version=app_version_info" in _spec24
+    assert "upx=False" in _spec24
+    _bat24 = open(_os24.path.join(_os24.path.dirname(_os24.path.abspath(__file__)), "build_exe.bat"), encoding="utf-8").read()
+    assert "version_info.py --version" in _bat24 and "--version-file" in _bat24 and "--noupx" in _bat24
+    print("  • MehburAI.spec + build_exe.bat sürüm bilgisini gömüyor, UPX kapalı (her ikisinde de) ✓")
+    print("  ✅ TEST 24 BAŞARILI: .exe'ler Yayımcı/Ürün bilgisiyle deriniyor, UPX kapalı.")
     passed_tests += 1
 
     # ─────────────────────────────────────────

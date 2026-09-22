@@ -11,6 +11,14 @@ echo.
 
 cd /d "%~dp0"
 
+for /f "usebackq delims=" %%V in (`python -c "import config; print(config.APP_VERSION)"`) do set APP_VERSION=%%V
+if "%APP_VERSION%"=="" (
+    echo  [HATA] config.APP_VERSION okunamadi.
+    pause
+    exit /b 1
+)
+echo  Surum: %APP_VERSION%
+
 echo  [1/6] PyInstaller kontrol ediliyor / kuruluyor...
 python -m pip install --quiet pyinstaller
 if %ERRORLEVEL% NEQ 0 (
@@ -69,8 +77,16 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo.
 echo  [6/6] MehburAI.Setup.exe olusturuluyor (dist\MehburAI.Setup.exe)...
-python -m PyInstaller installer.py --noconfirm --onefile --windowed --name MehburAI.Setup ^
+python version_info.py --version "%APP_VERSION%" --description "MehburAI Kurulum" ^
+    --filename MehburAI.Setup.exe --out "%CD%\build\setup_version_info.txt"
+if %ERRORLEVEL% NEQ 0 (
+    echo  [HATA] Setup surum bilgisi uretilemedi.
+    pause
+    exit /b 1
+)
+python -m PyInstaller installer.py --noconfirm --onefile --windowed --noupx --name MehburAI.Setup ^
     --icon "%CD%\assets\logo.ico" --add-data "%CD%\assets\logo.ico;." ^
+    --version-file "%CD%\build\setup_version_info.txt" ^
     --distpath dist --workpath build\setup --specpath build
 if %ERRORLEVEL% NEQ 0 (
     echo  [HATA] Setup derlenemedi.

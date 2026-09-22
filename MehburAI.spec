@@ -2,6 +2,14 @@
 
 import os
 
+# Win32 sürüm bilgisi (Yayımcı/Ürün adı/Açıklama) — boş olması SmartScreen/antivirüs
+# sezgisel tespitinde ekstra şüphe işareti sayılıyor; bkz. version_info.py.
+from config import APP_VERSION
+from version_info import build_version_info
+
+app_version_info = build_version_info(
+    APP_VERSION, "MehburAI - Hibrit Yapay Zeka Masaustu Asistani", "MehburAI.exe")
+
 # vosk kendi native DLL'lerini (libvosk.dll + MinGW çalışma zamanı) çalışma
 # zamanında cffi.dlopen() ile elle açıyor; PyInstaller'ın statik analizi bunu
 # göremez. Bu yüzden vosk klasöründeki TÜM DLL'ler elle 'vosk' klasörüne eklenir
@@ -50,7 +58,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,   # UPX sikistirmasi antiviruslerde yaygin bir yanlis pozitif tetikleyicisi
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -59,13 +67,14 @@ exe = EXE(
     entitlements_file=None,
     icon=['assets/logo.ico'],
     contents_directory='.',
+    version=app_version_info,
 )
 coll = COLLECT(
     exe,
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,   # UPX sikistirmasi antiviruslerde yaygin bir yanlis pozitif tetikleyicisi
     upx_exclude=[],
     name='MehburAI',
 )

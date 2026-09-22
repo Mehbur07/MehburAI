@@ -65,14 +65,18 @@ günceller; `data/` klasörü (ayarlar/hafıza) korunur.
 > derlemede taranır.
 >
 > **Kurulumdan SONRA uygulama aniden kayboluyorsa / `%APPDATA%\MehburAI` klasörü siliniyorsa**,
-> bunu MehburAI'nin kendisi yapmıyor — Windows Defender (ya da başka bir antivirüs) PyInstaller
-> ile derlenmiş imzasız `.exe`'leri, özellikle "küçük bir kurucu dosyaları internetten indirip
-> çalıştırıyor" davranışı yüzünden **yanlışlıkla** (false positive) truva atı/indirici gibi
-> algılayıp karantinaya alıp silebiliyor. Bunu düzeltmek için:
+> ya da `MehburAI.Setup.exe`'yi çalıştırmaya çalışınca **"Dosya virüslü olduğundan veya
+> istenmeyebilecek yazılım içerdiğinden işlem başarılı bir şekilde tamamlanamadı"** hatası
+> çıkıyorsa, bunu MehburAI'nin kendisi yapmıyor — Windows Defender (ya da başka bir antivirüs)
+> PyInstaller ile derlenmiş imzasız `.exe`'leri, özellikle "küçük bir kurucu dosyaları
+> internetten indirip çalıştırıyor" davranışı yüzünden **yanlışlıkla** (false positive) truva
+> atı/indirici gibi algılayıp anında siliyor/engelliyor. Bunu düzeltmek için:
 > 1. **Windows Güvenliği → Virüs ve tehdit koruması → Koruma geçmişi**'nden neyin
 >    kaldırıldığını gör; istersen **Geri Yükle**'ye bas.
-> 2. Yeniden kurmadan önce **Virüs ve tehdit koruması ayarları → İstisnaları yönet**'ten
->    `%APPDATA%\MehburAI` klasörünü ve indirdiğin `MehburAI.Setup.exe` dosyasını istisnaya ekle.
+> 2. Yeniden **indirmeden/kurmadan önce** **Virüs ve tehdit koruması ayarları → İstisnaları
+>    yönet**'ten `%APPDATA%\MehburAI` klasörünü ve indireceğin `MehburAI.Setup.exe` dosyasını
+>    istisnaya ekle — "geri yükle" ekranı bile çıkmıyorsa (dosya indirilir indirilmez
+>    siliniyorsa) tek çözüm budur.
 > 3. Hâlâ engelleniyorsa dosyayı [Microsoft'a yanlış pozitif olarak bildirebilirsin](https://www.microsoft.com/en-us/wdsi/filesubmission)
 >    — bu, o dosya için Windows'un genelindeki uyarıyı zamanla kaldırır.
 
