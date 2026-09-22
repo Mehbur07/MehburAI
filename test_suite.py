@@ -48,7 +48,7 @@ def run_full_validation():
     print("  🤖 MEHBUR AI — FAZ 5 ENTEGRASYON VE DOĞRULAMA TESTLERİ")
     print("=" * 65)
     passed_tests = 0
-    total_tests = 22
+    total_tests = 23
 
     memory = MemoryEngine()
     network = NetworkMonitor()
@@ -1305,6 +1305,134 @@ def run_full_validation():
     _bat22 = open(_os22.path.join(_os22.path.dirname(_os22.path.abspath(__file__)), "build_exe.bat"), encoding="utf-8").read()
     assert "--add-data \"%CD%\\build\\payload.zip" not in _bat22 and "dist/MehburAI.zip" in _bat22
     print("  ✅ TEST 22 BAŞARILI: Çevrimiçi kurucu hazır.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 23: 📞 Görüşmede ✕ çık / 🎤 sustur / 📷 kamera + ⏭ atla + 📋 kopyala
+    # ─────────────────────────────────────────
+    print("\n[TEST 23] Görüşme Kontrolleri, Yazma Animasyonunu Atla, Panoya Kopyala:")
+    import threading as _th23
+    import time as _time23
+    import tkinter as _tk23
+    import voice_engine as _ve23
+
+    # 23a. set_muted(True) o anki dinlemeyi hemen kesiyor (görüşmeyi bitirmiyor)
+    _c23a = _ve23.JarvisCall(on_command=lambda t: "x")
+    _stopped23 = []
+    _c23a._dictation = type("D", (), {"stop": lambda self: _stopped23.append(1)})()
+    assert not _c23a.is_muted()
+    _c23a.set_muted(True)
+    assert _c23a.is_muted() and _stopped23 == [1]
+    _c23a.set_muted(False)
+    assert not _c23a.is_muted()
+    print("  • set_muted(True) aktif dinlemeyi hemen kesiyor, görüşme sürüyor ✓")
+
+    # 23b. Susturulmuş başlarsa dinlemeye geçmiyor ('sessizde'); açılınca kaldığı yerden devam ediyor
+    _turns23 = ["ikinci soru", "görüşmeyi bitir"]
+    _dict_starts23 = []
+
+    class _FakeDict23:
+        def __init__(self, on_partial=None, on_done=None):
+            self._done = on_done
+        def start(self):
+            _dict_starts23.append(1)
+            t = _turns23.pop(0)
+            _th23.Thread(target=lambda: self._done(t, ""), daemon=True).start()
+        def stop(self):
+            pass
+
+    class _FakeTTS23:
+        @staticmethod
+        def speak(text, voice=None, blocking=True):
+            _said23.append(text)
+
+    _said23, _states23, _cmds23 = [], [], []
+    _orig23 = (_ve23.Dictation, _ve23.TextToSpeech, _ve23.voice_dependencies_ok)
+    _ve23.Dictation, _ve23.TextToSpeech = _FakeDict23, _FakeTTS23
+    _ve23.voice_dependencies_ok = lambda: True
+    try:
+        _ended23 = _th23.Event()
+        _c23 = _ve23.JarvisCall(
+            on_command=lambda t: (_cmds23.append(t) or "Yanıt."),
+            on_state=lambda s, t="": _states23.append(s),
+            on_end=_ended23.set,
+        )
+        _c23.set_muted(True)      # görüşme başlamadan sustur
+        assert _c23.start()
+        _t0 = _time23.time()
+        while "sessizde" not in _states23 and _time23.time() - _t0 < 5:
+            _time23.sleep(0.05)
+        assert "sessizde" in _states23, _states23
+        assert _dict_starts23 == [], "susturulmuşken dinlemeye başlamamalı"
+        _c23.set_muted(False)     # aç → sıradaki turlar normal işlensin
+        assert _ended23.wait(10), "görüşme bitmedi"
+        assert _cmds23 == ["ikinci soru"], _cmds23
+        assert _states23[-1] == "veda"
+    finally:
+        _ve23.Dictation, _ve23.TextToSpeech, _ve23.voice_dependencies_ok = _orig23
+    print("  • Susturulmuşken dinlemeye başlamıyor ('sessizde'), açılınca kaldığı yerden devam ediyor ✓")
+
+    # 23c. JarvisOverlay: ✕ her zaman görünür; 📞 görüşmesi 🎤/📷 düğmelerini gösterip gizliyor
+    _root23 = _tk23.Tk()
+    _root23.withdraw()
+    _ov23 = None
+    try:
+        _ov23 = _jv.JarvisOverlay(_root23)
+        _ov23.show(mode="idle", title="t", subtitle="s")
+        _root23.update_idletasks()
+        assert _ov23._btn_exit.winfo_ismapped()
+        assert not _ov23._btn_mic.winfo_ismapped() and not _ov23._btn_cam.winfo_ismapped()
+
+        _closed23, _mic23, _cam23 = [], [], []
+        _ov23.on_close = lambda: _closed23.append(1)
+        _ov23.set_call_controls(True, mic_muted=False, camera_on=False,
+                                on_mic_toggle=lambda: _mic23.append(1),
+                                on_camera_toggle=lambda: _cam23.append(1))
+        _root23.update_idletasks()
+        assert _ov23._btn_mic.winfo_ismapped() and _ov23._btn_cam.winfo_ismapped()
+        assert _ov23._btn_mic.cget("text") == "🎤" and _ov23._btn_cam.cget("fg") == "#7d8590"
+
+        _ov23._mic_clicked()
+        _ov23._cam_clicked()
+        assert _mic23 == [1] and _cam23 == [1]
+
+        _ov23.set_mic_muted(True)
+        assert _ov23._btn_mic.cget("text") == "🔇"
+        _ov23.set_camera_on(True)
+        assert _ov23._btn_cam.cget("fg").lower() == "#00e676"
+
+        _ov23.set_call_controls(False)
+        _root23.update_idletasks()
+        assert not _ov23._btn_mic.winfo_ismapped() and not _ov23._btn_cam.winfo_ismapped()
+
+        _ov23._user_close()
+        assert _closed23 == [1]
+    finally:
+        if _ov23 is not None:
+            try:
+                _ov23.destroy()
+            except Exception:
+                pass
+        _root23.destroy()
+    print("  • JARVIS ekranında ✕ çık / 🎤 sustur / 📷 kamera düğmeleri çalışıyor ✓")
+
+    # 23d. gui_app: 📞 görüşmesi mikrofon/kamera kontrolüne ve kamera izin kapısına bağlı
+    for m in ("_call_command", "_toggle_call_mic", "_toggle_call_camera"):
+        assert hasattr(_gui.MehburApp, m), f"gui_app.MehburApp.{m} eksik"
+    _gsrc23 = open(_gui.__file__, encoding="utf-8").read()
+    assert "set_call_controls(" in _gsrc23 and "on_mic_toggle=lambda: self._toggle_call_mic(call)" in _gsrc23
+    assert "VisionAssistant.detect_intent(text)" in _gsrc23 and "_call_camera_on" in _gsrc23
+    print("  • gui_app: 📞 görüşmesi 🎤/📷 kontrolüne bağlı; kamera kapalıyken kamera soruları reddediliyor ✓")
+
+    # 23e. ⏭ Atla (yazma animasyonunu anında bitirir) + 📋 Kopyala (panoya kopyalar)
+    assert "skip_btn" in _gsrc23 and "⏭ Atla" in _gsrc23 and "def finish():" in _gsrc23
+    assert hasattr(_gui.MehburApp, "_copy_to_clipboard")
+    assert "📋 Kopyala" in _gsrc23 and "self.clipboard_append(text)" in _gsrc23
+    import inspect as _insp23
+    _tw_sig23 = str(_insp23.signature(_gui.MehburApp._run_typewriter))
+    assert "skip_btn" in _tw_sig23
+    print("  • ⏭ Atla yazma animasyonunu anında bitiriyor; 📋 Kopyala cevabı panoya kopyalıyor ✓")
+    print("  ✅ TEST 23 BAŞARILI: Görüşme kontrolleri + atla/kopyala hazır.")
     passed_tests += 1
 
     # ─────────────────────────────────────────

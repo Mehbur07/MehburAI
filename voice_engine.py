@@ -587,9 +587,11 @@ class JarvisCall:
     art arda 3 kez hiç konuşulmaması görüşmeyi bitirir.
 
     on_state(state, text="") — state: karsilama | dinliyor | duyuyor | islemde | yanit |
-        veda | hata (text: "mic" | "model" | "deps")
+        veda | sessizde | hata (text: "mic" | "model" | "deps")
     on_end() — görüşme bittiğinde (her durumda, bir kez) çağrılır.
     Mikrofon konuşma sırasında kapalıdır (Dictation her tur açıp kapatır) → kendini duymaz.
+    🎤/🔇 — set_muted(True) ile kendi sesimiz kapatılabilir; görüşme bitmez, yalnızca
+    dinleme durur ("sessizde"), tekrar set_muted(False) ile devam eder.
     """
 
     MAX_SILENT_TURNS = 3
@@ -601,11 +603,25 @@ class JarvisCall:
         self._on_state = on_state or (lambda *a, **k: None)
         self._on_end = on_end or (lambda: None)
         self._stop = threading.Event()
+        self._muted = threading.Event()
         self._dictation: Optional[Dictation] = None
         self._thread: Optional[threading.Thread] = None
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
+
+    def is_muted(self) -> bool:
+        return self._muted.is_set()
+
+    def set_muted(self, muted: bool) -> None:
+        """🎤/🔇 — konuşmamızı görüşmeye açar/kapatır; görüşmeyi bitirmez."""
+        if muted:
+            self._muted.set()
+            d = self._dictation
+            if d is not None:
+                d.stop()      # o anki dinlemeyi kes; yarım kalan metin _run'da yok sayılır
+        else:
+            self._muted.clear()
 
     def start(self) -> bool:
         if self.is_running():
@@ -656,10 +672,17 @@ class JarvisCall:
             self._say(WAKE_RESPONSE)
             silent = 0
             while not self._stop.is_set():
+                if self._muted.is_set():
+                    self._on_state("sessizde")
+                    while self._muted.is_set() and not self._stop.is_set():
+                        time.sleep(0.15)
+                    continue
                 self._on_state("dinliyor")
                 text, error = self._listen_turn()
                 if self._stop.is_set():
                     break
+                if self._muted.is_set():
+                    continue      # susturma sırasında yarım kalan söz — yok say, sessiz tur sayma
                 if error:
                     self._on_state("hata", error)
                     return

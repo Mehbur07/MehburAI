@@ -30,7 +30,7 @@ from typing import Optional
 
 import customtkinter as ctk
 
-from ai_engine import AIEngine
+from ai_engine import AIEngine, VisionAssistant
 from auto_learner import IdleLearner
 from config import (
     APP_VERSION,
@@ -153,6 +153,7 @@ class MehburApp(ctk.CTk):
         self._dictation = None      # 🎤 bas-konuş yazdırma oturumu
         self._dictating = False
         self._call = None           # 📞 JARVIS görüşmesi (JarvisCall) — yoksa None
+        self._call_camera_on = False   # 📷 görüşme sırasında kamera sorularına izin var mı
 
         # Tek örnek kilidi — ikinci açılış mevcut pencereyi öne getirir
         self._singleton = singleton or SingleInstance()
@@ -1155,10 +1156,29 @@ class MehburApp(ctk.CTk):
                 )
                 badge_lbl.pack(side="left", padx=6)
 
+            # ⏭ Atla — yazma animasyonu sürerken görünür; tıklayınca kalanı beklemeden
+            # tam metni gösterir (aşağıda do_animate hesaplanınca eklenir)
+            skip_btn = None
+
             if image_path and os.path.isfile(image_path):
                 self._attach_image_preview(bubble, image_path)
 
             do_animate = bool(animate) and Theme.TYPEWRITER_MS > 0 and len(message) > 1
+            if do_animate:
+                skip_btn = ctk.CTkButton(
+                    header_box,
+                    text="⏭ Atla",
+                    width=56,
+                    height=20,
+                    font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=10),
+                    fg_color="transparent",
+                    text_color=Theme.TEXT_SECONDARY,
+                    hover_color=Theme.BG_CARD_HOVER,
+                    border_width=1,
+                    border_color=Theme.TEXT_DARK,
+                    corner_radius=6,
+                )
+                skip_btn.pack(side="right")
             msg_lbl = ctk.CTkLabel(
                 bubble,
                 text="" if do_animate else message,
@@ -1180,8 +1200,25 @@ class MehburApp(ctk.CTk):
                 link_lbl.pack(anchor="w", padx=12, pady=(0, 10))
                 link_lbl.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
 
+            # 📋 Panoya Kopyala — cevabın tam metnini kopyalar (tıklayınca kısa süre onay gösterir)
+            copy_btn = ctk.CTkButton(
+                bubble,
+                text="📋 Kopyala",
+                width=90,
+                height=22,
+                font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=10),
+                fg_color="transparent",
+                text_color=Theme.TEXT_SECONDARY,
+                hover_color=Theme.BG_CARD_HOVER,
+                border_width=1,
+                border_color=Theme.TEXT_DARK,
+                corner_radius=6,
+            )
+            copy_btn.pack(anchor="w", padx=12, pady=(0, 10))
+            copy_btn.configure(command=lambda b=copy_btn, m=message: self._copy_to_clipboard(m, b))
+
             if do_animate:
-                self._run_typewriter(msg_lbl, message, on_done)
+                self._run_typewriter(msg_lbl, message, on_done, skip_btn)
             elif on_done:
                 self.after(0, on_done)
 
@@ -1209,6 +1246,20 @@ class MehburApp(ctk.CTk):
         except Exception:
             pass
 
+    def _copy_to_clipboard(self, text: str, btn):
+        """📋 Kopyala — cevabı panoya kopyalar, butonda 1.5 sn '✅ Kopyalandı' gösterir."""
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.update()   # bazı Windows sürümlerinde pano güncellemesi için gerekli
+        except Exception:
+            return
+        if not btn.winfo_exists():
+            return
+        btn.configure(text="✅ Kopyalandı", text_color=Theme.STATUS_ONLINE, border_color=Theme.STATUS_ONLINE)
+        self.after(1500, lambda: btn.winfo_exists() and btn.configure(
+            text="📋 Kopyala", text_color=Theme.TEXT_SECONDARY, border_color=Theme.TEXT_DARK))
+
     def _cancel_typewriter(self):
         """Süren yazma animasyonunu durdurur."""
         if getattr(self, "_type_after_id", None):
@@ -1218,23 +1269,35 @@ class MehburApp(ctk.CTk):
                 pass
             self._type_after_id = None
 
-    def _run_typewriter(self, label, full_text: str, on_done=None):
-        """Etiket metnini harf harf yazar; süre uzunluktan bağımsız ~sabit kalır."""
+    def _run_typewriter(self, label, full_text: str, on_done=None, skip_btn=None):
+        """Etiket metnini harf harf yazar; süre uzunluktan bağımsız ~sabit kalır.
+        `skip_btn` verilirse tıklanınca kalan animasyon anında tam metne atlar."""
         self._cancel_typewriter()
         step = max(1, math.ceil(len(full_text) / 110))   # uzun metinde büyük adım
-        state = {"i": 0}
+        state = {"i": 0, "done": False}
+
+        def finish():
+            if state["done"]:
+                return
+            state["done"] = True
+            self._cancel_typewriter()
+            label.configure(text=full_text)
+            if skip_btn is not None and skip_btn.winfo_exists():
+                skip_btn.destroy()
+            try:
+                self.chat_history_box._parent_canvas.yview_moveto(1.0)
+            except Exception:
+                pass
+            if on_done:
+                on_done()
+
+        if skip_btn is not None:
+            skip_btn.configure(command=finish)
 
         def tick():
             i = state["i"]
             if i >= len(full_text):
-                label.configure(text=full_text)
-                self._type_after_id = None
-                try:
-                    self.chat_history_box._parent_canvas.yview_moveto(1.0)
-                except Exception:
-                    pass
-                if on_done:
-                    on_done()
+                finish()
                 return
             label.configure(text=full_text[:i])
             try:
@@ -2767,8 +2830,9 @@ class MehburApp(ctk.CTk):
         if self.voice_assistant is not None:
             self.voice_assistant.pause()
         self._call_error = ""
+        self._call_camera_on = False    # her görüşme kamerasız başlar (gizlilik) — 📷 ile açılır
         call = JarvisCall(
-            on_command=self._voice_command,
+            on_command=self._call_command,
             on_state=lambda s, t="": self._ui_call(lambda: self._on_call_state(call, s, t)),
             on_end=lambda: self._ui_call(lambda: self._on_call_end(call)),
         )
@@ -2776,7 +2840,37 @@ class MehburApp(ctk.CTk):
         j.on_close = call.stop
         self.call_btn.configure(text_color=Theme.NEON_RED, border_color=Theme.NEON_RED)
         j.show(mode="idle", title="Bağlanıyor…", subtitle="")
+        j.set_call_controls(
+            True, mic_muted=False, camera_on=False,
+            on_mic_toggle=lambda: self._toggle_call_mic(call),
+            on_camera_toggle=self._toggle_call_camera,
+        )
         call.start()
+
+    def _call_command(self, text: str) -> str:
+        """📞 görüşmesindeki komutu işler; kamera soruları ('kafama ne yakışır', 'elimde ne
+        var' ...) yalnızca JARVIS ekranındaki 📷 düğmesi açıkken yanıtlanır."""
+        if not self._call_camera_on and VisionAssistant is not None and VisionAssistant.detect_intent(text):
+            return ("📷 Kamera kapalı efendim. Bu soruyu yanıtlayabilmem için önce JARVIS "
+                    "ekranındaki 📷 düğmesine basıp kamerayı açman gerekiyor.")
+        return self._voice_command(text)
+
+    def _toggle_call_mic(self, call):
+        """🎤/🔇 — 📞 görüşmesinde kendi sesimizi açıp kapatır (görüşmeyi bitirmez)."""
+        if call is not self._call:
+            return
+        muted = not call.is_muted()
+        call.set_muted(muted)
+        if self.jarvis is not None:
+            self.jarvis.set_mic_muted(muted)
+
+    def _toggle_call_camera(self):
+        """📷 — 📞 görüşmesinde kamera sorularına izni açıp kapatır."""
+        if self._call is None:
+            return
+        self._call_camera_on = not self._call_camera_on
+        if self.jarvis is not None:
+            self.jarvis.set_camera_on(self._call_camera_on)
 
     def _on_call_state(self, call, state: str, text: str = ""):
         j = self.jarvis
@@ -2789,6 +2883,8 @@ class MehburApp(ctk.CTk):
                 j.show(mode="listen", title="Dinliyorum…", subtitle=None)   # önceki yanıt ekranda kalsın
             elif state == "duyuyor":
                 j.set_state(subtitle=f"🎤 {text}")
+            elif state == "sessizde":
+                j.show(mode="idle", title="🔇 Mikrofon kapalı", subtitle="Açmak için 🎤 düğmesine bas")
             elif state == "islemde":
                 j.show(mode="think", title="Düşünüyorum…", subtitle=text)
             elif state == "yanit":
@@ -2808,6 +2904,7 @@ class MehburApp(ctk.CTk):
         error = getattr(self, "_call_error", "")
         if self.jarvis is not None:
             self.jarvis.on_close = None
+            self.jarvis.set_call_controls(False)
             self.jarvis.hide(delay_ms=0 if error else 1500)
         if self.voice_assistant is not None:
             self.voice_assistant.resume()

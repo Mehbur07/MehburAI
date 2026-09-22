@@ -61,7 +61,13 @@ class JarvisOverlay:
         self._alpha = 0.0
         self._target_alpha = 0.0
         self.visible = False
-        self.on_close = None   # kullanıcı ESC/tıkla kapatınca çağrılır (opsiyonel)
+        self.on_close = None   # kullanıcı ESC/tıkla/✕ ile kapatınca çağrılır (opsiyonel)
+
+        # 📞 görüşme kontrolleri (yalnız JarvisCall sürerken görünür)
+        self._on_mic_toggle = None
+        self._on_camera_toggle = None
+        self._mic_muted = False
+        self._camera_on = False
 
     # ── küre noktaları (Fibonacci) ──
     @staticmethod
@@ -112,11 +118,31 @@ class JarvisOverlay:
             self._cx, int(sh * 0.75), text="", fill="#00F0FF",
             width=int(sw * 0.62), font=("Segoe UI", 15), justify="center")
         self.canvas.create_text(
-            self._cx, sh - 38, text="kapatmak için ESC ya da tıkla",
+            self._cx, sh - 24, text="kapatmak için ESC ya da tıkla",
             fill="#33333F", font=("Segoe UI", 11))
 
         self.top.bind("<Escape>", lambda e: self._user_close())
         self.canvas.bind("<Button-1>", lambda e: self._user_close())
+
+        # ── Kontrol düğmeleri (chip'ler) — alt orta, hint yazısının üzerinde ──
+        btn_rely = 0.90
+        self._btn_exit = tk.Label(
+            self.top, text="✕  Kapat", bg="#2a0810", fg="#FF6B7A",
+            font=("Segoe UI", 12, "bold"), padx=18, pady=8, cursor="hand2", bd=0)
+        self._btn_exit.place(relx=0.5, rely=btn_rely, anchor="center")
+        self._btn_exit.bind("<Button-1>", lambda e: self._user_close())
+
+        self._btn_mic = tk.Label(
+            self.top, text="🎤", bg="#0a1620", fg="#00F0FF",
+            font=("Segoe UI", 16), padx=16, pady=6, cursor="hand2", bd=0)
+        self._btn_mic.bind("<Button-1>", lambda e: self._mic_clicked())
+        self._btn_cam = tk.Label(
+            self.top, text="📷", bg="#0a1620", fg="#7d8590",
+            font=("Segoe UI", 16), padx=16, pady=6, cursor="hand2", bd=0)
+        self._btn_cam.bind("<Button-1>", lambda e: self._cam_clicked())
+        self._btn_mic_rely = self._btn_cam_rely = btn_rely
+        self._controls_visible = False
+        self._refresh_controls()
 
     # ── genel API (ANA thread) ──
     def show(self, mode: str = "idle", title: str = "", subtitle: str = ""):
@@ -154,13 +180,70 @@ class JarvisOverlay:
         self.visible = False
 
     def _user_close(self):
-        """ESC / tıklama ile kapatma — 📞 görüşmesi sürüyorsa on_close onu da bitirir."""
+        """ESC / tıklama / ✕ ile kapatma — 📞 görüşmesi sürüyorsa on_close onu da bitirir
+        (görüşme dinlemeyi/seslendirmeyi hemen keser, yanıt vermeye devam etmez)."""
         self.hide()
         if self.on_close is not None:
             try:
                 self.on_close()
             except Exception:
                 pass
+
+    def _mic_clicked(self):
+        if self._on_mic_toggle is not None:
+            try:
+                self._on_mic_toggle()
+            except Exception:
+                pass
+
+    def _cam_clicked(self):
+        if self._on_camera_toggle is not None:
+            try:
+                self._on_camera_toggle()
+            except Exception:
+                pass
+
+    def set_mic_muted(self, muted: bool):
+        """🎤/🔇 — 📞 görüşmesinde kendi sesimizi açıp kapatma düğmesinin görünümünü günceller."""
+        self._mic_muted = bool(muted)
+        if self.top is None:
+            return
+        if self._mic_muted:
+            self._btn_mic.configure(text="🔇", fg="#FF6B7A", bg="#2a0810")
+        else:
+            self._btn_mic.configure(text="🎤", fg="#00F0FF", bg="#0a1620")
+
+    def set_camera_on(self, on: bool):
+        """📷 — kamera sorularının (saç/elimdeki nesne) yanıtlanıp yanıtlanmayacağını gösterir."""
+        self._camera_on = bool(on)
+        if self.top is None:
+            return
+        if self._camera_on:
+            self._btn_cam.configure(text="📷", fg="#00E676", bg="#08220f")
+        else:
+            self._btn_cam.configure(text="📷", fg="#7d8590", bg="#0a1620")
+
+    def set_call_controls(self, enabled: bool, mic_muted: bool = False, camera_on: bool = False,
+                           on_mic_toggle=None, on_camera_toggle=None):
+        """📞 JarvisCall sürerken 🎤/📷 düğmelerini gösterir; görüşme bitince gizler.
+        on_mic_toggle()/on_camera_toggle() — düğmeye tıklanınca çağrılır (durumu GUI yönetir,
+        yeni durumu set_mic_muted/set_camera_on ile bu overlay'e geri bildirir)."""
+        if self.top is None:
+            self._build()
+        self._on_mic_toggle = on_mic_toggle
+        self._on_camera_toggle = on_camera_toggle
+        self._controls_visible = bool(enabled)
+        self._refresh_controls()
+        self.set_mic_muted(mic_muted)
+        self.set_camera_on(camera_on)
+
+    def _refresh_controls(self):
+        if self._controls_visible:
+            self._btn_mic.place(relx=0.40, rely=self._btn_mic_rely, anchor="center")
+            self._btn_cam.place(relx=0.60, rely=self._btn_cam_rely, anchor="center")
+        else:
+            self._btn_mic.place_forget()
+            self._btn_cam.place_forget()
 
     def destroy(self):
         self._cancel_hide()
