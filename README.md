@@ -51,12 +51,30 @@
 
 ## 🚀 Hızlı Başlangıç (Tek Tıkla Otomatik Kurulum)
 
-### 0. Yöntem: `MehburAI.exe` ile (Python kurulumu gerektirmez)
-`build_exe.bat`'e çift tıkla — PyInstaller ile derler ve
-`%LOCALAPPDATA%\Programs\MehburAI\MehburAI.exe` konumuna **doğrudan bilgisayara kurar**
-(ayarlar/hafıza mevcutsa oraya kopyalanır, sıfırlanmaz). Sonra Masaüstü kısayolunu
-(`MehburAI.lnk`) o `.exe`'ye yönlendir — artık Python kurulu olmasa da çift tıkla açılır.
-Yeniden derlemek istersen aynı betiği tekrar çalıştırman yeterli.
+### 0. Yöntem: `MehburAI.Setup.exe` ile (Python kurulumu gerektirmez, önerilen)
+[Releases](https://github.com/Mehbur07/MehburAI/releases/latest) sayfasındaki **`MehburAI.zip`**
+dosyasını indir ve aç — içinde yalnızca küçük `MehburAI.Setup.exe` var. Onu çalıştırınca
+uygulamanın tüm dosyalarını GitHub'dan otomatik indirip `%APPDATA%\MehburAI` altına kurar,
+masaüstüne kısayol koyar ve başlatır (internet gerekir). Zaten kuruluysa aynı kurucu
+günceller; `data/` klasörü (ayarlar/hafıza) korunur.
+
+> ⚠️ **"Windows bilgisayarınızı korudu" / SmartScreen uyarısı beklenen bir şeydir** — MehburAI
+> ücretli bir kod imzalama sertifikasıyla imzalı değil (açık kaynak, bireysel bir proje),
+> bu yüzden Windows tanımadığı her imzasız `.exe` için bu uyarıyı gösterir. **Daha fazla bilgi
+> → Yine de çalıştır** ile devam edebilirsin; kaynak kod bu depoda açık, `scan_secrets.py` her
+> derlemede taranır.
+>
+> **Kurulumdan SONRA uygulama aniden kayboluyorsa / `%APPDATA%\MehburAI` klasörü siliniyorsa**,
+> bunu MehburAI'nin kendisi yapmıyor — Windows Defender (ya da başka bir antivirüs) PyInstaller
+> ile derlenmiş imzasız `.exe`'leri, özellikle "küçük bir kurucu dosyaları internetten indirip
+> çalıştırıyor" davranışı yüzünden **yanlışlıkla** (false positive) truva atı/indirici gibi
+> algılayıp karantinaya alıp silebiliyor. Bunu düzeltmek için:
+> 1. **Windows Güvenliği → Virüs ve tehdit koruması → Koruma geçmişi**'nden neyin
+>    kaldırıldığını gör; istersen **Geri Yükle**'ye bas.
+> 2. Yeniden kurmadan önce **Virüs ve tehdit koruması ayarları → İstisnaları yönet**'ten
+>    `%APPDATA%\MehburAI` klasörünü ve indirdiğin `MehburAI.Setup.exe` dosyasını istisnaya ekle.
+> 3. Hâlâ engelleniyorsa dosyayı [Microsoft'a yanlış pozitif olarak bildirebilirsin](https://www.microsoft.com/en-us/wdsi/filesubmission)
+>    — bu, o dosya için Windows'un genelindeki uyarıyı zamanla kaldırır.
 
 ### 1. Yöntem: `Setup_and_Run.bat` ile (Kaynaktan çalıştır — geliştirici modu)
 Projeyi indirdikten sonra klasör içindeki **`Setup_and_Run.bat`** dosyasına çift tıklayın. 
