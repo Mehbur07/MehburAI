@@ -18,9 +18,11 @@ Güvenlik:
 
 import json
 import os
+import re
 import threading
 import time
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta
 from typing import Callable, List, Optional
 
 import requests
@@ -144,6 +146,92 @@ def _file_send_query(text: str) -> str:
     return ""
 
 
+def _parse_reminder(spec: str):
+    """'/hatirlat <zaman> <mesaj>' gövdesini çözümler.
+    Dönüş: (datetime, mesaj, None) ya da (None, None, hata_mesajı)."""
+    spec = (spec or "").strip()
+    now = datetime.now()
+    usage = (
+        "Zamanı anlayamadım. Örnekler:\n"
+        "/hatirlat 30 ekmek al  (30 dakika sonra)\n"
+        "/hatirlat 2sa toplantı var  (2 saat sonra)\n"
+        "/hatirlat 18:30 ilaç iç  (bugün/yarın o saatte)\n"
+        "/hatirlat yarın 09:00 doktor randevusu\n"
+        "/hatirlat 25.09 14:00 fatura öde"
+    )
+    if not spec:
+        return None, None, usage
+
+    m = re.match(r'^(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?\s+(\d{1,2})[:.](\d{2})\s+(.+)$', spec)
+    if m:
+        day, month, year, hh, mm, msg = m.groups()
+        day, month, hh, mm = int(day), int(month), int(hh), int(mm)
+        had_year = bool(year)
+        year = int(year) if year else now.year
+        if year < 100:
+            year += 2000
+        try:
+            due = datetime(year, month, day, hh, mm)
+        except ValueError:
+            return None, None, "Geçersiz tarih/saat."
+        if due < now:
+            if had_year:
+                return None, None, "Bu tarih/saat geçmişte kalıyor."
+            try:
+                due = due.replace(year=year + 1)
+            except ValueError:
+                return None, None, "Geçersiz tarih."
+        return due, msg.strip(), None
+
+    m = re.match(r'^yar[ıi]n\s+(\d{1,2})[:.](\d{2})\s+(.+)$', spec, re.IGNORECASE)
+    if m:
+        hh, mm, msg = m.groups()
+        hh, mm = int(hh), int(mm)
+        if hh > 23 or mm > 59:
+            return None, None, "Geçersiz saat."
+        due = (now + timedelta(days=1)).replace(hour=hh, minute=mm, second=0, microsecond=0)
+        return due, msg.strip(), None
+
+    m = re.match(r'^bug[üu]n\s+(\d{1,2})[:.](\d{2})\s+(.+)$', spec, re.IGNORECASE)
+    if m:
+        hh, mm, msg = m.groups()
+        hh, mm = int(hh), int(mm)
+        if hh > 23 or mm > 59:
+            return None, None, "Geçersiz saat."
+        due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if due < now:
+            due += timedelta(days=1)
+        return due, msg.strip(), None
+
+    m = re.match(r'^(\d{1,2})[:.](\d{2})\s+(.+)$', spec)
+    if m:
+        hh, mm, msg = m.groups()
+        hh, mm = int(hh), int(mm)
+        if hh > 23 or mm > 59:
+            return None, None, "Geçersiz saat."
+        due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if due <= now:
+            due += timedelta(days=1)
+        return due, msg.strip(), None
+
+    m = re.match(r'^(\d{1,4})\s*(?:dk|dakika|dakka)\.?\s+(.+)$', spec, re.IGNORECASE)
+    if m:
+        n, msg = m.groups()
+        return now + timedelta(minutes=int(n)), msg.strip(), None
+
+    m = re.match(r'^(\d{1,3})\s*(?:sa|saat)\.?\s+(.+)$', spec, re.IGNORECASE)
+    if m:
+        n, msg = m.groups()
+        return now + timedelta(hours=int(n)), msg.strip(), None
+
+    m = re.match(r'^(\d{1,4})\s+(.+)$', spec)
+    if m:
+        n, msg = m.groups()
+        return now + timedelta(minutes=int(n)), msg.strip(), None
+
+    return None, None, usage
+
+
 HELP_TEXT = (
     "🤖 *MehburAI Uzaktan Kontrol*\n"
     "Bana normal bir mesaj yaz — GUI'deki sohbet kutusu gibi yanıtlarım "
@@ -159,6 +247,12 @@ HELP_TEXT = (
     "sesli mesaj olarak da alırsın (Telegram Bot API gerçek arama/çağrı başlatamaz — "
     "bu, sesli mesaj alışverişiyle çağrı hissi veren bir moddur)\n"
     "• /aramabitir — sesli görüşmeyi bitir\n"
+    "• /hatirlat <zaman> <mesaj> — zamanlı hatırlatma kur, örn:\n"
+    "     /hatirlat 30 ekmek al · /hatirlat 2sa toplantı var\n"
+    "     /hatirlat 18:30 ilaç iç · /hatirlat yarın 09:00 doktor\n"
+    "     /hatirlat 25.09 14:00 fatura öde\n"
+    "• /hatirlatmalarim — bekleyen hatırlatmaları listele\n"
+    "• /hatirlatiptal <id> — bir hatırlatmayı iptal et\n"
     "• /yardim — bu mesaj"
 )
 
@@ -169,6 +263,9 @@ BOT_COMMANDS = [
     ("ekran", "🖥️ Ekran görüntüsü gönder"),
     ("foto", "📷 Kameradan fotoğraf gönder"),
     ("dosya", "📁 Dosya ara ve gönder"),
+    ("hatirlat", "⏰ Hatırlatma kur"),
+    ("hatirlatmalarim", "📋 Bekleyen hatırlatmalar"),
+    ("hatirlatiptal", "🗑️ Hatırlatma iptal et"),
     ("durum", "🤖 Bot durumu"),
     ("yardim", "❓ Komut listesi"),
 ]
@@ -180,6 +277,8 @@ class TelegramControlBot:
     API = "https://api.telegram.org"
     POLL_TIMEOUT = 50            # getUpdates long-poll süresi (sn)
     CAPTURE_DIR = os.path.join(DATA_DIR, "remote_captures")
+    REMINDERS_PATH = os.path.join(DATA_DIR, "reminders.json")
+    REMINDER_CHECK_SECONDS = 15
 
     def __init__(
         self,
@@ -199,6 +298,10 @@ class TelegramControlBot:
         self._rejected: dict = {}       # yetkisiz chat_id -> son ret zamanı (spam engeli)
         self._pending_choices: dict = {}  # seçim_id -> (ts, [yol, ...]) — "hangisini?" için
         self._call_mode: bool = False   # 🎙️ /arama açıkken yanıtlar ayrıca sesli mesaj olarak da gider
+        self._reminders: List[dict] = []   # {"id", "due_ts", "message", "created_ts"}
+        self._reminders_lock = threading.Lock()
+        self._reminder_thread: Optional[threading.Thread] = None
+        self._load_reminders()
 
     # ── kimlik bilgileri ──────────────────────
     def _creds(self):
@@ -229,6 +332,11 @@ class TelegramControlBot:
             target=self._loop, name="MehburAI-TelegramBot", daemon=True
         )
         self._thread.start()
+        if self._reminder_thread is None or not self._reminder_thread.is_alive():
+            self._reminder_thread = threading.Thread(
+                target=self._reminder_loop, name="MehburAI-Reminders", daemon=True
+            )
+            self._reminder_thread.start()
         return True
 
     def stop(self) -> None:
@@ -236,6 +344,76 @@ class TelegramControlBot:
 
     def is_running(self) -> bool:
         return self._running and self._thread is not None and self._thread.is_alive()
+
+    # ── ⏰ hatırlatmalar ───────────────────────
+    def _load_reminders(self) -> None:
+        try:
+            with open(self.REMINDERS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                self._reminders = [r for r in data if isinstance(r, dict) and "due_ts" in r]
+        except (OSError, ValueError):
+            self._reminders = []
+
+    def _save_reminders(self) -> None:
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(self.REMINDERS_PATH, "w", encoding="utf-8") as f:
+                json.dump(self._reminders, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    def _reminder_loop(self) -> None:
+        while self._running:
+            now = time.time()
+            due = []
+            with self._reminders_lock:
+                if any(r["due_ts"] <= now for r in self._reminders):
+                    due = [r for r in self._reminders if r["due_ts"] <= now]
+                    self._reminders = [r for r in self._reminders if r["due_ts"] > now]
+                    self._save_reminders()
+            for r in due:
+                self._send(f"⏰ Hatırlatma: {r['message']}")
+            time.sleep(self.REMINDER_CHECK_SECONDS)
+
+    def _add_reminder(self, spec: str) -> None:
+        due_dt, message, err = _parse_reminder(spec)
+        if err:
+            self._send(f"⚠️ {err}")
+            return
+        rid = uuid.uuid4().hex[:6]
+        entry = {"id": rid, "due_ts": due_dt.timestamp(), "message": message,
+                 "created_ts": time.time()}
+        with self._reminders_lock:
+            self._reminders.append(entry)
+            self._reminders.sort(key=lambda r: r["due_ts"])
+            self._save_reminders()
+        when = due_dt.strftime("%d.%m.%Y %H:%M")
+        self._send(f"⏰ Hatırlatma kuruldu [{rid}]: {when}\n«{message}»")
+
+    def _list_reminders(self) -> None:
+        with self._reminders_lock:
+            items = sorted(self._reminders, key=lambda r: r["due_ts"])
+        if not items:
+            self._send("⏰ Bekleyen hatırlatma yok.")
+            return
+        lines = ["⏰ Bekleyen hatırlatmalar:"]
+        for r in items:
+            when = datetime.fromtimestamp(r["due_ts"]).strftime("%d.%m.%Y %H:%M")
+            lines.append(f"• [{r['id']}] {when} — {r['message']}")
+        lines.append("\nİptal için: /hatirlatiptal <id>")
+        self._send("\n".join(lines))
+
+    def _cancel_reminder(self, rid: str) -> None:
+        rid = rid.strip()
+        with self._reminders_lock:
+            before = len(self._reminders)
+            self._reminders = [r for r in self._reminders if r["id"] != rid]
+            removed = before != len(self._reminders)
+            if removed:
+                self._save_reminders()
+        self._send(f"🗑️ Hatırlatma iptal edildi [{rid}]." if removed
+                   else f"⚠️ '{rid}' id'li bekleyen bir hatırlatma yok. /hatirlatmalarim ile listeyi gör.")
 
     # ── ana döngü ─────────────────────────────
     def _register_commands(self) -> bool:
@@ -419,6 +597,22 @@ class TelegramControlBot:
                 return
             if cmd in ("aramabitir", "aramakapat", "aramayibitir", "endcall"):
                 self._end_call()
+                return
+            if cmd in ("hatirlat", "hatırlat", "reminder"):
+                if rest:
+                    self._add_reminder(rest)
+                else:
+                    self._send("Kullanım: /hatirlat <zaman> <mesaj>\n"
+                               "Örn: /hatirlat 30 ekmek al · /hatirlat 18:30 ilaç iç")
+                return
+            if cmd in ("hatirlatmalarim", "hatırlatmalarım", "hatirlatmalar", "hatırlatmalar"):
+                self._list_reminders()
+                return
+            if cmd in ("hatirlatiptal", "hatırlatiptal", "hatirlatmaiptal"):
+                if rest:
+                    self._cancel_reminder(rest)
+                else:
+                    self._send("Kullanım: /hatirlatiptal <id>  (/hatirlatmalarim ile id'leri gör)")
                 return
             self._send(f"Bilinmeyen komut: /{cmd}\n/yardim ile komut listesini gör.")
             return

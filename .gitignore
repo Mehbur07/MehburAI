@@ -62,6 +62,9 @@ data/security_snapshots/
 # Telegram uzaktan kontrol — geçici ekran görüntüleri (kişisel, repoya girmez)
 data/remote_captures/
 
+# ⏰ Telegram hatırlatmaları (kişisel içerik, repoya girmez)
+data/reminders.json
+
 # Sesli sohbet — indirilen Vosk Türkçe modeli (~35 MB, ilk açılışta iner)
 data/models/
 

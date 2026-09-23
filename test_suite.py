@@ -49,7 +49,7 @@ def run_full_validation():
     print("  🤖 MEHBUR AI — FAZ 5 ENTEGRASYON VE DOĞRULAMA TESTLERİ")
     print("=" * 65)
     passed_tests = 0
-    total_tests = 24
+    total_tests = 25
 
     memory = MemoryEngine()
     network = NetworkMonitor()
@@ -1400,6 +1400,90 @@ def run_full_validation():
         ai.gemini.generate_response = _orig_gen24
     print("  • AIEngine matematik sorularını Gemini'ye hiç sormadan yanıtlıyor ✓")
     print("  ✅ TEST 24 BAŞARILI: Yerel matematik çözücü hazır, Gemini token'ı israf etmiyor.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 25: ⏰ Telegram Hatırlatmaları
+    # ─────────────────────────────────────────
+    print("\n[TEST 25] ⏰ Telegram Hatırlatmaları:")
+    import time as _time25
+    from datetime import datetime as _dt25, timedelta as _td25
+
+    import telegram_bot as _tb25
+    from telegram_bot import _parse_reminder
+
+    # 25a. Zaman biçimleri doğru çözümleniyor
+    _now25 = _dt25.now()
+    _due, _msg, _err = _parse_reminder("30 ekmek al")
+    assert _err is None and _msg == "ekmek al"
+    assert abs((_due - _now25).total_seconds() - 30 * 60) < 5
+
+    _due, _msg, _err = _parse_reminder("2sa toplantı var")
+    assert _err is None and _msg == "toplantı var"
+    assert abs((_due - _now25).total_seconds() - 2 * 3600) < 5
+
+    _due, _msg, _err = _parse_reminder("18:30 ilaç iç")
+    assert _err is None and _msg == "ilaç iç" and _due.hour == 18 and _due.minute == 30
+    assert _due > _now25  # bugün geçtiyse otomatik yarına kayar
+
+    _due, _msg, _err = _parse_reminder("yarın 09:00 doktor randevusu")
+    assert _err is None and _due.date() == (_now25 + _td25(days=1)).date() and _due.hour == 9
+
+    _due, _msg, _err = _parse_reminder("25.12 14:00 fatura öde")
+    assert _err is None and _due.day == 25 and _due.month == 12 and _due.hour == 14
+
+    assert _parse_reminder("")[2] is not None
+    assert _parse_reminder("saçmalık metin")[2] is not None
+    print("  • '30dk', '2sa', '18:30', 'yarın HH:MM', 'GG.AA HH:MM' biçimleri doğru çözümleniyor ✓")
+
+    # 25b. Kurma / listeleme / iptal — gerçek dosyaya yazmadan (kaydetme mocklanır)
+    _bot25 = _tb25.TelegramControlBot(query_handler=lambda t: "ok")
+    _bot25._reminders = []
+    _saved25 = []
+    _bot25._save_reminders = lambda: _saved25.append(1)
+    _out25 = []
+    _bot25._send = lambda s: _out25.append(s)
+
+    _bot25._add_reminder("5 su iç")
+    assert len(_bot25._reminders) == 1 and _bot25._reminders[0]["message"] == "su iç"
+    assert _saved25, "hatırlatma eklenince kaydedilmeli"
+    _rid25 = _bot25._reminders[0]["id"]
+    assert any("kuruldu" in s.lower() for s in _out25)
+
+    _out25.clear()
+    _bot25._list_reminders()
+    assert _out25 and "su iç" in _out25[0]
+
+    _out25.clear()
+    _bot25._cancel_reminder(_rid25)
+    assert not _bot25._reminders
+    assert any("iptal edildi" in s.lower() for s in _out25)
+
+    _out25.clear()
+    _bot25._cancel_reminder("olmayanid")
+    assert any("yok" in s.lower() for s in _out25)
+    print("  • /hatirlat kuruyor, /hatirlatmalarim listeliyor, /hatirlatiptal siliyor ✓")
+
+    # 25c. Süresi gelen hatırlatma arka plan döngüsünde tetiklenip gönderiliyor ve listeden düşüyor
+    _bot25._reminders = [{"id": "abc123", "due_ts": _time25.time() - 1, "message": "geçmiş hatırlatma"}]
+    _bot25._running = True
+    _orig_sleep25 = _tb25.time.sleep
+    _tb25.time.sleep = lambda s: None
+
+    def _stop_after_send25(s):
+        _out25.append(s)
+        _bot25._running = False
+
+    _bot25._send = _stop_after_send25
+    try:
+        _bot25._reminder_loop()  # _running kapanana dek (tek geçiş) döner
+    finally:
+        _tb25.time.sleep = _orig_sleep25
+    assert any("geçmiş hatırlatma" in s for s in _out25)
+    assert _bot25._reminders == []
+    print("  • Süresi gelen hatırlatma arka planda tetiklenip gönderiliyor, listeden düşüyor ✓")
+
+    print("  ✅ TEST 25 BAŞARILI: ⏰ Hatırlatma sistemi hazır.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
