@@ -60,6 +60,23 @@ def _latest_from_source(timeout: float) -> Optional[Tuple[str, str]]:
     return m.group(1), UPDATE_PAGE_URL
 
 
+def fetch_latest_release_notes(timeout: float = 6.0) -> Optional[str]:
+    """En son GitHub Release'in açıklama metnini döndürür; alınamazsa (ağ yok / depo
+    henüz release yayınlamamış) sessizce None döner."""
+    try:
+        r = requests.get(f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+                         headers=_HEADERS, timeout=timeout)
+    except requests.RequestException:
+        return None
+    if r.status_code != 200:
+        return None
+    try:
+        body = (r.json().get("body") or "").strip()
+    except ValueError:
+        return None
+    return body or None
+
+
 def check_for_update(current: str = APP_VERSION, timeout: float = 6.0) -> Optional[Dict[str, str]]:
     """
     Yeni sürüm varsa {"current", "latest", "url"} döndürür; yoksa (ya da denetlenemezse) None.

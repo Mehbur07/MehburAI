@@ -18,11 +18,15 @@ Neon Cyan & Derin Siyah temalı CustomTkinter masaüstü arayüzü.
 import math
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
+import urllib.request
 import webbrowser
+import zipfile
 from datetime import datetime
 from tkinter import filedialog, messagebox
 from typing import Optional
@@ -34,18 +38,21 @@ from auto_learner import IdleLearner
 from config import (
     APP_VERSION,
     DATA_DIR,
+    GITHUB_REPO,
     THEME_ACCENTS,
     THEME_BACKGROUNDS,
     Theme,
     derive_theme_colors,
     ensure_app_icon,
     get_api_key,
+    get_last_seen_version,
     get_learn_config,
     get_logo_path,
     get_security_config,
     get_theme_config,
     get_voice_config,
     reset_theme_config,
+    set_last_seen_version,
     update_learn_config,
     update_theme_config,
     is_valid_bot_token,
@@ -58,7 +65,7 @@ from config import (
 from memory_engine import MemoryEngine
 from network_manager import NetworkMonitor
 from telegram_bot import TelegramControlBot, TelegramNotifier
-from updater import check_for_update
+from updater import check_for_update, fetch_latest_release_notes
 from background import SingleInstance, is_autostart_enabled, restart_app, set_autostart
 
 try:
@@ -90,6 +97,7 @@ class MehburApp(ctk.CTk):
 
     def __init__(self, start_hidden: bool = False, singleton=None):
         super().__init__()
+        self._start_hidden = start_hidden
 
         # Pencere Başlığı ve Boyutları
         self.title("MehburAI — Hibrit Akıllı Asistan")
@@ -170,6 +178,9 @@ class MehburApp(ctk.CTk):
         # Yeni sürüm var mı? (pencere çizildikten sonra arka planda, sessizce)
         self.after(4000, self._check_for_updates)
 
+        # 🎉 Az önce güncellendiysek yenilikleri göster (arka planda/gizli açılışta değil)
+        self.after(1200, self._maybe_show_whats_new)
+
         # Sohbet listesi + aktif sohbetin geçmişi
         self._refresh_conversation_list()
         self._load_active_conversation()
@@ -238,6 +249,7 @@ class MehburApp(ctk.CTk):
     def _build_update_banner(self):
         """Pencerenin altındaki uyarı şeridi — yeni sürüm bulunana kadar gizli."""
         self._update_url = ""
+        self._update_in_progress = False
         self.update_banner = ctk.CTkFrame(
             self, fg_color=Theme.BG_CARD, corner_radius=10,
             border_width=1, border_color=Theme.STATUS_WARNING,
@@ -252,13 +264,22 @@ class MehburApp(ctk.CTk):
         )
         self.update_msg_lbl.grid(row=0, column=0, sticky="w", padx=14, pady=(10, 2))
 
-        self.update_link_lbl = ctk.CTkLabel(
-            self.update_banner, text="", cursor="hand2", anchor="w",
-            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=13, underline=True),
-            text_color=Theme.CYAN_PRIMARY,
+        self.update_action_row = ctk.CTkFrame(self.update_banner, fg_color="transparent")
+        self.update_action_row.grid(row=1, column=0, sticky="w", padx=14, pady=(2, 2))
+
+        self.update_btn = ctk.CTkButton(
+            self.update_action_row, text="🔄 Şimdi Güncelle", width=160, height=30,
+            fg_color=Theme.CYAN_PRIMARY, text_color=Theme.BG_DARKEST, hover_color=Theme.BTN_HOVER_BG,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold"),
+            command=self._start_in_app_update,
         )
-        self.update_link_lbl.grid(row=1, column=0, sticky="w", padx=14, pady=(0, 2))
-        self.update_link_lbl.bind("<Button-1>", lambda e: self._open_update_page())
+        self.update_btn.pack(side="left")
+
+        self.update_status_lbl = ctk.CTkLabel(
+            self.update_action_row, text="", anchor="w",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11), text_color=Theme.TEXT_SECONDARY,
+        )
+        self.update_status_lbl.pack(side="left", padx=(10, 0))
 
         self.update_ver_lbl = ctk.CTkLabel(
             self.update_banner, text="", anchor="w",
@@ -273,10 +294,6 @@ class MehburApp(ctk.CTk):
         ).grid(row=0, column=1, rowspan=2, padx=(0, 10), pady=8, sticky="ne")
 
         self.update_banner.grid_remove()
-
-    def _open_update_page(self):
-        if self._update_url.startswith("https://"):
-            webbrowser.open(self._update_url)
 
     def _check_for_updates(self):
         """Açılışta (ve açık kaldıkça 6 saatte bir) yeni sürümü arka planda denetler."""
@@ -294,12 +311,137 @@ class MehburApp(ctk.CTk):
         if not info or not self.update_banner.winfo_exists():
             return
         self._update_url = info["url"]
-        self.update_msg_lbl.configure(
-            text="Uyarı: Yeni sürüm yayınlandı. Eğer yeni sürümü yüklemek istiyorsanız "
-                 "bu bağlantıya tıklayın:")
-        self.update_link_lbl.configure(text=info["url"])
+        self.update_msg_lbl.configure(text="🔔 Yeni sürüm yayınlandı!")
         self.update_ver_lbl.configure(text=f"Sizdeki sürüm: {info['current']}  •  Yeni sürüm: {info['latest']}")
         self.update_banner.grid()
+
+    # ─────────────────────────────────────────
+    # 🔄 Tek Tuşla Güncelleme
+    # ─────────────────────────────────────────
+    # Bant üzerindeki "Şimdi Güncelle" düğmesi artık kullanıcıyı GitHub'a
+    # yönlendirmiyor: küçük çevrimiçi kurucuyu (MehburAI.Setup.exe, GitHub
+    # Release'teki MehburAI.zip içinde) indirip çalıştırıyor. O da kendi
+    # penceresinde ilerlemeyi gösterip uygulama dosyalarını günceller
+    # (ayarlar/hafıza korunur) ve güncelleme bitince MehburAI'ı kendisi açar.
+
+    def _start_in_app_update(self):
+        if self._update_in_progress:
+            return
+        self._update_in_progress = True
+        self.update_btn.configure(state="disabled", text="🔄 Güncelleniyor…")
+        self.update_status_lbl.configure(text="İndiriliyor…", text_color=Theme.TEXT_SECONDARY)
+
+        def work():
+            try:
+                setup_path = self._download_setup_exe(
+                    lambda t: self._ui_call(lambda: self.update_status_lbl.configure(text=t)))
+            except Exception as e:
+                self._ui_call(lambda: self._update_failed(str(e)))
+                return
+            self._ui_call(lambda: self._launch_updater(setup_path))
+
+        threading.Thread(target=work, daemon=True, name="MehburAI-SelfUpdate").start()
+
+    @staticmethod
+    def _download_setup_exe(on_status) -> str:
+        """En son MehburAI.Setup.exe'yi GitHub Release'inden geçici bir klasöre indirir, döner."""
+        url = f"https://github.com/{GITHUB_REPO}/releases/latest/download/MehburAI.zip"
+        tmp_dir = tempfile.mkdtemp(prefix="mehburai_update_")
+        zip_path = os.path.join(tmp_dir, "MehburAI.zip")
+        on_status("İndiriliyor… (kurulum dosyası alınıyor)")
+        req = urllib.request.Request(url, headers={"User-Agent": "MehburAI-update"})
+        with urllib.request.urlopen(req, timeout=30) as r, open(zip_path, "wb") as f:
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+        if not zipfile.is_zipfile(zip_path):
+            raise IOError("İndirilen dosya geçerli bir paket değil.")
+        on_status("Kurulum dosyası hazırlanıyor…")
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(tmp_dir)
+        setup_exe = os.path.join(tmp_dir, "MehburAI.Setup.exe")
+        if not os.path.isfile(setup_exe):
+            raise IOError("Kurulum dosyası pakette bulunamadı.")
+        return setup_exe
+
+    def _launch_updater(self, setup_path: str):
+        self.update_status_lbl.configure(text="Kurulum başlatılıyor…")
+        try:
+            subprocess.Popen([setup_path], cwd=os.path.dirname(setup_path))
+        except Exception as e:
+            self._update_failed(str(e))
+            return
+        # MehburAI.Setup.exe kendi penceresinde indirip kuracak, ardından MehburAI'ı
+        # kendisi yeniden başlatacak — bu pencere onun önüne geçmesin diye kapanıyoruz.
+        self.update_status_lbl.configure(text="Kurulum penceresi açıldı, MehburAI kapatılıyor…")
+        self.after(2000, self._real_quit)
+
+    def _update_failed(self, msg: str):
+        self._update_in_progress = False
+        self.update_btn.configure(state="normal", text="🔄 Şimdi Güncelle")
+        self.update_status_lbl.configure(text=f"⚠️ Güncelleme başarısız: {msg}", text_color=Theme.STATUS_OFFLINE)
+
+    # ─────────────────────────────────────────
+    # 🎉 Güncelleme Sonrası "Yenilikler" Penceresi
+    # ─────────────────────────────────────────
+
+    def _maybe_show_whats_new(self):
+        """Sürüm son açılıştan beri değiştiyse (yeni güncellendiysek) bir kez gösterir."""
+        if self._start_hidden:
+            return   # arka planda/tepside sessiz açılışta gösterme
+        if get_last_seen_version() == APP_VERSION:
+            return
+        set_last_seen_version(APP_VERSION)
+        self._show_whats_new_dialog()
+
+    def _show_whats_new_dialog(self):
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Yenilikler")
+        dlg.geometry("460x340")
+        dlg.transient(self)
+        dlg.attributes("-topmost", True)
+        dlg.after(120, dlg.grab_set)
+
+        ctk.CTkLabel(
+            dlg, text=f"🎉 MehburAI v{APP_VERSION}'a güncellendi!",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=15, weight="bold"),
+            text_color=Theme.CYAN_PRIMARY,
+        ).pack(padx=16, pady=(18, 10))
+
+        notes_box = ctk.CTkTextbox(
+            dlg, width=420, height=200, wrap="word",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+            fg_color=Theme.BG_INPUT, text_color=Theme.TEXT_PRIMARY,
+        )
+        notes_box.pack(padx=16, pady=(0, 12), fill="both", expand=True)
+        notes_box.insert("1.0", "Sürüm notları yükleniyor…")
+        notes_box.configure(state="disabled")
+
+        ctk.CTkButton(
+            dlg, text="Tamam", width=120, fg_color=Theme.CYAN_PRIMARY, text_color=Theme.BG_DARKEST,
+            command=dlg.destroy,
+        ).pack(pady=(0, 16))
+
+        def work():
+            try:
+                notes = fetch_latest_release_notes()
+            except Exception:
+                notes = None
+
+            def apply():
+                if not dlg.winfo_exists():
+                    return
+                notes_box.configure(state="normal")
+                notes_box.delete("1.0", "end")
+                notes_box.insert("1.0", notes if notes else
+                                 "Bu sürümde iyileştirmeler ve düzeltmeler yapıldı.")
+                notes_box.configure(state="disabled")
+
+            self._ui_call(apply)
+
+        threading.Thread(target=work, daemon=True, name="MehburAI-WhatsNew").start()
 
     def _apply_window_icon(self):
         """Pencere / görev çubuğu ikonunu assets/logo.png'den uygular (varsa)."""

@@ -19,7 +19,7 @@ import sys
 #   • KÜÇÜK ekleme (ince ayar, küçük düzeltme/iyileştirme) → SON basamak artar: 1.2 → 1.2.1 → 1.2.2 → ...
 #     (bir sonraki BÜYÜK eklemede üçüncü basamak sıfırlanıp ORTA basamak artar, örn. 1.2.3 → 1.3)
 # (Elle güncellenir — kod her eklemede otomatik saymaz.)
-APP_VERSION = "1.8"
+APP_VERSION = "1.9"
 
 # Güncelleme denetimi (updater.py): yeni sürüm GitHub'da yayınlanınca eski sürümü olan
 # bilgisayarlarda uygulama açılınca uyarı çıkar. Depo herkese açık değilse denetim sessizce atlanır.
@@ -432,6 +432,18 @@ def set_api_key(api_key: str) -> None:
     cleaned = api_key.strip()
     config = load_config()
     config["gemini_api_key"] = cleaned
+    save_config(config)
+
+
+def get_last_seen_version() -> str:
+    """Kullanıcıya en son '🎉 Yenilikler' penceresinin gösterildiği sürüm."""
+    return (load_config().get("last_seen_version") or "").strip()
+
+
+def set_last_seen_version(version: str) -> None:
+    """'🎉 Yenilikler' penceresi gösterildikten sonra sürümü kalıcı olarak işaretler."""
+    config = load_config()
+    config["last_seen_version"] = version
     save_config(config)
 
 

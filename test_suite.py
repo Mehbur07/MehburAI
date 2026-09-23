@@ -49,7 +49,7 @@ def run_full_validation():
     print("  🤖 MEHBUR AI — FAZ 5 ENTEGRASYON VE DOĞRULAMA TESTLERİ")
     print("=" * 65)
     passed_tests = 0
-    total_tests = 25
+    total_tests = 26
 
     memory = MemoryEngine()
     network = NetworkMonitor()
@@ -1037,12 +1037,12 @@ def run_full_validation():
     print("  • Yeni sürüm bulununca bilgi dönüyor; aynı sürüm / 404 / ağ hatasında sessizce uyarı yok ✓")
 
     # 20c. Arayüzde şerit bileşenleri + varsayılan depo adresi
-    for m in ("_build_update_banner", "_check_for_updates", "_show_update_banner", "_open_update_page"):
+    for m in ("_build_update_banner", "_check_for_updates", "_show_update_banner"):
         assert hasattr(_gui.MehburApp, m), f"gui_app.MehburApp.{m} eksik"
     assert _cfg19.UPDATE_PAGE_URL.startswith("https://github.com/") and _cfg19.GITHUB_REPO in _cfg19.UPDATE_PAGE_URL
     import inspect as _insp20
     _src20 = _insp20.getsource(_gui.MehburApp._show_update_banner)
-    assert "Uyarı: Yeni sürüm yayınlandı." in _src20 and "bu bağlantıya tıklayın:" in _src20
+    assert "Yeni sürüm yayınlandı" in _src20
     print("  ✅ TEST 19 BAŞARILI: Güncelleme denetimi ve uyarı şeridi hazır.")
     passed_tests += 1
 
@@ -1484,6 +1484,63 @@ def run_full_validation():
     print("  • Süresi gelen hatırlatma arka planda tetiklenip gönderiliyor, listeden düşüyor ✓")
 
     print("  ✅ TEST 25 BAŞARILI: ⏰ Hatırlatma sistemi hazır.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 26: 🔄 Tek Tuşla Güncelleme + 🎉 Yenilikler Penceresi
+    # ─────────────────────────────────────────
+    print("\n[TEST 26] 🔄 Tek Tuşla Güncelleme + 🎉 Yenilikler:")
+    import inspect as _insp26
+
+    # 26a. updater.fetch_latest_release_notes: gövdeyi döndürür, hata/404/boşta sessizce None
+    _orig_get26 = _up.requests.get
+    try:
+        _up.requests.get = lambda url, **k: _Resp(200, {"body": "- Yeni özellik X\n- Düzeltme Y"})
+        assert _up.fetch_latest_release_notes() == "- Yeni özellik X\n- Düzeltme Y"
+        _up.requests.get = lambda url, **k: _Resp(200, {"body": "   "})
+        assert _up.fetch_latest_release_notes() is None
+        _up.requests.get = lambda url, **k: _Resp(404)
+        assert _up.fetch_latest_release_notes() is None
+
+        def _boom26(url, **k):
+            raise _up.requests.ConnectionError("yok")
+
+        _up.requests.get = _boom26
+        assert _up.fetch_latest_release_notes() is None
+    finally:
+        _up.requests.get = _orig_get26
+    print("  • fetch_latest_release_notes: gövdeyi getiriyor, ağ hatası/404/boşta sessizce None dönüyor ✓")
+
+    # 26b. Son görülen sürüm kalıcı bellekte doğru okunup yazılıyor
+    _prev_seen26 = _cfg19.get_last_seen_version()
+    try:
+        _cfg19.set_last_seen_version("1.7")
+        assert _cfg19.get_last_seen_version() == "1.7"
+        _cfg19.set_last_seen_version("1.8")
+        assert _cfg19.get_last_seen_version() == "1.8"
+    finally:
+        _cfg19.set_last_seen_version(_prev_seen26)
+    print("  • get/set_last_seen_version doğru kaydediyor/okuyor ✓")
+
+    # 26c. Arayüz: "Şimdi Güncelle" artık GitHub'a yönlendirmek yerine .exe indirip çalıştırıyor,
+    # ve az önce güncellendiysek (gizli açılış hariç) 'Yenilikler' penceresi bir kez gösteriliyor
+    for m in ("_start_in_app_update", "_download_setup_exe", "_launch_updater",
+              "_update_failed", "_maybe_show_whats_new", "_show_whats_new_dialog"):
+        assert hasattr(_gui.MehburApp, m), f"gui_app.MehburApp.{m} eksik"
+    assert not hasattr(_gui.MehburApp, "_open_update_page"), "eski 'tarayıcıda aç' davranışı kaldırılmalıydı"
+    _src26a = _insp26.getsource(_gui.MehburApp._start_in_app_update)
+    assert "_download_setup_exe" in _src26a and "_launch_updater" in _src26a
+    _src26b = _insp26.getsource(_gui.MehburApp._download_setup_exe)
+    assert "MehburAI.zip" in _src26b and "MehburAI.Setup.exe" in _src26b
+    _src26c = _insp26.getsource(_gui.MehburApp._launch_updater)
+    assert "subprocess.Popen" in _src26c and "_real_quit" in _src26c
+    _src26d = _insp26.getsource(_gui.MehburApp._maybe_show_whats_new)
+    assert ("_start_hidden" in _src26d and "get_last_seen_version" in _src26d
+            and "set_last_seen_version" in _src26d)
+    print("  • '🔄 Şimdi Güncelle' artık .exe indirip çalıştırıyor (tarayıcıya yönlendirmiyor) ✓")
+    print("  • Az önce güncellenince (gizli açılış hariç) 'Yenilikler' penceresi bir kez gösteriliyor ✓")
+
+    print("  ✅ TEST 26 BAŞARILI: Tek tuşla güncelleme + yenilikler penceresi hazır.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
