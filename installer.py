@@ -84,20 +84,75 @@ def is_update() -> bool:
     return os.path.isfile(os.path.join(INSTALL_DIR, EXE_NAME))
 
 
-def extract_payload(zip_path: str, install_dir: str, on_progress) -> None:
-    """Paketi install_dir'e açar; kullanıcı verisi (data/) varsa ezilmez."""
+# Kurulum penceresinde dosya adı yerine "ne işe yaradığı" gösterilir. Her dosya yolunun
+# başına göre bir özelliğe eşlenir (ilk eşleşen kazanır); eşleşmeyenler "temel sistem".
+BASE_FEATURE = "Temel sistem dosyaları (uygulamanın çalışması için)"
+FEATURES = [
+    ("Yapay zeka beyni (sohbet, internetten araştırma, yalan haber süzgeci)",
+     ("mehburai.exe",)),
+    ("Sesli komut (\"Hey Mehbur\" ve konuşarak yazma)", ("vosk/", "data/models/")),
+    ("Mikrofon ve ses çalma", ("_sounddevice_data/", "_soundfile_data/")),
+    ("Kamera ve görsel anlama", ("cv2/",)),
+    ("Resim çizme, fotoğraf düzenleme ve ekran görüntüsü", ("pil/",)),
+    ("Arayüz ve renk değiştirme", ("customtkinter/", "_tkinter", "tcl", "_tcl_data/", "_tk_data/",
+                                   "libtommath")),
+    ("Logo ve simgeler", ("assets/",)),
+    ("Ses ve görüntü işleme hesaplamaları", ("numpy",)),
+    ("Hafıza (öğrenilen bilgiler ve sohbet geçmişi)", ("sqlite3.dll", "_sqlite3")),
+    ("Güvenli internet bağlantısı", ("cryptography", "libssl", "libcrypto", "_ssl", "certifi/", "_hashlib")),
+    ("İnternet ve Telegram bağlantısı", ("aiohttp", "yarl", "multidict", "frozenlist", "propcache",
+                                         "charset_normalizer", "aiosignal", "_socket", "_asyncio",
+                                         "_overlapped", "select.pyd")),
+    ("Bilgisayar kontrolü (sistem bilgisi, program açma)", ("psutil", "_wmi")),
+]
+
+
+def feature_of(path: str) -> str:
+    p = path.replace("\\", "/").lower()
+    for label, prefixes in FEATURES:
+        if p.startswith(prefixes):
+            return label
+    return BASE_FEATURE
+
+
+class FeatureTracker:
+    """Bir özelliğin TÜM dosyaları kurulunca (yalnızca bir kez) o özelliğin adını döndürür."""
+
+    def __init__(self, names):
+        self._left = {}
+        for n in names:
+            f = feature_of(n)
+            self._left[f] = self._left.get(f, 0) + 1
+
+    def mark(self, name: str):
+        f = feature_of(name)
+        if f not in self._left:
+            return None
+        self._left[f] -= 1
+        if self._left[f] == 0:
+            del self._left[f]
+            return f
+        return None
+
+
+def extract_payload(zip_path: str, install_dir: str, on_progress, on_feature=None) -> None:
+    """Paketi install_dir'e açar; kullanıcı verisi (data/) varsa ezilmez.
+    on_feature(özellik_adı): bir özelliğin dosyalarının hepsi yerine konunca çağrılır."""
     root = os.path.abspath(install_dir)
     with zipfile.ZipFile(zip_path) as zf:
         members = zf.infolist()
         total = len(members)
+        tracker = FeatureTracker(m.filename for m in members)
         for i, m in enumerate(members, 1):
             dest = os.path.abspath(os.path.join(root, m.filename))
-            if not dest.startswith(root + os.sep):
-                continue            # zip-slip koruması
+            safe = dest.startswith(root + os.sep)          # zip-slip koruması
             # Kullanıcı verisi (ayarlar, hafıza, modeller) asla ezilmez
-            if m.filename.replace("\\", "/").startswith("data/") and os.path.exists(dest):
-                continue
-            zf.extract(m, root)
+            keep_user_data = m.filename.replace("\\", "/").startswith("data/") and os.path.exists(dest)
+            if safe and not keep_user_data:
+                zf.extract(m, root)
+            done = tracker.mark(m.filename)
+            if done and on_feature:
+                on_feature(done)
             on_progress(i / total)
 
 
@@ -120,8 +175,8 @@ def format_eta(seconds) -> str:
     return f"~{s // 60} dk {s % 60} sn"
 
 
-def install(on_status, on_progress) -> None:
-    """on_status(metin) durum yazısı; on_progress(0..1) çubuk."""
+def install(on_status, on_progress, on_feature=None) -> None:
+    """on_status(metin) durum yazısı; on_progress(0..1) çubuk; on_feature(ad) kurulan özellik."""
     bundled = payload_path()
     tmp = None
     try:
@@ -159,7 +214,7 @@ def install(on_status, on_progress) -> None:
                       + (f"  •  tahmini kalan süre: {format_eta(left)}" if left is not None else ""))
             on_progress(base + (1 - base) * f)
 
-        extract_payload(zip_path, INSTALL_DIR, ex)
+        extract_payload(zip_path, INSTALL_DIR, ex, on_feature)
         create_desktop_shortcut()
     finally:
         if tmp and os.path.isfile(tmp):
@@ -173,7 +228,7 @@ class SetupWindow(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("MehburAI Kurulum")
-        self.geometry("440x190")
+        self.geometry("520x420")
         self.resizable(False, False)
         self.configure(bg="#0a0e14")
         icon = os.path.join(getattr(sys, "_MEIPASS", ""), "logo.ico")
@@ -188,14 +243,27 @@ class SetupWindow(tk.Tk):
                                            else "Kuruluyor…"), font=("Segoe UI", 10),
                                fg="#cfd8dc", bg="#0a0e14", wraplength=410, justify="center")
         self.status.pack()
-        self.bar = ttk.Progressbar(self, length=340, maximum=1.0)
-        self.bar.pack(pady=16)
+        self.bar = ttk.Progressbar(self, length=420, maximum=1.0)
+        self.bar.pack(pady=(14, 8))
+
+        self._verb = "güncellendi" if is_update() else "indirildi"
+        self.features = tk.Text(self, height=12, width=62, font=("Segoe UI", 9), bg="#111823",
+                                fg="#9be7a0", relief="flat", highlightthickness=0, wrap="word",
+                                padx=8, pady=6, state="disabled")
+        self.features.pack(padx=16, pady=(0, 12), fill="both", expand=True)
         threading.Thread(target=self._run, daemon=True).start()
+
+    def _add_feature(self, name: str):
+        self.features.configure(state="normal")
+        self.features.insert("end", f"✅ {name} {self._verb}\n")
+        self.features.see("end")
+        self.features.configure(state="disabled")
 
     def _run(self):
         try:
             install(lambda t: self.after(0, lambda: self.status.configure(text=t)),
-                    lambda f: self.after(0, lambda: self.bar.configure(value=f)))
+                    lambda f: self.after(0, lambda: self.bar.configure(value=f)),
+                    lambda name: self.after(0, lambda: self._add_feature(name)))
             self.after(0, self._done)
         except Exception as e:
             self.after(0, lambda: self.status.configure(
@@ -206,7 +274,7 @@ class SetupWindow(tk.Tk):
         self.status.configure(text="Kurulum tamamlandı — masaüstüne kısayol eklendi, MehburAI başlatılıyor…")
         exe = os.path.join(INSTALL_DIR, EXE_NAME)
         subprocess.Popen([exe], cwd=INSTALL_DIR, creationflags=NO_WINDOW)
-        self.after(1500, self.destroy)
+        self.after(4000, self.destroy)     # listenin okunabilmesi için biraz açık kalır
 
 
 if __name__ == "__main__":

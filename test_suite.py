@@ -49,7 +49,7 @@ def run_full_validation():
     print("  🤖 MEHBUR AI — FAZ 5 ENTEGRASYON VE DOĞRULAMA TESTLERİ")
     print("=" * 65)
     passed_tests = 0
-    total_tests = 27
+    total_tests = 28
 
     memory = MemoryEngine()
     network = NetworkMonitor()
@@ -1673,6 +1673,65 @@ def run_full_validation():
     print("  • Tüm kaynaklar güvenilirse arama sonucu kullanılıyor, altyazıda süzgeçten geçtiği belirtiliyor ✓")
 
     print("  ✅ TEST 27 BAŞARILI: Tüm kaynaklardan arama, yalan haber süzgeci ve çok dilli yanıt hazır.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 28: 📦 Kurucu, dosya adı yerine "ne indirildiğini" (özellik adını) gösteriyor
+    # ─────────────────────────────────────────
+    print("\n[TEST 28] Kurucuda İndirilen Özellikler Listesi:")
+    import os as _os28
+    import tempfile as _tmp28
+    import zipfile as _zip28
+
+    # 28a. Dosya yolları doğru özelliğe eşleniyor; bilinmeyenler 'temel sistem'e düşüyor
+    _ff = _inst22.feature_of
+    assert _ff("MehburAI.exe").startswith("Yapay zeka beyni")
+    assert _ff("customtkinter/windows/ctk_tk.py") == "Arayüz ve renk değiştirme"
+    assert _ff("vosk/libvosk.dll") == _ff("data/models/vosk-model-small-tr/am/final.mdl")
+    assert _ff("cv2/cv2.pyd") == "Kamera ve görsel anlama"
+    assert _ff("assets\\logo.ico") == "Logo ve simgeler"
+    assert _ff("python314.dll") == _inst22.BASE_FEATURE
+    for _label, _ in _inst22.FEATURES:
+        assert not any(ext in _label.lower() for ext in (".dll", ".exe", ".pyd", ".zip", "/")), _label
+    print("  • Dosyalar özelliklere eşleniyor; etiketlerde dosya adı yok ('Arayüz ve renk değiştirme' gibi) ✓")
+
+    # 28b. Kurulumda her özellik, TÜM dosyaları yerine konunca yalnızca bir kez bildiriliyor
+    _d28 = _tmp28.mkdtemp()
+    _z28 = _os28.path.join(_d28, "p.zip")
+    with _zip28.ZipFile(_z28, "w") as _zf28:
+        for _n in ("MehburAI.exe", "cv2/a.pyd", "cv2/b.pyd", "customtkinter/x.py",
+                   "python314.dll", "data/models/m.bin"):
+            _zf28.writestr(_n, "x")
+    _seen28 = []
+    _inst22.extract_payload(_z28, _os28.path.join(_d28, "kur"), lambda f: None, _seen28.append)
+    assert len(_seen28) == len(set(_seen28)) == 5, _seen28
+    assert "Kamera ve görsel anlama" in _seen28 and "Arayüz ve renk değiştirme" in _seen28
+    assert _os28.path.isfile(_os28.path.join(_d28, "kur", "cv2", "b.pyd"))
+
+    # güncellemede kullanıcı verisi (data/) atlansa da o özellik yine 'tamam' sayılıyor
+    _seen28b = []
+    _inst22.extract_payload(_z28, _os28.path.join(_d28, "kur"), lambda f: None, _seen28b.append)
+    assert sorted(_seen28b) == sorted(_seen28), _seen28b
+    print("  • Her özellik tüm dosyaları kurulunca bir kez listeleniyor (güncellemede de) ✓")
+
+    # 28c. Gerçek paket (varsa): her dosya bir özelliğe düşüyor, kamera/ses/arayüz listede
+    _real28 = _os28.path.join(_os28.path.dirname(_os28.path.abspath(__file__)), "dist", "MehburAI-payload.zip")
+    if _os28.path.isfile(_real28):
+        with _zip28.ZipFile(_real28) as _rz:
+            _names28 = {_ff(n) for n in _rz.namelist()}
+        for _must in ("Kamera ve görsel anlama", "Arayüz ve renk değiştirme", "Logo ve simgeler",
+                      "Sesli komut (\"Hey Mehbur\" ve konuşarak yazma)"):
+            assert _must in _names28, _must
+        print(f"  • Gerçek pakette {len(_names28)} özellik grubu bulundu ✓")
+    else:
+        print("  • (dist/MehburAI-payload.zip yok — gerçek paket kontrolü atlandı)")
+
+    # 28d. Kurulum penceresi özellikleri '... indirildi' / '... güncellendi' diye yazıyor
+    _src28 = _insp26.getsource(_inst22.SetupWindow)
+    assert "indirildi" in _src28 and "güncellendi" in _src28 and "_add_feature" in _src28
+    print("  • Kurulum penceresi '✅ <özellik> indirildi/güncellendi' satırları gösteriyor ✓")
+
+    print("  ✅ TEST 28 BAŞARILI: Kurucu, indirilenleri ne işe yaradıklarıyla listeliyor.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
