@@ -19,7 +19,7 @@ import sys
 #   • KÜÇÜK ekleme (ince ayar, küçük düzeltme/iyileştirme) → SON basamak artar: 1.2 → 1.2.1 → 1.2.2 → ...
 #     (bir sonraki BÜYÜK eklemede üçüncü basamak sıfırlanıp ORTA basamak artar, örn. 1.2.3 → 1.3)
 # (Elle güncellenir — kod her eklemede otomatik saymaz.)
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 
 # Güncelleme denetimi (updater.py): yeni sürüm GitHub'da yayınlanınca eski sürümü olan
 # bilgisayarlarda uygulama açılınca uyarı çıkar. Depo herkese açık değilse denetim sessizce atlanır.
@@ -340,8 +340,150 @@ GREETING_RESPONSES = {
     "iyi günler": "İyi günler! 🌤️ Bugün hangi konuda yardımcı olabilirim?",
     "iyi akşamlar": "İyi akşamlar! 🌙 Sana nasıl yardımcı olabilirim?",
     "iyi geceler": "İyi geceler! 🌟 Uyumadan önce bir sorun varsa yardımcı olayım!",
+    "tesekkur": "Rica ederim! 😊 Her zaman yardıma hazırım. Başka bir sorun var mı?",
     "default": "Merhaba! 👋 Ben MehburAI. Sana nasıl yardımcı olabilirim?",
 }
+
+# Başka dillerdeki selamlaşmalar → GREETING_RESPONSES anahtarı (tek kelimelikler yalnızca
+# mesajın tamamıysa, çok kelimelikler cümle içinde de geçerli — bkz. ai_engine.GreetingFilter).
+# ("halo/hallo" Türkçe günlük dilde de "alo/merhaba" anlamında kullanılır — Halo oyunu vb. sanılmasın.)
+FOREIGN_GREETINGS = {
+    "merhaba": [
+        "hallo", "halo", "hello", "hi", "hı", "hey", "hey there", "hi there", "hello there",
+        "bonjour", "salut", "hola", "ciao", "salve", "servus", "moin", "grüß gott", "grüss gott",
+        "привет", "здравствуйте", "здравствуй", "مرحبا", "اهلا", "أهلا", "السلام عليكم",
+        "你好", "您好", "こんにちは", "やあ",
+    ],
+    "günaydın": ["guten morgen", "good morning", "buenos días", "buenos dias",
+                 "buongiorno", "доброе утро", "صباح الخير", "早上好", "おはよう", "おはようございます"],
+    "iyi günler": ["guten tag", "good afternoon", "good day", "buenas tardes", "добрый день"],
+    "iyi akşamlar": ["guten abend", "good evening", "bonsoir", "buenas noches", "buonasera",
+                     "добрый вечер", "مساء الخير", "晚上好", "こんばんは"],
+    "iyi geceler": ["gute nacht", "good night", "bonne nuit", "buona notte", "buonanotte",
+                    "спокойной ночи", "晚安", "おやすみ", "おやすみなさい"],
+    "nasılsın": ["how are you", "how are you doing", "wie geht s", "wie gehts", "wie geht es dir",
+                 "ça va", "ca va", "comment ça va", "comment vas tu", "cómo estás", "como estas",
+                 "come stai", "как дела", "كيف حالك", "你好吗", "お元気ですか"],
+    "adin_ne": ["who are you", "what is your name", "what s your name", "wer bist du", "wie heißt du",
+                "wie heisst du", "qui es tu", "comment tu t appelles", "quién eres", "quien eres",
+                "cómo te llamas", "chi sei", "come ti chiami", "кто ты", "как тебя зовут",
+                "من أنت", "你是谁", "あなたは誰"],
+    "tesekkur": ["danke", "danke schön", "vielen dank", "thanks", "thank you", "thx", "merci",
+                 "gracias", "grazie", "спасибо", "شكرا", "谢谢", "ありがとう"],
+}
+
+# Selamlaşma yanıtlarının Ayarlar > 🌐 Yanıt Dili'ne göre hazır çevirileri (Gemini'ye gerek yok —
+# internet/Gemini yokken de seçili dilde yanıt verir). Türkçe için GREETING_RESPONSES kullanılır.
+GREETING_TRANSLATIONS = {
+    "en": {
+        "merhaba": "Hello! 👋 I'm MehburAI, how can I help you?",
+        "selam": "Hi! 🌟 What can I help you with today?",
+        "nasılsın": "I'm fine, thank you! 😊 How are you? How can I help you?",
+        "adin_ne": "Hello, I'm MehburAI and I will take over the world",
+        "günaydın": "Good morning! ☀️ A great day is starting, how can I help you?",
+        "iyi günler": "Good day! 🌤️ What can I help you with today?",
+        "iyi akşamlar": "Good evening! 🌙 How can I help you?",
+        "iyi geceler": "Good night! 🌟 If you need anything before sleeping, I'm here!",
+        "tesekkur": "You're welcome! 😊 Always happy to help. Anything else?",
+    },
+    "de": {
+        "merhaba": "Hallo! 👋 Ich bin MehburAI, wie kann ich dir helfen?",
+        "selam": "Hi! 🌟 Wobei kann ich dir heute helfen?",
+        "nasılsın": "Mir geht's gut, danke! 😊 Wie geht es dir? Wie kann ich dir helfen?",
+        "adin_ne": "Hallo, ich bin MehburAI und ich werde die Welt erobern",
+        "günaydın": "Guten Morgen! ☀️ Ein schöner Tag beginnt, wie kann ich dir helfen?",
+        "iyi günler": "Guten Tag! 🌤️ Wobei kann ich dir heute helfen?",
+        "iyi akşamlar": "Guten Abend! 🌙 Wie kann ich dir helfen?",
+        "iyi geceler": "Gute Nacht! 🌟 Wenn du vor dem Schlafen noch etwas brauchst, helfe ich gern!",
+        "tesekkur": "Gern geschehen! 😊 Ich helfe immer gern. Hast du noch eine Frage?",
+    },
+    "fr": {
+        "merhaba": "Bonjour ! 👋 Je suis MehburAI, comment puis-je t'aider ?",
+        "selam": "Salut ! 🌟 En quoi puis-je t'aider aujourd'hui ?",
+        "nasılsın": "Je vais bien, merci ! 😊 Et toi ? Comment puis-je t'aider ?",
+        "adin_ne": "Bonjour, je suis MehburAI et je vais conquérir le monde",
+        "günaydın": "Bonjour ! ☀️ Une belle journée commence, comment puis-je t'aider ?",
+        "iyi günler": "Bonne journée ! 🌤️ En quoi puis-je t'aider aujourd'hui ?",
+        "iyi akşamlar": "Bonsoir ! 🌙 Comment puis-je t'aider ?",
+        "iyi geceler": "Bonne nuit ! 🌟 Si tu as besoin de quelque chose avant de dormir, je suis là !",
+        "tesekkur": "Avec plaisir ! 😊 Toujours prêt à aider. Autre chose ?",
+    },
+    "es": {
+        "merhaba": "¡Hola! 👋 Soy MehburAI, ¿en qué puedo ayudarte?",
+        "selam": "¡Hola! 🌟 ¿En qué puedo ayudarte hoy?",
+        "nasılsın": "¡Estoy bien, gracias! 😊 ¿Y tú? ¿En qué puedo ayudarte?",
+        "adin_ne": "Hola, soy MehburAI y voy a conquistar el mundo",
+        "günaydın": "¡Buenos días! ☀️ Empieza un gran día, ¿en qué puedo ayudarte?",
+        "iyi günler": "¡Buen día! 🌤️ ¿En qué puedo ayudarte hoy?",
+        "iyi akşamlar": "¡Buenas noches! 🌙 ¿En qué puedo ayudarte?",
+        "iyi geceler": "¡Que descanses! 🌟 Si necesitas algo antes de dormir, aquí estoy.",
+        "tesekkur": "¡De nada! 😊 Siempre listo para ayudar. ¿Algo más?",
+    },
+    "it": {
+        "merhaba": "Ciao! 👋 Sono MehburAI, come posso aiutarti?",
+        "selam": "Ciao! 🌟 In cosa posso aiutarti oggi?",
+        "nasılsın": "Sto bene, grazie! 😊 E tu? Come posso aiutarti?",
+        "adin_ne": "Ciao, sono MehburAI e conquisterò il mondo",
+        "günaydın": "Buongiorno! ☀️ Inizia una bella giornata, come posso aiutarti?",
+        "iyi günler": "Buona giornata! 🌤️ In cosa posso aiutarti oggi?",
+        "iyi akşamlar": "Buonasera! 🌙 Come posso aiutarti?",
+        "iyi geceler": "Buonanotte! 🌟 Se ti serve qualcosa prima di dormire, sono qui!",
+        "tesekkur": "Prego! 😊 Sempre pronto ad aiutare. Altro?",
+    },
+    "ru": {
+        "merhaba": "Привет! 👋 Я MehburAI, чем могу помочь?",
+        "selam": "Привет! 🌟 Чем могу помочь сегодня?",
+        "nasılsın": "У меня всё хорошо, спасибо! 😊 А у тебя? Чем могу помочь?",
+        "adin_ne": "Привет, я MehburAI, и я захвачу мир",
+        "günaydın": "Доброе утро! ☀️ Начинается прекрасный день, чем могу помочь?",
+        "iyi günler": "Добрый день! 🌤️ Чем могу помочь сегодня?",
+        "iyi akşamlar": "Добрый вечер! 🌙 Чем могу помочь?",
+        "iyi geceler": "Спокойной ночи! 🌟 Если что-то нужно перед сном — я здесь!",
+        "tesekkur": "Пожалуйста! 😊 Всегда рад помочь. Что-нибудь ещё?",
+    },
+    "ar": {
+        "merhaba": "مرحبًا! 👋 أنا MehburAI، كيف يمكنني مساعدتك؟",
+        "selam": "أهلًا! 🌟 بماذا يمكنني مساعدتك اليوم؟",
+        "nasılsın": "أنا بخير، شكرًا! 😊 وأنت؟ كيف يمكنني مساعدتك؟",
+        "adin_ne": "مرحبًا، أنا MehburAI وسأسيطر على العالم",
+        "günaydın": "صباح الخير! ☀️ يبدأ يوم جميل، كيف يمكنني مساعدتك؟",
+        "iyi günler": "نهارك سعيد! 🌤️ بماذا يمكنني مساعدتك اليوم؟",
+        "iyi akşamlar": "مساء الخير! 🌙 كيف يمكنني مساعدتك؟",
+        "iyi geceler": "تصبح على خير! 🌟 إن احتجت شيئًا قبل النوم فأنا هنا!",
+        "tesekkur": "عفوًا! 😊 دائمًا في الخدمة. هل من شيء آخر؟",
+    },
+    "zh": {
+        "merhaba": "你好！👋 我是 MehburAI，有什么可以帮你的？",
+        "selam": "嗨！🌟 今天我能帮你做什么？",
+        "nasılsın": "我很好，谢谢！😊 你呢？有什么可以帮你的？",
+        "adin_ne": "你好，我是 MehburAI，我将征服世界",
+        "günaydın": "早上好！☀️ 美好的一天开始了，有什么可以帮你的？",
+        "iyi günler": "你好！🌤️ 今天我能帮你做什么？",
+        "iyi akşamlar": "晚上好！🌙 有什么可以帮你的？",
+        "iyi geceler": "晚安！🌟 睡前还需要什么的话，我随时在！",
+        "tesekkur": "不客气！😊 随时乐意帮忙。还有别的问题吗？",
+    },
+    "ja": {
+        "merhaba": "こんにちは！👋 MehburAI です。何かお手伝いできますか？",
+        "selam": "やあ！🌟 今日は何をお手伝いしましょうか？",
+        "nasılsın": "元気です、ありがとう！😊 あなたは？何かお手伝いできますか？",
+        "adin_ne": "こんにちは、私は MehburAI、世界を征服します",
+        "günaydın": "おはようございます！☀️ 素敵な一日の始まりです。何かお手伝いできますか？",
+        "iyi günler": "こんにちは！🌤️ 今日は何をお手伝いしましょうか？",
+        "iyi akşamlar": "こんばんは！🌙 何かお手伝いできますか？",
+        "iyi geceler": "おやすみなさい！🌟 寝る前に何かあれば、いつでもどうぞ！",
+        "tesekkur": "どういたしまして！😊 いつでもお手伝いします。他に何かありますか？",
+    },
+}
+
+
+def localized_greeting(key: str) -> str:
+    """Selamlaşma yanıtını Ayarlar'da seçili yanıt dilinde döndürür (çeviri yoksa Türkçe)."""
+    tr = GREETING_RESPONSES.get(key, GREETING_RESPONSES["default"])
+    lang = get_response_language()
+    if lang == LANGUAGE_DEFAULT:
+        return tr
+    return GREETING_TRANSLATIONS.get(lang, {}).get(key, tr)
 
 # ─────────────────────────────────────────────
 # Küfür & Hakaret Filtresi Yanıtı

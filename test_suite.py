@@ -1672,6 +1672,83 @@ def run_full_validation():
     print("  • Kaynaklardan biri yalan haberse TÜM arama sonucu atılıp güvenli Wikipedia akışına düşülüyor ✓")
     print("  • Tüm kaynaklar güvenilirse arama sonucu kullanılıyor, altyazıda süzgeçten geçtiği belirtiliyor ✓")
 
+    # 27g. Selamlaşma seçili dilde; "halo/hallo/bonjour" selam sayılıyor, "halo nedir" bilgi sorusu kalıyor
+    _GF27 = _ae27.GreetingFilter
+    _prev_lang27b = _grl27()
+    try:
+        _srl27("tr")
+        assert _GF27.check_greeting("merhaba") == "Merhaba! 👋 Ben MehburAI, sana nasıl yardımcı olabilirim?"
+        assert "dünyayı ele geçireceğim" in _GF27.check_greeting("adın ne")
+        _srl27("de")
+        assert _GF27.check_greeting("merhaba").startswith("Hallo! 👋 Ich bin MehburAI")
+        assert _GF27.check_greeting("halo").startswith("Hallo!")
+        assert _GF27.check_greeting("Hallo!").startswith("Hallo!")
+        assert _GF27.check_greeting("Wie geht's?").startswith("Mir geht's gut")
+        assert _GF27.check_greeting("danke") .startswith("Gern geschehen")
+        assert "Welt erobern" in _GF27.check_greeting("wer bist du")
+        assert _GF27.check_greeting("halo nedir") is None
+        assert _GF27.check_greeting("danke, und was ist berlin") is None
+        _srl27("ja")
+        assert _GF27.check_greeting("こんにちは").startswith("こんにちは！")
+        _srl27("en")
+        assert _GF27.check_greeting("bonjour").startswith("Hello!")
+        for _code in _langs27:
+            if _code != "tr":
+                _srl27(_code)
+                for _key in ("merhaba", "selam", "nasılsın", "adin_ne", "günaydın", "iyi günler",
+                             "iyi akşamlar", "iyi geceler", "tesekkur"):
+                    assert _key in _cfg19.GREETING_TRANSLATIONS[_code], (_code, _key)
+    finally:
+        _srl27(_prev_lang27b)
+    print("  • Selamlaşma seçili dilde; 'halo/hallo/bonjour' selam, 'halo nedir' bilgi sorusu olarak kalıyor ✓")
+
+    # 27h. Yedek Wikipedia önce seçili dilde aranıyor (Gemini de çökse ham metin o dilde), yoksa Türkçe
+    _calls27 = []
+    _orig_wiki27h = TrustedSourceFetcher.search_wikipedia
+    _orig_gr27h = ai.gemini.generate_grounded_response
+    _orig_gen27h = ai.gemini.generate_response
+    _prev_lang27h = _grl27()
+    try:
+        _srl27("de")
+
+        def _fw27(cls, q, lang="tr", product=False):
+            _calls27.append(lang)
+            if lang == "de":
+                return {"title": "Halo", "extract": "Halo ist ein optisches Phänomen.",
+                        "source": "Wikipedia-de (Halo)", "url": "https://de.wikipedia.org/wiki/Halo",
+                        "truncated": False}
+            return None
+        TrustedSourceFetcher.search_wikipedia = classmethod(_fw27)
+        ai.gemini.generate_grounded_response = lambda q: None
+        ai.gemini.generate_response = lambda *a, **k: None       # Gemini çökmüş
+        if network.check_now():
+            _r27h = ai.process_query("halo phänomen zzq27h")
+            assert _calls27[0] == "de" and "optisches Phänomen" in _r27h["answer"], _r27h["answer"][:120]
+            print("  • Gemini yanıt vermezse Wikipedia seçili dilden (de.wikipedia) geliyor ✓")
+        else:
+            print("  • (Çevrimdışı — seçili dilde Wikipedia testi atlandı)")
+    finally:
+        TrustedSourceFetcher.search_wikipedia = _orig_wiki27h
+        ai.gemini.generate_grounded_response = _orig_gr27h
+        ai.gemini.generate_response = _orig_gen27h
+        _srl27(_prev_lang27h)
+
+    # 27i. Google Arama kotası (429) dolunca bir süre hiç denenmiyor (her soruda boşuna beklenmesin)
+    _saved_key27i = _gk19()
+    _sk19("AIzaSyD_TestValidGeminiKey1234567890XYZ")
+    _orig_post27i = _ae27.requests.post
+    _posts27 = []
+    try:
+        _ae27.GeminiService._grounding_off_until = 0.0
+        _ae27.requests.post = lambda *a, **k: (_posts27.append(1), _Resp(429, {}))[1]
+        assert _g27.generate_grounded_response("x") is None and len(_posts27) == 1
+        assert _g27.generate_grounded_response("y") is None and len(_posts27) == 1
+    finally:
+        _ae27.requests.post = _orig_post27i
+        _ae27.GeminiService._grounding_off_until = 0.0
+        (_sk19(_saved_key27i) if _saved_key27i else _rk19())
+    print("  • Google Arama kotası dolunca (429) diğer modeller denenmiyor ve bir süre atlanıyor ✓")
+
     print("  ✅ TEST 27 BAŞARILI: Tüm kaynaklardan arama, yalan haber süzgeci ve çok dilli yanıt hazır.")
     passed_tests += 1
 

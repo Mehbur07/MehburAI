@@ -28,13 +28,15 @@ import requests
 
 from config import (
     DATA_DIR,
+    FOREIGN_GREETINGS,
     GREETING_PATTERNS,
-    GREETING_RESPONSES,
     PROFANITY_RESPONSE,
     GeminiConfig,
     get_api_key,
     get_profanity_config,
+    get_response_language,
     get_response_language_name,
+    localized_greeting,
 )
 from memory_engine import MemoryEngine, clean_text, tokenize_and_stem, turkish_lower
 from network_manager import NetworkMonitor
@@ -225,6 +227,13 @@ class TrustedSourceFetcher:
             "hangisi", "ne", "neler", "nerede", "nasıl", "neden", "hakkında",
             "bilgi", "ver", "söyle", "anlat", "lütfen", "bana", "acaba",
             "özellikleri", "ozellikleri", "inceleme", "incelemesi", "yorumları", "yorumlari",
+            # yanıt dili başka bir dil seçilince sık gelen soru kalıpları
+            "what", "is", "who", "was", "are", "tell", "me", "about", "the", "a", "an",
+            "ist", "wer", "sind", "erzähl", "mir", "über", "der", "die", "das",
+            "qu", "est", "ce", "que", "qui", "c", "le", "la", "les",
+            "qué", "que", "es", "quién", "quien", "el", "los",
+            "cos", "cosa", "è", "chi", "il", "lo",
+            "что", "такое", "кто", "это",
         ]]
         return " ".join(keywords) if keywords else clean_text(query)
 
@@ -480,6 +489,9 @@ class GeminiService:
             return None
         return self._stream_call(self._build_payload(question, context))
 
+    GROUNDING_COOLDOWN = 3600          # sn — Google Arama kotası dolunca tekrar denemeden önce
+    _grounding_off_until = 0.0
+
     def generate_grounded_response(self, question: str) -> Optional[Dict[str, Any]]:
         """
         Gemini'nin Google Arama entegrasyonuyla (`tools: [google_search]`) yalnızca
@@ -490,7 +502,7 @@ class GeminiService:
         kaynakları kullanıcıya göstermeden önce yalan haber/dezenformasyon süzgecinden geçirir.)
         """
         api_key = get_api_key()
-        if not api_key:
+        if not api_key or time.time() < GeminiService._grounding_off_until:
             return None
         payload = {
             "systemInstruction": {"parts": [{"text": GeminiConfig.get_system_prompt()}]},
@@ -507,6 +519,11 @@ class GeminiService:
             url = f"{GeminiConfig.API_BASE}/models/{model}:generateContent?key={urllib.parse.quote(api_key)}"
             try:
                 resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+                if resp.status_code == 429:
+                    # Google Arama kotası hesap geneli (ücretsiz katmanda çoğu zaman sıfır) — diğer
+                    # modeller de aynı yanıtı verir; bir süre hiç denemeyip her soruda beklemeyelim.
+                    GeminiService._grounding_off_until = time.time() + self.GROUNDING_COOLDOWN
+                    return None
                 if resp.status_code != 200:
                     continue
                 data = resp.json()
@@ -939,12 +956,36 @@ class ImageStudio:
 class GreetingFilter:
     """Genel selamlaşma ve sohbet sorularını tespit edip yanıtlar."""
 
+    @classmethod
+    def check_greeting(cls, text: str) -> Optional[str]:
+        """Girdi bir selamlaşma veya kimlik sorusuysa, Ayarlar'daki yanıt dilinde yanıt döndürür."""
+        key = cls.greeting_key(text)
+        return localized_greeting(key) if key else None
+
     @staticmethod
-    def check_greeting(text: str) -> Optional[str]:
-        """Eğer girdi bir selamlaşma veya kimlik sorusuysa yanıt döndürür."""
+    def _foreign_key(cleaned: str) -> Optional[str]:
+        """Başka dillerdeki selam/teşekkür/hal-hatır kalıpları. Tek kelimelik olanlar ("halo",
+        "danke") yalnızca mesajın tamamıysa sayılır — "halo nedir" bir bilgi sorusudur."""
+        bare = re.sub(r"\s+(mehbur|mehburai)$", "", cleaned)
+        for key in ("adin_ne", "nasılsın", "iyi geceler", "iyi akşamlar", "günaydın",
+                    "iyi günler", "tesekkur", "merhaba"):
+            for phrase in FOREIGN_GREETINGS[key]:
+                if bare == phrase:
+                    return key
+                if " " in phrase and re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", cleaned):
+                    return key
+        return None
+
+    @staticmethod
+    def greeting_key(text: str) -> Optional[str]:
+        """Selamlaşma türünü (GREETING_RESPONSES anahtarı) ya da None döndürür."""
         cleaned = clean_text(text)
         if not cleaned:
             return None
+
+        foreign = GreetingFilter._foreign_key(cleaned)
+        if foreign:
+            return foreign
 
         # 1. Adın ne / Kimsin varyasyonları kontrolü
         # (Kelime sınırıyla eşleşir; "ödevler adında klasör" gibi cümlelere bulaşmaz.)
@@ -958,41 +999,41 @@ class GreetingFilter:
         ]
         for np in name_patterns:
             if re.search(rf"(?<!\w){re.escape(np)}(?!\w)", cleaned):
-                return GREETING_RESPONSES["adin_ne"]
+                return "adin_ne"
         # Tek kelimelik "adın" / "ismin" yalnızca tam eşleşmede kimlik sorusudur
         if cleaned in {"adın", "adin", "ismin", "adını", "ismini"}:
-            return GREETING_RESPONSES["adin_ne"]
+            return "adin_ne"
         # "adını/ismini ... söyle/söyler misin/verir misin/öğrenebilir miyim"
         if re.search(r"\b(ad[ıi]n[ıi]|ismini)\b", cleaned) and any(
             v in cleaned for v in ["söyle", "soyle", "söyler", "soyler", "verir",
                                    "öğrenebilir", "ogrenebilir", "öğrensem", "merak"]
         ):
-            return GREETING_RESPONSES["adin_ne"]
+            return "adin_ne"
 
         # 2. Hal hatır / Nasılsın kontrolü
         if any(w in cleaned for w in ["nasılsın", "nasilsin", "naber", "ne haber", "napıyorsun", "napiyorsun"]):
-            return GREETING_RESPONSES["nasılsın"]
+            return "nasılsın"
 
         # 3. Günaydın / İyi günler / Akşam / Gece
         if "günaydın" in cleaned or "gunaydin" in cleaned:
-            return GREETING_RESPONSES["günaydın"]
+            return "günaydın"
         if "iyi akşamlar" in cleaned or "iyi aksamlar" in cleaned:
-            return GREETING_RESPONSES["iyi akşamlar"]
+            return "iyi akşamlar"
         if "iyi geceler" in cleaned:
-            return GREETING_RESPONSES["iyi geceler"]
+            return "iyi geceler"
         if "iyi günler" in cleaned or "iyi gunler" in cleaned:
-            return GREETING_RESPONSES["iyi günler"]
+            return "iyi günler"
 
         # 4. Selam / Merhaba kalıpları
         for pattern in GREETING_PATTERNS:
             if cleaned == pattern or cleaned.startswith(pattern + " ") or cleaned.endswith(" " + pattern):
                 if "selam" in cleaned:
-                    return GREETING_RESPONSES["selam"]
-                return GREETING_RESPONSES["merhaba"]
+                    return "selam"
+                return "merhaba"
 
         # 5. Teşekkür kontrolü
         if any(t in cleaned for t in ["teşekkür", "tesekkur", "sağol", "sagol", "eyvallah", "harikasın", "harikasin"]):
-            return "Rica ederim! 😊 Her zaman yardıma hazırım. Başka bir sorun var mı?"
+            return "tesekkur"
 
         return None
 
@@ -1776,8 +1817,13 @@ class AIEngine:
             # Yedek akış (anahtar yok / arama modeli desteklemedi / tüm kaynaklar elendi):
             # Güvenilir kaynaktan araştır: Wikipedia (ürünlerde özellikler + eleştirmen
             # değerlendirmesi; gerekirse İngilizce madde). Reddit gibi denetimsiz kaynaklar yok.
-            wiki_data = TrustedSourceFetcher.search_wikipedia(
-                query, product=TrustedSourceFetcher.is_product_query(query))
+            # Önce Ayarlar'daki yanıt dilinin Wikipedia'sı: Gemini de çalışmazsa ham metin en
+            # azından seçili dilde olur (yoksa Türkçe Wikipedia'ya düşülür).
+            is_product = TrustedSourceFetcher.is_product_query(query)
+            resp_lang = get_response_language()
+            wiki_data = TrustedSourceFetcher.search_wikipedia(query, lang=resp_lang, product=is_product)
+            if not wiki_data and resp_lang != "tr":
+                wiki_data = TrustedSourceFetcher.search_wikipedia(query, lang="tr", product=is_product)
             context_text = None
             source_tag = "gemini"
 
