@@ -1808,6 +1808,59 @@ def run_full_validation():
     assert "indirildi" in _src28 and "güncellendi" in _src28 and "_add_feature" in _src28
     print("  • Kurulum penceresi '✅ <özellik> indirildi/güncellendi' satırları gösteriyor ✓")
 
+    # 28e. Kilitli dosya (kapanmakta olan eski MehburAI / antivirüs): önce tekrar deneniyor,
+    # hâlâ kilitliyse eski dosya kenara çekilip yenisi yazılıyor; '.old' artıkları sonra siliniyor
+    class _FlakyZip28:
+        def __init__(self, fails):
+            self.fails, self.calls = fails, 0
+        def extract(self, member, root):
+            self.calls += 1
+            if self.calls <= self.fails:
+                raise PermissionError(13, "Erişim engellendi")
+            with open(_os28.path.join(root, member), "w") as fh:
+                fh.write("yeni")
+    _root28 = _tmp28.mkdtemp()
+    _dest28 = _os28.path.join(_root28, "libcrypto-3.dll")
+    _orig_retry28 = _inst22.LOCK_RETRY_SECONDS
+    try:
+        _inst22.LOCK_RETRY_SECONDS = 5.0
+        _fz = _FlakyZip28(fails=2)
+        _inst22._extract_with_retry(_fz, "libcrypto-3.dll", _root28, _dest28)
+        assert _fz.calls == 3 and open(_dest28).read() == "yeni"
+
+        _inst22.LOCK_RETRY_SECONDS = 0.6
+        _fz2 = _FlakyZip28(fails=10 ** 6)
+        _fz2.extract = (lambda orig: (lambda m, r: orig(m, r) if _os28.path.exists(_dest28) else
+                                      open(_dest28, "w").write("yeni2")))(_fz2.extract)
+        _inst22._extract_with_retry(_fz2, "libcrypto-3.dll", _root28, _dest28)
+        assert open(_dest28).read() == "yeni2"
+        assert any(f.endswith(".old") for f in _os28.listdir(_root28))
+        _inst22.cleanup_old_files(_root28)
+        assert not any(f.endswith(".old") for f in _os28.listdir(_root28))
+    finally:
+        _inst22.LOCK_RETRY_SECONDS = _orig_retry28
+    print("  • Kilitli dosyada kurulum takılmıyor: tekrar deneniyor, gerekirse eski dosya kenara çekiliyor ✓")
+
+    # 28f. Eski MehburAI gerçekten kapanana kadar bekleniyor
+    _orig_run28, _orig_alive28 = _inst22.subprocess.run, _inst22._app_is_running
+    _alive28 = [True, True, False]
+    try:
+        _inst22.subprocess.run = lambda *a, **k: None
+        _inst22._app_is_running = lambda: _alive28.pop(0) if _alive28 else False
+        _inst22.stop_running_app(timeout=5)
+        assert _alive28 == []
+    finally:
+        _inst22.subprocess.run, _inst22._app_is_running = _orig_run28, _orig_alive28
+    print("  • Kurulum, açık MehburAI tamamen kapanmadan dosyalara dokunmuyor ✓")
+
+    # 28g. Hata olursa pencerede GERÇEKTEN gösteriliyor (eskiden lambda silinmiş `e`yi kullanıp
+    # NameError veriyor, pencere '%10'da donmuş kalıyordu)
+    _m28 = _inst22.describe_error(PermissionError(13, "Erişim engellendi"))
+    assert "Erişim engellendi" in _m28 and "başka bir program" in _m28
+    _run_src28 = _insp26.getsource(_inst22.SetupWindow._run)
+    assert "msg = describe_error(e)" in _run_src28 and "{e}" not in _run_src28
+    print("  • Kurulum hatası artık ekranda gösteriliyor ve günlüğe yazılıyor ✓")
+
     print("  ✅ TEST 28 BAŞARILI: Kurucu, indirilenleri ne işe yaradıklarıyla listeliyor.")
     passed_tests += 1
 

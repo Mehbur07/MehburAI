@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import tkinter as tk
+import urllib.error
 import urllib.request
 import zipfile
 from tkinter import ttk
@@ -52,9 +53,26 @@ def download_payload(dest: str, on_progress) -> None:
         raise IOError("İndirilen dosya geçerli bir paket değil")
 
 
-def stop_running_app() -> None:
+TASKLIST = os.path.join(_SYS32, "tasklist.exe")
+
+
+def _app_is_running() -> bool:
+    try:
+        out = subprocess.run([TASKLIST, "/FI", f"IMAGENAME eq {EXE_NAME}", "/NH"],
+                             capture_output=True, text=True, creationflags=NO_WINDOW).stdout
+        return EXE_NAME.lower() in out.lower()
+    except Exception:
+        return False
+
+
+def stop_running_app(timeout: float = 15.0) -> None:
+    """Açık MehburAI'yi kapatır ve GERÇEKTEN kapanana kadar bekler (taskkill hemen döner;
+    süreç dosyalarını bırakmadan kurulum başlarsa DLL'ler kilitli kalır)."""
     subprocess.run([TASKKILL, "/F", "/IM", EXE_NAME],
                    capture_output=True, creationflags=NO_WINDOW)
+    end = time.monotonic() + timeout
+    while _app_is_running() and time.monotonic() < end:
+        time.sleep(0.3)
 
 
 def create_desktop_shortcut() -> bool:
@@ -135,6 +153,41 @@ class FeatureTracker:
         return None
 
 
+LOCK_RETRY_SECONDS = 20.0
+
+
+def _extract_with_retry(zf, member, root: str, dest: str) -> None:
+    """Dosya kilitliyse (kapanmakta olan eski MehburAI, antivirüs taraması…) bir süre tekrar
+    dener; hâlâ kilitliyse eski dosyayı kenara çekip (Windows kullanımdaki dosyanın adını
+    değiştirmeye izin verir) yenisini yazar."""
+    end = time.monotonic() + LOCK_RETRY_SECONDS
+    while True:
+        try:
+            zf.extract(member, root)
+            return
+        except PermissionError:
+            if time.monotonic() >= end:
+                break
+            time.sleep(0.5)
+    if os.path.isfile(dest):
+        old = f"{dest}.{int(time.time())}.old"
+        os.replace(dest, old)
+        zf.extract(member, root)
+        return
+    zf.extract(member, root)          # gerçek hatayı yukarı taşı
+
+
+def cleanup_old_files(install_dir: str) -> None:
+    """Önceki kurulumlarda kenara çekilmiş '*.old' dosyalarını (artık kilitli değilse) siler."""
+    for dirpath, _, files in os.walk(install_dir):
+        for f in files:
+            if f.endswith(".old"):
+                try:
+                    os.remove(os.path.join(dirpath, f))
+                except OSError:
+                    pass
+
+
 def extract_payload(zip_path: str, install_dir: str, on_progress, on_feature=None) -> None:
     """Paketi install_dir'e açar; kullanıcı verisi (data/) varsa ezilmez.
     on_feature(özellik_adı): bir özelliğin dosyalarının hepsi yerine konunca çağrılır."""
@@ -149,14 +202,39 @@ def extract_payload(zip_path: str, install_dir: str, on_progress, on_feature=Non
             # Kullanıcı verisi (ayarlar, hafıza, modeller) asla ezilmez
             keep_user_data = m.filename.replace("\\", "/").startswith("data/") and os.path.exists(dest)
             if safe and not keep_user_data:
-                zf.extract(m, root)
+                _extract_with_retry(zf, m, root, dest)
             done = tracker.mark(m.filename)
             if done and on_feature:
                 on_feature(done)
             on_progress(i / total)
 
 
-EXTRACT_ALLOWANCE = 5    # sn — indirme bittikten sonra dosyaları açmanın kabaca süresi (ilk tahmin için)
+ERROR_LOG = os.path.join(tempfile.gettempdir(), "MehburAI-Setup-hata.txt")
+
+
+def describe_error(e: Exception) -> str:
+    """Kullanıcıya gösterilecek hata metni (sebebe göre ne yapılacağını söyler)."""
+    if isinstance(e, PermissionError):
+        hint = ("Bir dosya başka bir program tarafından kullanılıyor. MehburAI'nin kapalı olduğundan "
+                "emin olup kurucuyu tekrar çalıştır (gerekirse bilgisayarı yeniden başlat).")
+    elif isinstance(e, (urllib.error.URLError, TimeoutError, ConnectionError)):
+        hint = "İnternet bağlantını kontrol edip kurucuyu tekrar çalıştır."
+    else:
+        hint = "Kurucuyu tekrar çalıştır."
+    return f"Hata: {e}\n{hint}\n(Ayrıntı: {ERROR_LOG})"
+
+
+def log_error(e: Exception) -> None:
+    import traceback
+    try:
+        with open(ERROR_LOG, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S") + "\n")
+            f.write("".join(traceback.format_exception(e)) + "\n")
+    except OSError:
+        pass
+
+
+EXTRACT_ALLOWANCE = 5   # sn — indirme bittikten sonra dosyaları açmanın kabaca süresi (ilk tahmin için)
 
 
 def remaining_seconds(elapsed: float, fraction: float, min_elapsed: float = 1.5):
@@ -202,9 +280,10 @@ def install(on_status, on_progress, on_feature=None) -> None:
 
             download_payload(tmp, dl)
             zip_path = tmp
-        on_status("Kuruluyor…")
+        on_status("Kuruluyor… (açık MehburAI kapatılıyor)")
         stop_running_app()
         os.makedirs(INSTALL_DIR, exist_ok=True)
+        cleanup_old_files(INSTALL_DIR)
         base = 0.7 if tmp else 0.0
         t1 = time.monotonic()
 
@@ -266,9 +345,11 @@ class SetupWindow(tk.Tk):
                     lambda name: self.after(0, lambda: self._add_feature(name)))
             self.after(0, self._done)
         except Exception as e:
-            self.after(0, lambda: self.status.configure(
-                text=f"Hata: {e}" + chr(10) + "İnternet bağlantını kontrol edip kurucuyu tekrar çalıştır.",
-                fg="#ff5252"))
+            # Mesaj ŞİMDİ hazırlanır: `e`, except bloğundan çıkınca silinir — lambda sonradan
+            # çalışınca NameError verip hatayı hiç göstermiyordu (pencere '%10'da donmuş kalıyordu).
+            msg = describe_error(e)
+            log_error(e)
+            self.after(0, lambda: self.status.configure(text=msg, fg="#ff5252"))
 
     def _done(self):
         self.status.configure(text="Kurulum tamamlandı — masaüstüne kısayol eklendi, MehburAI başlatılıyor…")
