@@ -34,6 +34,7 @@ from config import (
     GeminiConfig,
     get_api_key,
     get_profanity_config,
+    get_response_language_name,
 )
 from memory_engine import MemoryEngine, clean_text, tokenize_and_stem, turkish_lower
 from network_manager import NetworkMonitor
@@ -309,6 +310,108 @@ class TrustedSourceFetcher:
 
 
 # ─────────────────────────────────────────────
+# 🕵️ Yalan Haber / Dezenformasyon Süzgeci
+# ─────────────────────────────────────────────
+
+class NewsCredibilityFilter:
+    """
+    MehburAI artık Wikipedia'nın ötesinde, Gemini'nin Google Arama entegrasyonuyla
+    İNTERNETTEKİ TÜM kaynaklardan bilgi çekebiliyor (bkz. GeminiService.
+    generate_grounded_response). Ama bu geniş kapsam, denetimsiz/yanıltıcı kaynak
+    riskini de getirir — bu yüzden kullanıcıya ulaşmadan önce her arama sonucu
+    burada süzülür:
+      1) Bilinen mizah/parodi/dezenformasyon sitelerini adres bazlı hızlıca eler.
+      2) Kalan kaynakları (varsa) Gemini'ye başlık + etki alanı üzerinden sorup
+         yalan haber/komplo teorisi riski taşıyanları eler.
+    Herhangi bir kaynak elenirse, o aramaya dayanan TÜM yanıt kullanılmaz — AIEngine
+    bunun yerine güvenli Wikipedia+Gemini akışına düşer (bkz. `_process_query_core`).
+    """
+
+    # Mizah/parodi (haber gibi görünüp aslında haber olmayan) ya da tekrarlayan
+    # dezenformasyon kaynağı olarak yaygın şekilde belgelenmiş etki alanları.
+    # Kapsamlı bir kara liste DEĞİLDİR — ikinci katman olarak Gemini'nin kendi
+    # değerlendirmesiyle (aşağıda) desteklenir.
+    _BLOCKLIST_DOMAINS = {
+        "theonion.com", "babylonbee.com", "worldnewsdailyreport.com", "empirenews.net",
+        "nationalreport.net", "clickhole.com", "huzlers.com", "newsbiscuit.com",
+        "el-mundo-today.com", "zaytung.com", "waterfordwhispersnews.com",
+        "dailymash.co.uk", "satirewire.com", "naturalnews.com", "beforeitsnews.com",
+        "yournewswire.com", "newspunch.com", "infowars.com",
+    }
+
+    @staticmethod
+    def domain_of(url: str) -> str:
+        """URL'den etki alanını çıkarır ('www.' önekini atar)."""
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower()
+        except Exception:
+            return ""
+        return host[4:] if host.startswith("www.") else host
+
+    @classmethod
+    def _quick_screen(cls, sources: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Bilinen kara listeyle hızlı, ağ gerektirmeyen eleme."""
+        trusted, blocked = [], []
+        for src in sources:
+            domain = cls.domain_of(src.get("uri", ""))
+            (blocked if domain in cls._BLOCKLIST_DOMAINS else trusted).append(src)
+        return trusted, blocked
+
+    @classmethod
+    def _verify_with_gemini(cls, gemini: "GeminiService",
+                             sources: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        Kara listeyi geçen kaynakları Gemini'ye sınıflandırtır. Ağ hatası/anlaşılamayan
+        yanıt durumunda kaynağı GÜVENİLİR sayar (aksi halde her geçici API hatasında
+        tüm arama sonuçları boşa gider ve kullanıcı hiç yanıt alamaz).
+        """
+        if not sources or not get_api_key():
+            return sources, []
+        listing = "\n".join(
+            f"{i + 1}. Başlık: {s.get('title') or '(başlıksız)'} | Site: {cls.domain_of(s.get('uri', ''))}"
+            for i, s in enumerate(sources)
+        )
+        prompt = (
+            "Aşağıda numaralanmış web kaynakları var. Her biri için YALNIZCA şu ikisinden birini yaz: "
+            "GÜVENİLİR (gerçek/saygın bir kaynaksa) ya da YALAN_HABER (yalan haber, dezenformasyon, "
+            "komplo teorisi ya da mizah/parodi sitesiyse ve bir haberi gerçekmiş gibi sunuyorsa). "
+            "Yanıtını YALNIZCA 'NUMARA: ETİKET' biçiminde, her satırda bir kaynak olacak şekilde ver, "
+            "başka hiçbir şey yazma.\n\n" + listing
+        )
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"maxOutputTokens": 512, "temperature": 0},
+        }
+        raw = gemini._stream_call(payload)
+        if not raw:
+            return sources, []
+        verdicts: Dict[int, str] = {}
+        for line in raw.splitlines():
+            m = re.match(r"\s*(\d+)\s*[:.\-]\s*(G[ÜU]VEN[İI]L[İI]R|YALAN_HABER)", line, re.IGNORECASE)
+            if m:
+                verdicts[int(m.group(1))] = m.group(2).upper()
+        trusted, blocked = [], []
+        for i, s in enumerate(sources):
+            label = verdicts.get(i + 1, "GÜVENİLİR")
+            (blocked if "YALAN" in label else trusted).append(s)
+        return trusted, blocked
+
+    @classmethod
+    def filter_sources(cls, gemini: "GeminiService",
+                        sources: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """(güvenilir_kaynaklar, elenen_kaynaklar) döndürür."""
+        trusted, blocked1 = cls._quick_screen(sources)
+        trusted2, blocked2 = cls._verify_with_gemini(gemini, trusted)
+        return trusted2, blocked1 + blocked2
+
+    @staticmethod
+    def source_footer(sources: List[Dict[str, Any]]) -> str:
+        """Yalan haber süzgecinden geçmiş kaynakların altyazısı (düz metin)."""
+        lines = "\n".join(f"• {s.get('title') or s.get('uri')} — {s.get('uri')}" for s in sources[:5])
+        return f"📌 Kaynaklar (yalan haber süzgecinden geçti):\n{lines}"
+
+
+# ─────────────────────────────────────────────
 # Google Gemini API Servisi
 # ─────────────────────────────────────────────
 
@@ -326,16 +429,18 @@ class GeminiService:
     def _build_payload(self, question: str, context: Optional[str]) -> dict:
         text = question
         if context:
+            lang_name = get_response_language_name()
             text = (
                 "Aşağıdaki güvenilir kaynak bilgisini dikkate alarak soruyu yanıtla:\n"
                 f"KAYNAK BİLGİSİ: {context}\n\n"
                 f"SORU: {question}\n\n"
-                "Lütfen kapsamlı ve ayrıntılı, Türkçe ve samimi bir dille açıkla. Konu genişse önemli "
+                f"Lütfen kapsamlı ve ayrıntılı, {lang_name} dilinde ve samimi bir üslupla açıkla "
+                "(kaynak metin başka bir dilde olsa bile yanıtını bu dile çevir). Konu genişse önemli "
                 "yönleri (tanım, tarihçe, özellikler, kullanım alanları vb.) ayrı kısa paragraflarda anlat. "
                 "Markdown işaretleri (*, #, `) kullanma; düz metin yaz."
             )
         return {
-            "systemInstruction": {"parts": [{"text": GeminiConfig.SYSTEM_PROMPT}]},
+            "systemInstruction": {"parts": [{"text": GeminiConfig.get_system_prompt()}]},
             "contents": [{"role": "user", "parts": [{"text": text}]}],
             "generationConfig": {
                 "temperature": GeminiConfig.TEMPERATURE,
@@ -375,6 +480,59 @@ class GeminiService:
             return None
         return self._stream_call(self._build_payload(question, context))
 
+    def generate_grounded_response(self, question: str) -> Optional[Dict[str, Any]]:
+        """
+        Gemini'nin Google Arama entegrasyonuyla (`tools: [google_search]`) yalnızca
+        Wikipedia değil, İNTERNETTEKİ TÜM kaynaklardan araştırıp yanıt üretmesini sağlar.
+        Yanıt her zaman Ayarlar'da seçili dilde döner (kaynaklar başka dilde olsa bile).
+        Dönüş: {"answer": str, "sources": [{"title":..., "uri":...}, ...]} ya da anahtar
+        yoksa/hiçbir model yanıt vermezse None. (Çağıran taraf — bkz. NewsCredibilityFilter —
+        kaynakları kullanıcıya göstermeden önce yalan haber/dezenformasyon süzgecinden geçirir.)
+        """
+        api_key = get_api_key()
+        if not api_key:
+            return None
+        payload = {
+            "systemInstruction": {"parts": [{"text": GeminiConfig.get_system_prompt()}]},
+            "contents": [{"role": "user", "parts": [{"text": question}]}],
+            "tools": [{"google_search": {}}],
+            "generationConfig": {
+                "temperature": GeminiConfig.TEMPERATURE,
+                "maxOutputTokens": GeminiConfig.MAX_OUTPUT_TOKENS,
+            },
+        }
+        headers = {"Content-Type": "application/json"}
+        timeout = (GeminiConfig.CONNECT_TIMEOUT, GeminiConfig.READ_TIMEOUT)
+        for model in GeminiConfig.FALLBACK_MODELS:
+            url = f"{GeminiConfig.API_BASE}/models/{model}:generateContent?key={urllib.parse.quote(api_key)}"
+            try:
+                resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                candidates = data.get("candidates") or []
+                if not candidates:
+                    continue
+                cand = candidates[0]
+                text = "".join(
+                    p.get("text", "") for p in cand.get("content", {}).get("parts", [])
+                ).strip()
+                if not text:
+                    continue
+                chunks = (cand.get("groundingMetadata") or {}).get("groundingChunks") or []
+                sources: List[Dict[str, str]] = []
+                seen_uris = set()
+                for chunk in chunks:
+                    web = chunk.get("web") or {}
+                    uri = web.get("uri")
+                    if uri and uri not in seen_uris:
+                        seen_uris.add(uri)
+                        sources.append({"title": web.get("title") or uri, "uri": uri})
+                return {"answer": text, "sources": sources}
+            except requests.RequestException:
+                continue
+        return None
+
     def generate_vision_response(self, prompt: str, image_path: str) -> Optional[str]:
         """
         Bir fotoğrafı (jpg) + Türkçe bir istemi Gemini'nin çok kipli (vision)
@@ -390,7 +548,7 @@ class GeminiService:
         except OSError:
             return None
         payload = {
-            "systemInstruction": {"parts": [{"text": GeminiConfig.SYSTEM_PROMPT}]},
+            "systemInstruction": {"parts": [{"text": GeminiConfig.get_system_prompt()}]},
             "contents": [{
                 "role": "user",
                 "parts": [
@@ -1595,6 +1753,27 @@ class AIEngine:
             # Kullanıcı mesajını kaydet
             log("user", query, True)
 
+            # 🌐 ADIM: Artık yalnızca Wikipedia değil, Gemini'nin Google Arama entegrasyonuyla
+            # İNTERNETTEKİ TÜM kaynaklardan araştırılıyor. Ama kullanıcıya ulaşmadan önce her
+            # kaynak "yalan haber süzgeci"nden geçer (NewsCredibilityFilter): herhangi bir kaynak
+            # yalan haber/dezenformasyon şüphesi taşıyorsa o arama sonucu TAMAMEN ATILIR ve
+            # aşağıdaki güvenli Wikipedia+Gemini akışına (eskisi gibi) düşülür.
+            grounded = self.gemini.generate_grounded_response(query)
+            if grounded and grounded.get("sources"):
+                trusted, blocked = NewsCredibilityFilter.filter_sources(self.gemini, grounded["sources"])
+                grounded = None if blocked else {**grounded, "sources": trusted}
+
+            if grounded and grounded.get("answer"):
+                answer = grounded["answer"]
+                source_tag = "gemini"
+                if grounded.get("sources"):
+                    answer = f"{answer.rstrip()}\n\n{NewsCredibilityFilter.source_footer(grounded['sources'])}"
+                    source_tag = "gemini+web"
+                self.memory.save_knowledge(question=query, answer=answer, source=source_tag)
+                log("mehbur", answer, True, source=source_tag)
+                return {"answer": answer, "is_online": True, "source": source_tag, "learned": True}
+
+            # Yedek akış (anahtar yok / arama modeli desteklemedi / tüm kaynaklar elendi):
             # Güvenilir kaynaktan araştır: Wikipedia (ürünlerde özellikler + eleştirmen
             # değerlendirmesi; gerekirse İngilizce madde). Reddit gibi denetimsiz kaynaklar yok.
             wiki_data = TrustedSourceFetcher.search_wikipedia(

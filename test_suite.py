@@ -49,7 +49,7 @@ def run_full_validation():
     print("  🤖 MEHBUR AI — FAZ 5 ENTEGRASYON VE DOĞRULAMA TESTLERİ")
     print("=" * 65)
     passed_tests = 0
-    total_tests = 26
+    total_tests = 27
 
     memory = MemoryEngine()
     network = NetworkMonitor()
@@ -901,9 +901,13 @@ def run_full_validation():
     _saved_key19 = _gk19()
     _orig_wiki19 = TrustedSourceFetcher.search_wikipedia
     _orig_gem19 = ai.gemini.generate_response
+    _orig_grounded19 = ai.gemini.generate_grounded_response
     TrustedSourceFetcher.search_wikipedia = classmethod(
         lambda cls, q, lang="tr", product=False: {"title": "X", "extract": "Wikipedia özeti.", "source": "Wikipedia (X)",
                                                    "url": "https://tr.wikipedia.org/wiki/X", "truncated": False})
+    # 🌐 Tüm-kaynak arama (Google Arama entegrasyonu) burada sahte None dönsün — bu blok
+    # eski Wikipedia+generate_response yedek akışını test ediyor, gerçek ağ çağrısı istemiyor.
+    ai.gemini.generate_grounded_response = lambda *a, **k: None
     try:
         if network.check_now():
             _rk19()
@@ -921,6 +925,7 @@ def run_full_validation():
     finally:
         TrustedSourceFetcher.search_wikipedia = _orig_wiki19
         ai.gemini.generate_response = _orig_gem19
+        ai.gemini.generate_grounded_response = _orig_grounded19
         (_sk19(_saved_key19) if _saved_key19 else _rk19())
 
     # 19g. Ağ denetimi: 1.1.1.1:53 kesik olsa bile diğer hedeflerden biri açıksa çevrimiçi; tanı listesi döner
@@ -1541,6 +1546,133 @@ def run_full_validation():
     print("  • Az önce güncellenince (gizli açılış hariç) 'Yenilikler' penceresi bir kez gösteriliyor ✓")
 
     print("  ✅ TEST 26 BAŞARILI: Tek tuşla güncelleme + yenilikler penceresi hazır.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 27: 🌐 Tüm Kaynaklardan Arama + 🕵️ Yalan Haber Süzgeci + Çok Dilli Yanıt
+    # ─────────────────────────────────────────
+    print("\n[TEST 27] Tüm Kaynaklardan Arama, Yalan Haber Süzgeci ve Yanıt Dili:")
+    import ai_engine as _ae27
+    from config import (
+        get_response_language as _grl27,
+        get_response_language_name as _grln27,
+        set_response_language as _srl27,
+        SUPPORTED_LANGUAGES as _langs27,
+        GeminiConfig as _gc27,
+    )
+
+    # 27a. Yanıt dili ayarı: varsayılan 'tr', geçersiz kod yok sayılır, geçerli kod kalıcı,
+    # sistem promptu seçili dile göre değişiyor (çeviri özelliğinin temeli)
+    _prev_lang27 = _grl27()
+    try:
+        assert _grl27() in _langs27
+        _srl27("xx-not-a-real-lang")
+        assert _grl27() == _prev_lang27, "geçersiz dil kodu yok sayılmalıydı"
+        _srl27("en")
+        assert _grl27() == "en" and _grln27() == "English"
+        assert "English" in _gc27.get_system_prompt()
+        _srl27("tr")
+        assert _grl27() == "tr" and "Türkçe" in _gc27.get_system_prompt()
+    finally:
+        _srl27(_prev_lang27)
+    print("  • Yanıt dili ayarı kalıcı kaydediliyor, geçersiz kod yok sayılıyor, sistem promptu dile göre değişiyor ✓")
+
+    # 27b. Etki alanı ayrıştırma + bilinen mizah/dezenformasyon sitesi hızlı eleme
+    _NCF27 = _ae27.NewsCredibilityFilter
+    assert _NCF27.domain_of("https://www.example.com/x") == "example.com"
+    assert _NCF27.domain_of("https://theonion.com/haber") == "theonion.com"
+    _trusted27, _blocked27 = _NCF27._quick_screen([
+        {"title": "Gerçek Haber", "uri": "https://bbc.com/a"},
+        {"title": "Parodi Haber", "uri": "https://theonion.com/b"},
+    ])
+    assert len(_trusted27) == 1 and _trusted27[0]["uri"] == "https://bbc.com/a"
+    assert len(_blocked27) == 1 and _blocked27[0]["uri"] == "https://theonion.com/b"
+    print("  • Bilinen mizah/dezenformasyon siteleri adres bazlı hemen eleniyor ✓")
+
+    # 27c. Kara listeyi geçen kaynaklar Gemini'ye sınıflandırtılıyor; YALAN_HABER etiketli olan eleniyor
+    _saved_key27a = _gk19()
+    _sk19("AIzaSyD_TestValidGeminiKey1234567890XYZ")
+    try:
+        class _FakeGemini27:
+            def _stream_call(self, payload):
+                assert "GÜVENİLİR" in payload["contents"][0]["parts"][0]["text"]
+                return "1: GÜVENİLİR\n2: YALAN_HABER\n"
+        _srcs27 = [{"title": "A", "uri": "https://real-news.example/a"},
+                   {"title": "B", "uri": "https://fake-news.example/b"}]
+        _t27, _b27 = _NCF27.filter_sources(_FakeGemini27(), _srcs27)
+        assert len(_t27) == 1 and _t27[0]["title"] == "A"
+        assert len(_b27) == 1 and _b27[0]["title"] == "B"
+    finally:
+        (_sk19(_saved_key27a) if _saved_key27a else _rk19())
+    print("  • Gemini bir kaynağı 'YALAN_HABER' etiketlerse o kaynak süzgeçten geçemiyor ✓")
+
+    # 27d. GeminiService.generate_grounded_response: Google Arama sonucu + tekrarsız kaynak listesi (ağ sahte)
+    _g27 = _ae27.GeminiService()
+    _saved_key27b = _gk19()
+    _sk19("AIzaSyD_TestValidGeminiKey1234567890XYZ")
+    _orig_post27 = _ae27.requests.post
+    try:
+        def _fake_post27(url, json=None, headers=None, timeout=None):
+            assert "google_search" in str(json.get("tools"))
+            return _Resp(200, {
+                "candidates": [{
+                    "content": {"parts": [{"text": "Ayarlanan dilde çevrilmiş yanıt."}]},
+                    "groundingMetadata": {"groundingChunks": [
+                        {"web": {"uri": "https://real-news.example/a", "title": "A"}},
+                        {"web": {"uri": "https://real-news.example/a", "title": "A"}},   # tekrar — süzülmeli
+                    ]},
+                }],
+            })
+        _ae27.requests.post = _fake_post27
+        _res27 = _g27.generate_grounded_response("herhangi bir soru")
+        assert _res27 and _res27["answer"] == "Ayarlanan dilde çevrilmiş yanıt."
+        assert len(_res27["sources"]) == 1 and _res27["sources"][0]["uri"] == "https://real-news.example/a"
+    finally:
+        _ae27.requests.post = _orig_post27
+        (_sk19(_saved_key27b) if _saved_key27b else _rk19())
+    print("  • generate_grounded_response: Google Arama yanıtı + tekrarsız kaynak listesi doğru ayrıştırılıyor ✓")
+
+    # 27e/27f. Uçtan uca (process_query, ağ tamamen sahte): yalan haberli arama sonucu TAMAMEN
+    # atılıp güvenli Wikipedia akışına düşülüyor; tüm kaynaklar güvenilirse arama sonucu kullanılıyor
+    _orig_grounded27 = ai.gemini.generate_grounded_response
+    _orig_wiki27 = TrustedSourceFetcher.search_wikipedia
+    _orig_gen27 = ai.gemini.generate_response
+    _orig_stream27 = ai.gemini._stream_call
+    _saved_key27c = _gk19()
+    _sk19("AIzaSyD_TestValidGeminiKey1234567890XYZ")
+    ai.gemini._stream_call = lambda payload: "1: GÜVENİLİR"   # kalan güvenilirlik denetimi hep temiz çıksın
+    try:
+        ai.gemini.generate_grounded_response = lambda q: {
+            "answer": "Şüpheli kaynaklı yanıt.",
+            "sources": [{"title": "Parodi", "uri": "https://theonion.com/x"}],
+        }
+        TrustedSourceFetcher.search_wikipedia = classmethod(
+            lambda cls, q, lang="tr", product=False: {"title": "Y", "extract": "Güvenli Wikipedia özeti.",
+                                                       "source": "Wikipedia (Y)",
+                                                       "url": "https://tr.wikipedia.org/wiki/Y", "truncated": False})
+        ai.gemini.generate_response = lambda *a, **k: "Wikipedia bağlamlı güvenli yanıt."
+        _rf27 = ai.process_query("dünya düz mü zzq27")
+        assert "Şüpheli kaynaklı yanıt" not in _rf27["answer"]
+        assert _rf27["answer"].startswith("Wikipedia bağlamlı güvenli yanıt.")
+
+        ai.gemini.generate_grounded_response = lambda q: {
+            "answer": "Güvenilir kaynaklı yanıt.",
+            "sources": [{"title": "BBC", "uri": "https://bbc.com/a"}],
+        }
+        _ok27 = ai.process_query("güvenilir soru zzq27b")
+        assert _ok27["answer"].startswith("Güvenilir kaynaklı yanıt.")
+        assert "yalan haber süzgecinden geçti" in _ok27["answer"]
+        assert _ok27["source"] == "gemini+web"
+    finally:
+        ai.gemini.generate_grounded_response = _orig_grounded27
+        TrustedSourceFetcher.search_wikipedia = _orig_wiki27
+        ai.gemini.generate_response = _orig_gen27
+        ai.gemini._stream_call = _orig_stream27
+        (_sk19(_saved_key27c) if _saved_key27c else _rk19())
+    print("  • Kaynaklardan biri yalan haberse TÜM arama sonucu atılıp güvenli Wikipedia akışına düşülüyor ✓")
+    print("  • Tüm kaynaklar güvenilirse arama sonucu kullanılıyor, altyazıda süzgeçten geçtiği belirtiliyor ✓")
+
+    print("  ✅ TEST 27 BAŞARILI: Tüm kaynaklardan arama, yalan haber süzgeci ve çok dilli yanıt hazır.")
     passed_tests += 1
 
     # ─────────────────────────────────────────

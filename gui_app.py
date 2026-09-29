@@ -48,17 +48,20 @@ from config import (
     get_last_seen_version,
     get_learn_config,
     get_logo_path,
+    get_response_language,
     get_security_config,
     get_theme_config,
     get_voice_config,
     reset_theme_config,
     set_last_seen_version,
+    set_response_language,
     update_learn_config,
     update_theme_config,
     is_valid_bot_token,
     load_config,
     remove_api_key,
     set_api_key,
+    SUPPORTED_LANGUAGES,
     update_security_config,
     update_voice_config,
 )
@@ -1781,9 +1784,10 @@ class MehburApp(ctk.CTk):
         # 2b. 🎙️ Sesli Sohbet Kartı
         self._build_voice_card(self.settings_scroll)
 
-        # 2c. 🎨 Görünüm (renk ayarı) + 2d. 🧠 Otomatik Öğrenme
+        # 2c. 🎨 Görünüm (renk ayarı) + 2d. 🧠 Otomatik Öğrenme + 2e. 🌐 Yanıt Dili
         self._build_appearance_card(self.settings_scroll)
         self._build_learn_card(self.settings_scroll)
+        self._build_language_card(self.settings_scroll)
 
         # 3. Ağ Testi & Durum Kartı
         net_card = ctk.CTkFrame(
@@ -2043,6 +2047,44 @@ class MehburApp(ctk.CTk):
             self._refresh_memory_list()
         except Exception:
             pass
+
+    # ─────────────────────────────────────────
+    # 🌐 YANIT DİLİ KARTI
+    # ─────────────────────────────────────────
+
+    def _build_language_card(self, parent):
+        """MehburAI'nin yanıt dilini seçme: artık Wikipedia dışı kaynaklar da (Google
+        Arama) kullanıldığı için kaynak dili farklı olsa bile yanıt hep bu dile çevrilir."""
+        card = ctk.CTkFrame(parent, fg_color=Theme.BG_CARD, corner_radius=12,
+                            border_width=1, border_color=Theme.CYAN_DARK)
+        card.pack(fill="x", padx=0, pady=(0, 12))
+
+        ctk.CTkLabel(card, text="🌐 Yanıt Dili",
+                     font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=16, weight="bold"),
+                     text_color=Theme.CYAN_PRIMARY).pack(anchor="w", padx=16, pady=(16, 4))
+        ctk.CTkLabel(card, text="MehburAI artık Wikipedia dışındaki kaynaklardan da (haber siteleri, "
+                                "resmi siteler vb.) bilgi toplayabiliyor; bu kaynaklar hangi dilde olursa "
+                                "olsun yanıtı burada seçtiğin dile çevirip verir.",
+                     font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+                     text_color=Theme.TEXT_SECONDARY, justify="left",
+                     wraplength=700).pack(anchor="w", padx=16, pady=(0, 10))
+
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(0, 16))
+        ctk.CTkLabel(row, text="Yanıt dili", width=110, anchor="w",
+                     text_color=Theme.TEXT_PRIMARY).pack(side="left")
+        self._lang_by_name = {name: code for code, name in SUPPORTED_LANGUAGES.items()}
+        self.language_menu = ctk.CTkOptionMenu(
+            row, values=list(SUPPORTED_LANGUAGES.values()), command=self._on_language_choice,
+            width=190, fg_color=Theme.BG_INPUT, button_color=Theme.CYAN_DARK,
+            button_hover_color=Theme.CYAN_DIM)
+        self.language_menu.set(SUPPORTED_LANGUAGES[get_response_language()])
+        self.language_menu.pack(side="left")
+
+    def _on_language_choice(self, name: str):
+        code = self._lang_by_name.get(name)
+        if code:
+            set_response_language(code)
 
     # ─────────────────────────────────────────
     # 🎙️ SESLİ SOHBET KARTI

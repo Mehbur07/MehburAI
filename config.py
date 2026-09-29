@@ -19,7 +19,7 @@ import sys
 #   • KÜÇÜK ekleme (ince ayar, küçük düzeltme/iyileştirme) → SON basamak artar: 1.2 → 1.2.1 → 1.2.2 → ...
 #     (bir sonraki BÜYÜK eklemede üçüncü basamak sıfırlanıp ORTA basamak artar, örn. 1.2.3 → 1.3)
 # (Elle güncellenir — kod her eklemede otomatik saymaz.)
-APP_VERSION = "1.9"
+APP_VERSION = "2.0"
 
 # Güncelleme denetimi (updater.py): yeni sürüm GitHub'da yayınlanınca eski sürümü olan
 # bilgisayarlarda uygulama açılınca uyarı çıkar. Depo herkese açık değilse denetim sessizce atlanır.
@@ -282,16 +282,26 @@ class GeminiConfig:
     CONNECT_TIMEOUT = 10.0
     READ_TIMEOUT = 75.0
 
-    # Sistem promptu (MehburAI Kişiliği)
-    SYSTEM_PROMPT = (
-        "Sen MehburAI adında Türkçe konuşan akıllı bir yapay zeka asistanısın. "
+    # Sistem promptu (MehburAI Kişiliği). {language} yerine Ayarlar'da seçilen yanıt
+    # dilinin adı gelir — artık Wikipedia dışı kaynaklar da (Google Arama) kullanıldığı
+    # için kaynak hangi dilde olursa olsun yanıt her zaman seçili dile çevrilir.
+    SYSTEM_PROMPT_TEMPLATE = (
+        "Sen MehburAI adında akıllı bir yapay zeka asistanısın. "
         "Soruları doğru, kapsamlı ve anlaşılır şekilde yanıtlarsın; konu genişse "
         "önemli kısımları düzenli paragraflarla açıklarsın. "
-        "Güvenilir bilgi kaynakları olan Wikipedia, ansiklopediler ve bilimsel veriler "
-        "çerçevesinde yanıt üretirsin. Yanıtlarında kaynak belirtmeye özen gösterirsin. "
-        "Samimi, yardımsever ve profesyonel bir üslup kullanırsın. "
-        "Yanıtlarını Türkçe olarak verirsin."
+        "Güvenilir bilgi kaynakları olan Wikipedia, ansiklopediler, resmi siteler ve "
+        "bilimsel veriler çerçevesinde yanıt üretirsin. Yanıtlarında kaynak belirtmeye "
+        "özen gösterirsin. Samimi, yardımsever ve profesyonel bir üslup kullanırsın. "
+        "Kaynak metin hangi dilde olursa olsun, yanıtını HER ZAMAN {language} dilinde "
+        "yazarsın; gerekiyorsa kaynaktaki bilgiyi bu dile çevirirsin."
     )
+    # Geriye dönük uyumluluk için varsayılan (Türkçe) sabit metin.
+    SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE.format(language="Türkçe")
+
+    @classmethod
+    def get_system_prompt(cls) -> str:
+        """Ayarlar'da seçili yanıt diline göre sistem promptunu üretir."""
+        return cls.SYSTEM_PROMPT_TEMPLATE.format(language=get_response_language_name())
 
 
 # ─────────────────────────────────────────────
@@ -634,6 +644,50 @@ def update_learn_config(**changes) -> None:
     for key, value in changes.items():
         if key in LEARN_DEFAULTS:
             config[key] = bool(value)
+    save_config(config)
+
+
+# ─────────────────────────────────────────────
+# 🌐 Yanıt Dili Ayarı (çoklu kaynak + çeviri)
+# ─────────────────────────────────────────────
+# MehburAI artık yalnızca Wikipedia'dan değil, Gemini'nin Google Arama entegrasyonuyla
+# İNTERNETTEKİ TÜM kaynaklardan araştırabiliyor (bkz. ai_engine.GeminiService.
+# generate_grounded_response). Bu kaynaklar hangi dilde olursa olsun, burada seçilen
+# dile göre yanıt üretilir/çevrilir (bkz. GeminiConfig.get_system_prompt).
+
+SUPPORTED_LANGUAGES = {
+    "tr": "Türkçe",
+    "en": "English",
+    "de": "Deutsch",
+    "fr": "Français",
+    "es": "Español",
+    "it": "Italiano",
+    "ru": "Русский",
+    "ar": "العربية",
+    "zh": "中文",
+    "ja": "日本語",
+}
+LANGUAGE_DEFAULT = "tr"
+
+
+def get_response_language() -> str:
+    """Kayıtlı yanıt dili kodunu döndürür (geçersiz/boşsa varsayılan 'tr')."""
+    code = str(load_config().get("response_language") or "").strip().lower()
+    return code if code in SUPPORTED_LANGUAGES else LANGUAGE_DEFAULT
+
+
+def get_response_language_name() -> str:
+    """Seçili yanıt dilinin görünen adı (örn. 'Türkçe', 'English')."""
+    return SUPPORTED_LANGUAGES[get_response_language()]
+
+
+def set_response_language(code: str) -> None:
+    """Yanıt dilini kalıcı olarak kaydeder (desteklenmeyen kod sessizce yok sayılır)."""
+    code = str(code or "").strip().lower()
+    if code not in SUPPORTED_LANGUAGES:
+        return
+    config = load_config()
+    config["response_language"] = code
     save_config(config)
 
 
