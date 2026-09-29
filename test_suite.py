@@ -2135,6 +2135,22 @@ def run_full_validation():
         _r30.destroy()
     print("  • Renk 'Uygula' ile anında değişiyor; yeniden başlatma / cmd penceresi yok ✓")
 
+    # 30f. Başlıkta her zaman görünen 🔄 Güncelle tuşu: yeni sürüm varsa indirip kurucuyu açar ve
+    # MehburAI'yi kapatır; yoksa sorar. Sohbet alt çubuğu yazı kutusunun üstüne binmiyor.
+    _hdr30 = _insp26.getsource(_gui.MehburApp._build_header)
+    assert "self.header_update_btn" in _hdr30 and "_on_header_update_click" in _hdr30
+    _chk30 = _insp26.getsource(_gui.MehburApp._after_manual_update_check)
+    assert "_start_in_app_update" in _chk30 and "askyesno" in _chk30
+    assert "self._real_quit" in _insp26.getsource(_gui.MehburApp._launch_updater)
+    _chat30 = _insp26.getsource(_gui.MehburApp._build_chat_panel)
+    import re as _re30
+    _rows30 = [int(r) for r in _re30.findall(
+        r"(?:self\.chat_history_box|model_bar|input_container|quick_frame)\.grid\(row=(\d), column=0", _chat30)]
+    assert len(_rows30) == 4, _rows30
+    assert len(_rows30) == len(set(_rows30)), f"sohbet alanında iki bileşen aynı satırda: {_rows30}"
+    assert "Örnek: adın ne" not in _chat30 and "Gemini API Ayarları" not in _chat30
+    print("  • Başlıkta 🔄 Güncelle tuşu var (kurucuyu açıp MehburAI'yi kapatıyor); alt çubuk artık üst üste binmiyor ✓")
+
     print("  ✅ TEST 30 BAŞARILI: Tüm arayüz seçili dilde, hafıza bütün dillerde, renk anında değişiyor.")
     passed_tests += 1
 

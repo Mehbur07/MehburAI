@@ -403,17 +403,53 @@ class MehburApp(ctk.CTk):
     # penceresinde ilerlemeyi gösterip uygulama dosyalarını günceller
     # (ayarlar/hafıza korunur) ve güncelleme bitince MehburAI'ı kendisi açar.
 
+    def _on_header_update_click(self):
+        """Başlıktaki 🔄 Güncelle: yeni sürüm varsa hemen günceller; yoksa sorar."""
+        if self._update_in_progress:
+            return
+        self.header_update_btn.configure(state="disabled", text="⏳ Denetleniyor…")
+
+        def work():
+            try:
+                info = check_for_update()
+            except Exception:
+                info = None
+            self._ui_call(lambda: self._after_manual_update_check(info))
+        threading.Thread(target=work, daemon=True, name="MehburAI-ManualUpdateCheck").start()
+
+    def _after_manual_update_check(self, info):
+        self.header_update_btn.configure(state="normal", text="🔄 Güncelle")
+        if info:
+            self._show_update_banner(info)
+            self._start_in_app_update()
+            return
+        if messagebox.askyesno(
+            "Güncelle",
+            f"Yeni sürüm bulunamadı (sende v{APP_VERSION} var).\n\n"
+            "Yine de en son sürümü indirip yeniden kurayım mı? MehburAI kapanıp kurulum açılacak; "
+            "ayarların ve hafızan korunur.",
+            parent=self,
+        ):
+            self._start_in_app_update()
+
+    def _set_update_status(self, text: str, color=None):
+        """Güncelleme durumunu hem alttaki şeritte hem başlıktaki tuşta gösterir."""
+        self.update_status_lbl.configure(text=text, text_color=color or Theme.TEXT_SECONDARY)
+        self.header_update_btn.configure(
+            text=f"⏳ {i18n.t(text)}" if self._update_in_progress else "🔄 Güncelle")
+
     def _start_in_app_update(self):
         if self._update_in_progress:
             return
         self._update_in_progress = True
         self.update_btn.configure(state="disabled", text="🔄 Güncelleniyor…")
-        self.update_status_lbl.configure(text="İndiriliyor…", text_color=Theme.TEXT_SECONDARY)
+        self.header_update_btn.configure(state="disabled")
+        self._set_update_status("İndiriliyor…")
 
         def work():
             try:
                 setup_path = self._download_setup_exe(
-                    lambda t: self._ui_call(lambda: self.update_status_lbl.configure(text=t)))
+                    lambda t: self._ui_call(lambda: self._set_update_status(t)))
             except Exception as e:
                 self._ui_call(lambda: self._update_failed(str(e)))
                 return
@@ -446,7 +482,7 @@ class MehburApp(ctk.CTk):
         return setup_exe
 
     def _launch_updater(self, setup_path: str):
-        self.update_status_lbl.configure(text="Kurulum başlatılıyor…")
+        self._set_update_status("Kurulum başlatılıyor…")
         try:
             subprocess.Popen([setup_path], cwd=os.path.dirname(setup_path))
         except Exception as e:
@@ -454,13 +490,16 @@ class MehburApp(ctk.CTk):
             return
         # MehburAI.Setup.exe kendi penceresinde indirip kuracak, ardından MehburAI'ı
         # kendisi yeniden başlatacak — bu pencere onun önüne geçmesin diye kapanıyoruz.
-        self.update_status_lbl.configure(text="Kurulum penceresi açıldı, MehburAI kapatılıyor…")
+        self._set_update_status("Kurulum penceresi açıldı, MehburAI kapatılıyor…")
         self.after(2000, self._real_quit)
 
     def _update_failed(self, msg: str):
         self._update_in_progress = False
         self.update_btn.configure(state="normal", text="🔄 Şimdi Güncelle")
-        self.update_status_lbl.configure(text=f"⚠️ Güncelleme başarısız: {msg}", text_color=Theme.STATUS_OFFLINE)
+        self.header_update_btn.configure(state="normal", text="🔄 Güncelle")
+        self._set_update_status(f"⚠️ Güncelleme başarısız: {msg}", Theme.STATUS_OFFLINE)
+        # Şerit gizliyse hata yine görünsün
+        self.update_banner.grid()
 
     # ─────────────────────────────────────────
     # 🎉 Güncelleme Sonrası "Yenilikler" Penceresi
@@ -585,6 +624,17 @@ class MehburApp(ctk.CTk):
             text_color=Theme.TEXT_SECONDARY,
         )
         subtitle_lbl.pack(side="left", pady=(4, 0))
+
+        # 🔄 Her zaman görünen güncelleme tuşu: basınca en son MehburAI.Setup.exe indirilir,
+        # açılır ve MehburAI kapanır (kurulum bitince kurucu MehburAI'ı yeniden açar).
+        self.header_update_btn = ctk.CTkButton(
+            logo_frame, text="🔄 Güncelle", width=100, height=26,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11, weight="bold"),
+            fg_color=Theme.BG_CARD_HOVER, hover_color=Theme.CYAN_DARK, text_color=Theme.CYAN_PRIMARY,
+            border_width=1, border_color=Theme.CYAN_DARK, corner_radius=8,
+            command=self._on_header_update_click,
+        )
+        self.header_update_btn.pack(side="left", padx=(10, 0), pady=(3, 0))
 
         # Orta: Belirgin Sekme Butonları (Navbar)
         nav_frame = ctk.CTkFrame(self.header_frame, fg_color=Theme.BG_DARKEST, corner_radius=10)
@@ -865,45 +915,9 @@ class MehburApp(ctk.CTk):
         self.attachment_lbl.bind("<Button-1>", lambda e: self._clear_attachment())
         self.attachment_lbl.grid_remove()
 
-        # Hızlı Yardım & Ayarlar Butonları
+        # Alt çubuk: 🧹 Mesajları Temizle + ⏻ Çıkış (yazı kutusunun ALTINDA, kendi satırında)
         quick_frame = ctk.CTkFrame(chat_area, fg_color="transparent", height=30)
-        quick_frame.grid(row=2, column=0, sticky="ew", padx=4, pady=(6, 0))
-
-        btn_sample1 = ctk.CTkButton(
-            quick_frame,
-            text="💡 Örnek: adın ne?",
-            font=ctk.CTkFont(size=11),
-            fg_color=Theme.BG_CARD,
-            text_color=Theme.TEXT_SECONDARY,
-            hover_color=Theme.BG_CARD_HOVER,
-            height=26,
-            command=lambda: self._insert_quick_query("adın ne"),
-        )
-        btn_sample1.pack(side="left", padx=(0, 6))
-
-        btn_sample2 = ctk.CTkButton(
-            quick_frame,
-            text="🌍 Örnek: Albert Einstein kimdir?",
-            font=ctk.CTkFont(size=11),
-            fg_color=Theme.BG_CARD,
-            text_color=Theme.TEXT_SECONDARY,
-            hover_color=Theme.BG_CARD_HOVER,
-            height=26,
-            command=lambda: self._insert_quick_query("Albert Einstein kimdir?"),
-        )
-        btn_sample2.pack(side="left", padx=6)
-
-        btn_goto_settings = ctk.CTkButton(
-            quick_frame,
-            text="⚙️ Gemini API Ayarları",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            fg_color=Theme.BG_CARD,
-            text_color=Theme.CYAN_PRIMARY,
-            hover_color=Theme.BG_CARD_HOVER,
-            height=26,
-            command=lambda: self.switch_tab("settings"),
-        )
-        btn_goto_settings.pack(side="left", padx=6)
+        quick_frame.grid(row=3, column=0, sticky="ew", padx=4, pady=(6, 0))
 
         btn_clear_chat = ctk.CTkButton(
             quick_frame,
@@ -1071,12 +1085,6 @@ class MehburApp(ctk.CTk):
                 animate=False,
             )
         self.after(60, lambda: self.chat_history_box._parent_canvas.yview_moveto(1.0))
-
-    def _insert_quick_query(self, text: str):
-        """Hızlı örnek soruyu giriş kutusuna yazar."""
-        self.query_entry.delete(0, "end")
-        self.query_entry.insert(0, text)
-        self.query_entry.focus()
 
     # ─────────────────────────────────────────
     # ➕ Dosya Ekleme — bir metin dosyasını (içeriği hakkında soru sor) veya bir
