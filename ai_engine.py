@@ -20,21 +20,27 @@ import difflib
 import json
 import os
 import re
+import threading
 import time
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+import i18n
+
 from config import (
     DATA_DIR,
     FOREIGN_GREETINGS,
     GREETING_PATTERNS,
     PROFANITY_RESPONSE,
+    SUPPORTED_LANGUAGES,
     GeminiConfig,
+    get_ai_model,
     get_api_key,
     get_profanity_config,
     get_response_language,
+    model_display_name,
     get_response_language_name,
     localized_greeting,
 )
@@ -314,8 +320,8 @@ class TrustedSourceFetcher:
     def source_footer(wiki: Dict[str, Any]) -> str:
         """Yanıtın altına eklenen kaynak / 'daha fazlasını oku' satırı (düz metin)."""
         if wiki.get("truncated"):
-            return f"📖 Daha fazlasını okumak için: {wiki['url']}"
-        return f"📌 Kaynak: {wiki['source']} — {wiki['url']}"
+            return i18n.t(f"📖 Daha fazlasını okumak için: {wiki['url']}")
+        return i18n.t(f"📌 Kaynak: {wiki['source']} — {wiki['url']}")
 
 
 # ─────────────────────────────────────────────
@@ -417,7 +423,133 @@ class NewsCredibilityFilter:
     def source_footer(sources: List[Dict[str, Any]]) -> str:
         """Yalan haber süzgecinden geçmiş kaynakların altyazısı (düz metin)."""
         lines = "\n".join(f"• {s.get('title') or s.get('uri')} — {s.get('uri')}" for s in sources[:5])
-        return f"📌 Kaynaklar (yalan haber süzgecinden geçti):\n{lines}"
+        return i18n.t(f"📌 Kaynaklar (yalan haber süzgecinden geçti):\n{lines}")
+
+
+# ─────────────────────────────────────────────
+# 💬 Bilinen Topluluk Kaynakları (MehburAI Flash): Reddit + Stack Overflow
+# ─────────────────────────────────────────────
+
+class CommunitySourceFetcher:
+    """
+    "MehburAI Flash" modelinin Wikipedia'ya ek baktığı bilinen kaynaklar:
+      • Reddit — anahtarsız JSON uç noktaları artık 403 veriyor; herkese açık RSS araması
+        kullanılır (düşük istek sınırı var: 429 gelince bir süre denenmez).
+      • Stack Overflow — yalnızca teknik/programlama sorularında (Stack Exchange API, anahtarsız).
+    Sonuçlar ÖNERİ değil KAYNAKtır: AIEngine bunları kullanmadan önce NewsCredibilityFilter'dan
+    geçirir; elenen gönderi yanıta hiç girmez. Her kaynak {"title", "uri", "text", "site"} döner.
+    """
+
+    USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MehburAI (desktop assistant)"
+    REDDIT_LIMIT = 4
+    TEXT_MAX = 450
+    COOLDOWN = 300                  # sn — Reddit 429 verince
+    _reddit_off_until = 0.0
+
+    _TECH_RE = re.compile(
+        r"\b(python|javascript|typescript|java|c\+\+|c#|golang|rust|php|sql|html|css|react|node|"
+        r"django|flask|excel|vba|powershell|bash|linux|ubuntu|git|github|docker|api|json|regex|"
+        r"kod|kodu|kodlama|yazılım|program|programlama|hata kodu|error|exception|derleme|compile|"
+        r"fonksiyon|function|değişken|variable|döngü|loop|algoritma|algorithm)\b",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _plain(html_text: str) -> str:
+        import html as _html
+        text = _html.unescape(re.sub(r"<[^>]+>", " ", _html.unescape(html_text or "")))
+        text = re.sub(r"submitted by\s+/u/\S+.*$", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\[(link|comments)\]", "", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    @classmethod
+    def _clip(cls, text: str) -> str:
+        return text if len(text) <= cls.TEXT_MAX else text[:cls.TEXT_MAX].rsplit(" ", 1)[0] + "…"
+
+    @classmethod
+    def search_reddit(cls, term: str) -> List[Dict[str, str]]:
+        if not term or time.time() < cls._reddit_off_until:
+            return []
+        import xml.etree.ElementTree as ET
+        try:
+            r = requests.get(
+                "https://www.reddit.com/search.rss",
+                params={"q": term, "limit": cls.REDDIT_LIMIT, "sort": "relevance"},
+                headers={"User-Agent": cls.USER_AGENT}, timeout=8.0)
+            if r.status_code == 429:
+                cls._reddit_off_until = time.time() + cls.COOLDOWN
+                return []
+            if r.status_code != 200 or not r.content:
+                return []
+            ns = {"a": "http://www.w3.org/2005/Atom"}
+            out = []
+            for e in ET.fromstring(r.content).findall("a:entry", ns)[:cls.REDDIT_LIMIT]:
+                link = e.find("a:link", ns)
+                cat = e.find("a:category", ns)
+                uri = link.get("href") if link is not None else ""
+                if "/comments/" not in uri:          # subreddit sayfası, gönderi değil
+                    continue
+                sub = cat.get("label") if cat is not None else "r/?"
+                out.append({"title": (e.findtext("a:title", namespaces=ns) or "").strip(), "uri": uri,
+                            "text": cls._clip(cls._plain(e.findtext("a:content", namespaces=ns))),
+                            "site": f"Reddit {sub}"})
+            return out
+        except Exception:
+            return []
+
+    @classmethod
+    def is_technical(cls, query: str) -> bool:
+        return bool(cls._TECH_RE.search(turkish_lower(query or "")))
+
+    @classmethod
+    def search_stackoverflow(cls, term: str) -> List[Dict[str, str]]:
+        if not term:
+            return []
+        import html as _html
+        try:
+            r = requests.get(
+                "https://api.stackexchange.com/2.3/search/excerpts",
+                params={"order": "desc", "sort": "relevance", "q": term, "site": "stackoverflow",
+                        "pagesize": 8},
+                headers={"User-Agent": cls.USER_AGENT}, timeout=8.0)
+            if r.status_code != 200:
+                return []
+            out, seen = [], set()
+            for it in r.json().get("items") or []:
+                qid = it.get("question_id")
+                if not qid or qid in seen:
+                    continue
+                seen.add(qid)
+                out.append({"title": _html.unescape(it.get("title") or ""),
+                            "uri": f"https://stackoverflow.com/q/{qid}",
+                            "text": cls._clip(cls._plain(it.get("excerpt") or "")),
+                            "site": f"Stack Overflow (puan {it.get('score', 0)})"})
+                if len(out) == 3:
+                    break
+            return out
+        except Exception:
+            return []
+
+    @classmethod
+    def search(cls, query: str) -> List[Dict[str, str]]:
+        term = TrustedSourceFetcher._search_term(query)
+        results = cls.search_reddit(term)
+        if cls.is_technical(query):
+            results += cls.search_stackoverflow(term)
+        return results
+
+    @staticmethod
+    def as_context(sources: List[Dict[str, str]]) -> str:
+        lines = ["Topluluk kaynakları (Reddit / Stack Overflow — resmi bilgi değil, kullanıcı "
+                 "deneyimi ve görüşüdür; öyle olduğunu belirterek kullan):"]
+        for s in sources:
+            lines.append(f"- [{s['site']}] {s['title']}: {s['text']}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def source_footer(sources: List[Dict[str, str]]) -> str:
+        lines = "\n".join(f"• {s['site']}: {s['title']} — {s['uri']}" for s in sources[:5])
+        return i18n.t(f"💬 Topluluk kaynakları (yalan haber süzgecinden geçti):\n{lines}")
 
 
 # ─────────────────────────────────────────────
@@ -1523,6 +1655,85 @@ class MathSolver:
 # Ana Yapay Zeka Karar Motoru (AIEngine)
 # ─────────────────────────────────────────────
 
+class KnowledgeTranslator:
+    """
+    🌐 Hafızaya kaydedilen her bilgiyi (soru + cevap) arka planda diğer BÜTÜN dillere çevirir;
+    böylece çevrimdışıyken hangi dilde sorulursa sorulsun bulunur ve seçili dilde cevaplanır.
+    Kullanıcıyı bekletmez (ayrı iş parçacığı). Gemini yanıt vermezse kayıt 'bekliyor' kalır ve
+    bir sonraki kayıtta eksik diller yeniden denenir.
+    """
+
+    # Ücretsiz Gemini katmanı model başına günde yalnızca ~20 istek veriyor — her kayıt TEK
+    # istekte bütün dillere çevrilir (eksik kalan diller bir sonraki denemede tamamlanır).
+    GROUP = 9
+    MAX_ROWS_PER_RUN = 20
+
+    def __init__(self, memory: MemoryEngine, gemini: "GeminiService"):
+        self.memory, self.gemini = memory, gemini
+        self.enabled = True
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+
+    def kick(self) -> None:
+        if not self.enabled or not get_api_key():
+            return
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(target=self.run_pending, daemon=True,
+                                            name="MehburAI-MemoryTranslate")
+            self._thread.start()
+
+    def run_pending(self) -> int:
+        done = 0
+        for _ in range(self.MAX_ROWS_PER_RUN):
+            rows = self.memory.pending_translations(limit=1)
+            if not rows or not self.translate_row(rows[0]):
+                break
+            done += 1
+        return done
+
+    def translate_row(self, row: Dict[str, Any]) -> bool:
+        have = self.memory.translated_langs(row["id"])
+        targets = [c for c in SUPPORTED_LANGUAGES if c != row["lang"] and c not in have]
+        got: Dict[str, Tuple[str, str]] = {}
+        for i in range(0, len(targets), self.GROUP):
+            part = self._translate(row["question"], row["answer"], targets[i:i + self.GROUP])
+            if not part:
+                break
+            got.update(part)
+        complete = all(c in got for c in targets)
+        if got or complete:
+            self.memory.save_translations(row["id"], got, complete=complete)
+        return complete
+
+    def _translate(self, question: str, answer: str, langs: List[str]) -> Dict[str, Tuple[str, str]]:
+        names = {c: SUPPORTED_LANGUAGES[c] for c in langs}
+        prompt = (
+            "Translate this question/answer pair saved in a personal AI assistant's memory into each "
+            "language below. Keep emojis, URLs, numbers, line breaks and names (MehburAI, Wikipedia…) "
+            "unchanged; plain text, no markdown. Return ONLY a JSON object of the form "
+            '{"<code>": {"q": "<question>", "a": "<answer>"}} for these language codes: '
+            + json.dumps(names, ensure_ascii=False)
+            + f"\n\nQUESTION:\n{question}\n\nANSWER:\n{answer}"
+        )
+        payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                   "generationConfig": {"temperature": 0.2, "maxOutputTokens": 16384,
+                                        "responseMimeType": "application/json"}}
+        raw = self.gemini._stream_call(payload) or ""
+        try:
+            data = json.loads(raw[raw.find("{"): raw.rfind("}") + 1])
+        except ValueError:
+            return {}
+        out = {}
+        for c in langs:
+            item = data.get(c) if isinstance(data, dict) else None
+            if (isinstance(item, dict) and isinstance(item.get("q"), str) and item["q"].strip()
+                    and isinstance(item.get("a"), str) and item["a"].strip()):
+                out[c] = (item["q"], item["a"])
+        return out
+
+
 class AIEngine:
     """
     MehburAI Ana Zeka Motoru.
@@ -1537,7 +1748,14 @@ class AIEngine:
         self.memory = memory_engine or MemoryEngine()
         self.network = network_monitor or NetworkMonitor()
         self.gemini = GeminiService()
+        self.translator = KnowledgeTranslator(self.memory, self.gemini)
         self.last_activity = time.time()   # kullanıcının son sorusu — boşta öğrenme için
+
+    def remember(self, question: str, answer: str, source: str) -> None:
+        """Hafızaya (seçili dilde) kaydeder ve arka planda bütün dillere çevirtir."""
+        self.memory.save_knowledge(question=question, answer=answer, source=source,
+                                   lang=get_response_language())
+        self.translator.kick()
 
     def process_query(
         self,
@@ -1560,6 +1778,11 @@ class AIEngine:
         """
         self.last_activity = time.time()
         result = self._process_query_core(user_query, conversation_id, file_context)
+        result.setdefault("model", model_display_name())
+        # MehburAI'nin sabit (Gemini'nin üretmediği) cevapları seçili dile çevrilir; sözlükte
+        # olmayan metin (Gemini yanıtı, Wikipedia metni…) olduğu gibi kalır.
+        if isinstance(result.get("answer"), str):
+            result["answer"] = i18n.t(result["answer"])
         self.last_activity = time.time()
         if conversation_id:
             try:
@@ -1794,53 +2017,82 @@ class AIEngine:
             # Kullanıcı mesajını kaydet
             log("user", query, True)
 
-            # 🌐 ADIM: Artık yalnızca Wikipedia değil, Gemini'nin Google Arama entegrasyonuyla
-            # İNTERNETTEKİ TÜM kaynaklardan araştırılıyor. Ama kullanıcıya ulaşmadan önce her
-            # kaynak "yalan haber süzgeci"nden geçer (NewsCredibilityFilter): herhangi bir kaynak
-            # yalan haber/dezenformasyon şüphesi taşıyorsa o arama sonucu TAMAMEN ATILIR ve
-            # aşağıdaki güvenli Wikipedia+Gemini akışına (eskisi gibi) düşülür.
-            grounded = self.gemini.generate_grounded_response(query)
-            if grounded and grounded.get("sources"):
-                trusted, blocked = NewsCredibilityFilter.filter_sources(self.gemini, grounded["sources"])
-                grounded = None if blocked else {**grounded, "sources": trusted}
+            # 🧠 Seçili MehburAI modeli hangi kaynaklara bakılacağını belirler:
+            #   • Pro        → bakabildiği her yer (Gemini + Google Arama ile tüm web); arama
+            #                  kullanılamazsa Flash'ın kaynaklarına düşer.
+            #   • Flash      → bilinen kaynaklar: Wikipedia + Reddit (+ teknik sorularda Stack Overflow)
+            #   • Flash-Lite → yalnızca güvenilir kaynak: Wikipedia
+            # Her durumda web/topluluk kaynakları kullanıcıya ulaşmadan "yalan haber süzgeci"nden
+            # (NewsCredibilityFilter) geçer.
+            model = get_ai_model()
 
-            if grounded and grounded.get("answer"):
-                answer = grounded["answer"]
-                source_tag = "gemini"
-                if grounded.get("sources"):
-                    answer = f"{answer.rstrip()}\n\n{NewsCredibilityFilter.source_footer(grounded['sources'])}"
-                    source_tag = "gemini+web"
-                self.memory.save_knowledge(question=query, answer=answer, source=source_tag)
-                log("mehbur", answer, True, source=source_tag)
-                return {"answer": answer, "is_online": True, "source": source_tag, "learned": True}
+            # Pro: Google Arama sonucu — yanıt kaynakları harmanladığı için, kaynaklardan biri
+            # bile yalan haber şüphesi taşıyorsa arama sonucunun TAMAMI atılır.
+            if model == "pro":
+                grounded = self.gemini.generate_grounded_response(query)
+                if grounded and grounded.get("sources"):
+                    trusted, blocked = NewsCredibilityFilter.filter_sources(self.gemini, grounded["sources"])
+                    grounded = None if blocked else {**grounded, "sources": trusted}
 
-            # Yedek akış (anahtar yok / arama modeli desteklemedi / tüm kaynaklar elendi):
-            # Güvenilir kaynaktan araştır: Wikipedia (ürünlerde özellikler + eleştirmen
-            # değerlendirmesi; gerekirse İngilizce madde). Reddit gibi denetimsiz kaynaklar yok.
-            # Önce Ayarlar'daki yanıt dilinin Wikipedia'sı: Gemini de çalışmazsa ham metin en
-            # azından seçili dilde olur (yoksa Türkçe Wikipedia'ya düşülür).
+                if grounded and grounded.get("answer"):
+                    answer = grounded["answer"]
+                    source_tag = "gemini"
+                    if grounded.get("sources"):
+                        answer = f"{answer.rstrip()}\n\n{NewsCredibilityFilter.source_footer(grounded['sources'])}"
+                        source_tag = "gemini+web"
+                    self.remember(query, answer, source_tag)
+                    log("mehbur", answer, True, source=source_tag)
+                    return {"answer": answer, "is_online": True, "source": source_tag, "learned": True}
+
+            # Wikipedia (tüm modeller): önce Ayarlar'daki yanıt dilinin Wikipedia'sı — Gemini de
+            # çalışmazsa ham metin en azından seçili dilde olur (yoksa Türkçe Wikipedia'ya düşülür).
+            # Ürünlerde özellikler + eleştirmen değerlendirmesi; gerekirse İngilizce madde.
             is_product = TrustedSourceFetcher.is_product_query(query)
             resp_lang = get_response_language()
             wiki_data = TrustedSourceFetcher.search_wikipedia(query, lang=resp_lang, product=is_product)
             if not wiki_data and resp_lang != "tr":
                 wiki_data = TrustedSourceFetcher.search_wikipedia(query, lang="tr", product=is_product)
-            context_text = None
-            source_tag = "gemini"
 
+            # Flash (ve arama yapamayan Pro): bilinen topluluk kaynakları. Yalan haber şüphesi
+            # taşıyan gönderi TEK TEK elenir — yanıt bağlamına hiç girmez.
+            community: List[Dict[str, str]] = []
+            if model in ("flash", "pro"):
+                found = CommunitySourceFetcher.search(query)
+                if found:
+                    community, _ = NewsCredibilityFilter.filter_sources(self.gemini, found)
+
+            context_parts = []
+            tags = []
             if wiki_data:
-                context_text = f"Wikipedia Başlığı: {wiki_data['title']}\nKaynak metin:\n{wiki_data['extract']}"
-                source_tag = f"gemini + {wiki_data['source']}"
+                context_parts.append(f"Wikipedia Başlığı: {wiki_data['title']}\nKaynak metin:\n{wiki_data['extract']}")
+                tags.append(wiki_data["source"])
+            if community:
+                context_parts.append(CommunitySourceFetcher.as_context(community))
+                tags.append(" + ".join(sorted({"Reddit" if s["site"].startswith("Reddit") else "Stack Overflow"
+                                               for s in community})))
+            context_text = "\n\n".join(context_parts) or None
+            source_tag = "gemini + " + " + ".join(tags) if tags else "gemini"
 
             # Gemini API ile yanıt üret
             answer = self.gemini.generate_response(query, context=context_text)
-            if answer and wiki_data:
-                answer = f"{answer.rstrip()}\n\n{TrustedSourceFetcher.source_footer(wiki_data)}"
+            footers = []
+            if wiki_data:
+                footers.append(TrustedSourceFetcher.source_footer(wiki_data))
+            if community:
+                footers.append(CommunitySourceFetcher.source_footer(community))
+            if answer and footers:
+                answer = answer.rstrip() + "\n\n" + "\n\n".join(footers)
 
-            # Eğer Gemini API anahtarı yoksa veya hata verdiyse Wikipedia derlemesini doğrudan kullan
+            # Eğer Gemini API anahtarı yoksa veya hata verdiyse kaynak metinleri doğrudan kullan
             if not answer:
                 if wiki_data and wiki_data.get("extract"):
-                    answer = f"{wiki_data['extract']}\n\n{TrustedSourceFetcher.source_footer(wiki_data)}"
+                    answer = f"{wiki_data['extract']}\n\n" + "\n\n".join(footers)
                     source_tag = wiki_data['source']
+                elif community:
+                    answer = "\n\n".join(
+                        f"▸ {s['site']}: {s['title']}\n{s['text']}" for s in community
+                    ) + "\n\n" + CommunitySourceFetcher.source_footer(community)
+                    source_tag = tags[-1]
                 else:
                     api_key = get_api_key()
                     if not api_key:
@@ -1863,12 +2115,12 @@ class AIEngine:
             # Otomatik Öğrenme: Geçerli yanıtları hemen hafızaya kaydet ("Eğer bu soru sorulursa bu cevabı ver")
             learned = False
             if source_tag not in ["system_no_key", "unknown", "empty"]:
-                self.memory.save_knowledge(question=query, answer=answer, source=source_tag)
+                self.remember(query, answer, source_tag)
                 learned = True
 
             # Gemini API anahtarı girilmemişse yanıtın en başına özür notu (hafızaya notsuz kaydedildi)
             if not get_api_key():
-                answer = f"{NO_GEMINI_APOLOGY}\n\n{answer}"
+                answer = f"{i18n.t(NO_GEMINI_APOLOGY)}\n\n{answer}"
 
             # Sohbet kaydını yap
             log("mehbur", answer, True, source=source_tag)
@@ -1887,7 +2139,7 @@ class AIEngine:
             log("user", query, False)
 
             # Hafızadaki kayıtlı bilgileri semantik olarak ara
-            match = self.memory.search_knowledge(query)
+            match = self.memory.search_knowledge(query, lang=get_response_language())
 
             if match:
                 # Hafızadan bulundu!

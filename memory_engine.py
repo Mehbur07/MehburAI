@@ -281,6 +281,25 @@ class MemoryEngine:
                 );
             """)
 
+            # 4. 🌐 Bilgilerin diğer dillerdeki karşılıkları (kaydedilen her bilgi arka planda
+            #    bütün dillere çevrilir; çevrimdışı arama hepsine bakar, cevabı seçili dilde verir)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS knowledge_translations (
+                    knowledge_id INTEGER NOT NULL,
+                    lang TEXT NOT NULL,
+                    question TEXT NOT NULL,
+                    answer TEXT NOT NULL,
+                    PRIMARY KEY (knowledge_id, lang)
+                );
+            """)
+            kb_cols = {row["name"] for row in cursor.execute("PRAGMA table_info(knowledge_base)")}
+            if "lang" not in kb_cols:
+                cursor.execute("ALTER TABLE knowledge_base ADD COLUMN lang TEXT NOT NULL DEFAULT 'tr'")
+            if "translated" not in kb_cols:
+                # Eski kayıtlar 'çevrildi' sayılır (yüzlerce kaydı birden Gemini'ye göndermemek için);
+                # bundan sonraki her kayıt 0 ile girer ve arka planda çevrilir.
+                cursor.execute("ALTER TABLE knowledge_base ADD COLUMN translated INTEGER NOT NULL DEFAULT 1")
+
             # chat_logs.conversation_id — eski tablolar için güvenli göç
             existing_cols = {row["name"] for row in cursor.execute("PRAGMA table_info(chat_logs)")}
             if "conversation_id" not in existing_cols:
@@ -296,9 +315,12 @@ class MemoryEngine:
     # Bilgi Kaydetme & Öğrenme Pipeline'ı
     # ─────────────────────────────────────────
 
-    def save_knowledge(self, question: str, answer: str, source: str = "gemini") -> Tuple[int, bool]:
+    def save_knowledge(self, question: str, answer: str, source: str = "gemini",
+                       lang: str = "tr", translate: bool = True) -> Tuple[int, bool]:
         """
-        Soru ve cevabı hafızaya kaydeder.
+        Soru ve cevabı hafızaya kaydeder (`lang`: kaydedildiği dil). `translate` ise kayıt
+        'çevrilmedi' işaretlenir ve AIEngine onu arka planda diğer bütün dillere çevirir
+        (boşta otomatik öğrenilenler kotayı yormasın diye çevrilmez).
         Eğer çok benzer bir soru zaten varsa (>0.90 benzerlik), cevabını günceller.
 
         Returns:
@@ -327,29 +349,69 @@ class MemoryEngine:
                     # Mevcut kaydı güncelle
                     cursor.execute("""
                         UPDATE knowledge_base
-                        SET answer = ?, source = ?, updated_at = CURRENT_TIMESTAMP
+                        SET answer = ?, source = ?, lang = ?, translated = ?,
+                            updated_at = CURRENT_TIMESTAMP
                         WHERE id = ?
-                    """, (answer, source, existing_id))
+                    """, (answer, source, lang, 0 if translate else 1, existing_id))
+                    cursor.execute("DELETE FROM knowledge_translations WHERE knowledge_id = ?", (existing_id,))
                     conn.commit()
                     return existing_id, True
 
             # Yeni kayıt ekle
             cursor.execute("""
-                INSERT INTO knowledge_base (question, cleaned_question, answer, source)
-                VALUES (?, ?, ?, ?)
-            """, (question, cleaned, answer, source))
+                INSERT INTO knowledge_base (question, cleaned_question, answer, source, lang, translated)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (question, cleaned, answer, source, lang, 0 if translate else 1))
             conn.commit()
             return cursor.lastrowid, False
+
+    # ─────────────────────────────────────────
+    # 🌐 Çok dilli hafıza
+    # ─────────────────────────────────────────
+
+    def pending_translations(self, limit: int = 5) -> List[Dict[str, Any]]:
+        """Henüz bütün dillere çevrilmemiş kayıtlar (en yeniler önce)."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, question, answer, lang FROM knowledge_base WHERE translated = 0 "
+                "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            return [dict(r) for r in rows]
+
+    def translated_langs(self, knowledge_id: int) -> set:
+        with self._get_connection() as conn:
+            return {r["lang"] for r in conn.execute(
+                "SELECT lang FROM knowledge_translations WHERE knowledge_id = ?", (knowledge_id,))}
+
+    def save_translations(self, knowledge_id: int, translations: Dict[str, Tuple[str, str]],
+                          complete: bool = False) -> None:
+        """{dil: (soru, cevap)} kaydeder; `complete` ise kayıt 'çevrildi' işaretlenir."""
+        with self._get_connection() as conn:
+            for lang, (q, a) in translations.items():
+                conn.execute(
+                    "INSERT OR REPLACE INTO knowledge_translations (knowledge_id, lang, question, answer) "
+                    "VALUES (?, ?, ?, ?)", (knowledge_id, lang, q.strip(), a.strip()))
+            if complete:
+                conn.execute("UPDATE knowledge_base SET translated = 1 WHERE id = ?", (knowledge_id,))
+            conn.commit()
+
+    def get_translations(self, knowledge_id: int) -> Dict[str, Dict[str, str]]:
+        with self._get_connection() as conn:
+            return {r["lang"]: {"question": r["question"], "answer": r["answer"]} for r in conn.execute(
+                "SELECT lang, question, answer FROM knowledge_translations WHERE knowledge_id = ?",
+                (knowledge_id,))}
 
     # ─────────────────────────────────────────
     # Çevrimdışı Akıllı Arama
     # ─────────────────────────────────────────
 
     def search_knowledge(
-        self, query: str, threshold: float = MemoryConfig.SIMILARITY_THRESHOLD
+        self, query: str, threshold: float = MemoryConfig.SIMILARITY_THRESHOLD,
+        lang: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Kullanıcı sorusuna en uygun yanıtı veritabanından semantik olarak arar.
+        Kullanıcı sorusuna en uygun yanıtı veritabanından semantik olarak arar. Soru,
+        kaydın ASIL dilindeki haliyle ve bütün çevirileriyle karşılaştırılır; `lang`
+        verilirse (ve o dilde çevirisi varsa) cevap o dilde döner.
 
         Returns:
             Eğer benzerlik >= threshold ise:
@@ -369,7 +431,7 @@ class MemoryEngine:
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT id, question, answer, source, access_count FROM knowledge_base")
+            cursor.execute("SELECT id, question, answer, source, access_count, lang FROM knowledge_base")
             rows = cursor.fetchall()
 
             if not rows:
@@ -386,7 +448,24 @@ class MemoryEngine:
                     best_score = score
                     best_match = row
 
+            by_id = {row["id"]: row for row in rows}
+            for tr_row in cursor.execute("SELECT knowledge_id, question FROM knowledge_translations"):
+                row = by_id.get(tr_row["knowledge_id"])
+                if row is None:
+                    continue
+                score = HybridSimilarity.calculate_score(query, tr_row["question"])
+                if score > best_score:
+                    best_score = score
+                    best_match = row
+
             if best_match and best_score >= threshold:
+                answer = best_match["answer"]
+                if lang and lang != best_match["lang"]:
+                    tr_hit = cursor.execute(
+                        "SELECT answer FROM knowledge_translations WHERE knowledge_id = ? AND lang = ?",
+                        (best_match["id"], lang)).fetchone()
+                    if tr_hit:
+                        answer = tr_hit["answer"]
                 # Erişim sayısını ve son erişim tarihini güncelle
                 cursor.execute("""
                     UPDATE knowledge_base 
@@ -398,7 +477,7 @@ class MemoryEngine:
                 return {
                     "id": best_match["id"],
                     "question": best_match["question"],
-                    "answer": best_match["answer"],
+                    "answer": answer,
                     "source": best_match["source"],
                     "score": round(best_score, 3),
                     "access_count": best_match["access_count"] + 1,
@@ -578,6 +657,7 @@ class MemoryEngine:
         """Belirtilen ID'li kaydı hafızadan siler."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            conn.execute("DELETE FROM knowledge_translations WHERE knowledge_id = ?", (record_id,))
             cursor.execute("DELETE FROM knowledge_base WHERE id = ?", (record_id,))
             conn.commit()
             return cursor.rowcount > 0
@@ -586,6 +666,7 @@ class MemoryEngine:
         """Tüm öğrenilen bilgileri temizler."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute("DELETE FROM knowledge_translations")
             cursor.execute("DELETE FROM knowledge_base")
             cursor.execute("DELETE FROM sqlite_sequence WHERE name='knowledge_base'")
             conn.commit()

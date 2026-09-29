@@ -28,7 +28,10 @@ import urllib.request
 import webbrowser
 import zipfile
 from datetime import datetime
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
+from tkinter import messagebox as _tk_messagebox
+
+import i18n
 from typing import Optional
 
 import customtkinter as ctk
@@ -36,11 +39,18 @@ import customtkinter as ctk
 from ai_engine import AIEngine, VisionAssistant
 from auto_learner import IdleLearner
 from config import (
+    AI_MODELS,
     APP_VERSION,
+    get_ai_model,
+    model_display_name,
+    set_ai_model,
     DATA_DIR,
     GITHUB_REPO,
     THEME_ACCENTS,
     THEME_BACKGROUNDS,
+    THEME_DEFAULT_ACCENT,
+    THEME_DEFAULT_BG,
+    apply_theme,
     Theme,
     derive_theme_colors,
     ensure_app_icon,
@@ -69,7 +79,7 @@ from memory_engine import MemoryEngine
 from network_manager import NetworkMonitor
 from telegram_bot import TelegramControlBot, TelegramNotifier
 from updater import check_for_update, fetch_latest_release_notes
-from background import SingleInstance, is_autostart_enabled, restart_app, set_autostart
+from background import SingleInstance, is_autostart_enabled, set_autostart
 
 try:
     from voice_engine import (
@@ -90,6 +100,72 @@ except Exception:  # ses bağımlılıkları hiç kurulu değilse uygulama yine 
     voice_missing_deps = lambda: ["voice_engine"]  # noqa: E731
 
 
+_CTK_COLOR_OPTIONS = (
+    "fg_color", "bg_color", "border_color", "text_color", "hover_color", "button_color",
+    "button_hover_color", "progress_color", "scrollbar_button_color", "scrollbar_button_hover_color",
+    "dropdown_fg_color", "dropdown_hover_color", "dropdown_text_color", "placeholder_text_color",
+    "text_color_disabled", "selected_color", "selected_hover_color", "unselected_color",
+    "unselected_hover_color", "checkmark_color", "label_fg_color",
+)
+_TK_COLOR_OPTIONS = ("bg", "fg", "highlightbackground", "highlightcolor", "insertbackground",
+                     "selectbackground")
+
+
+def recolor_widgets(root, remap: dict) -> int:
+    """`root` ve altındaki tüm bileşenlerde renk seçeneklerini remap'e göre ('#ESKI' → '#YENI')
+    değiştirir; değişen seçenek sayısını döndürür. (Yeniden başlatmadan tema değiştirmek için.)"""
+    def convert(value):
+        if isinstance(value, str):
+            return remap.get(value.upper())
+        if isinstance(value, (tuple, list)) and len(value) == 2:
+            new = tuple(remap.get(v.upper(), v) if isinstance(v, str) else v for v in value)
+            return new if new != tuple(value) else None
+        return None
+
+    changed = 0
+    stack = [root]
+    while stack:
+        w = stack.pop()
+        options = _CTK_COLOR_OPTIONS if hasattr(w, "_fg_color") else _TK_COLOR_OPTIONS
+        for opt in options:
+            try:
+                new = convert(w.cget(opt))
+                if new:
+                    w.configure(**{opt: new})
+                    changed += 1
+            except Exception:
+                continue
+        try:
+            stack.extend(w.winfo_children())
+        except Exception:
+            pass
+    return changed
+
+
+# 🌐 Arayüz çevirisi: bundan sonra oluşturulan/değiştirilen her CTk yazısı seçili dile çevrilir
+i18n.install_hooks()
+
+
+class _TranslatedMessageBox:
+    """tkinter.messagebox'ın başlık/mesajını seçili dile çeviren ince sarmalayıcı."""
+
+    def __getattr__(self, name):
+        fn = getattr(_tk_messagebox, name)
+        if not callable(fn):
+            return fn
+
+        def call(*args, **kwargs):
+            args = tuple(i18n.t(a) if isinstance(a, str) else a for a in args)
+            for k in ("title", "message", "detail"):
+                if isinstance(kwargs.get(k), str):
+                    kwargs[k] = i18n.t(kwargs[k])
+            return fn(*args, **kwargs)
+        return call
+
+
+messagebox = _TranslatedMessageBox()
+
+
 # CustomTkinter Genel Tema Ayarları
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -103,7 +179,7 @@ class MehburApp(ctk.CTk):
         self._start_hidden = start_hidden
 
         # Pencere Başlığı ve Boyutları
-        self.title("MehburAI — Hibrit Akıllı Asistan")
+        self.title(i18n.t("MehburAI — Hibrit Akıllı Asistan"))
         self.geometry(f"{Theme.WINDOW_WIDTH}x{Theme.WINDOW_HEIGHT}")
         self.minsize(Theme.WINDOW_MIN_WIDTH, Theme.WINDOW_MIN_HEIGHT)
         self.configure(fg_color=Theme.BG_DARK)
@@ -401,7 +477,7 @@ class MehburApp(ctk.CTk):
 
     def _show_whats_new_dialog(self):
         dlg = ctk.CTkToplevel(self)
-        dlg.title("Yenilikler")
+        dlg.title(i18n.t("Yenilikler"))
         dlg.geometry("460x340")
         dlg.transient(self)
         dlg.attributes("-topmost", True)
@@ -669,9 +745,26 @@ class MehburApp(ctk.CTk):
         )
         self.chat_history_box.grid(row=0, column=0, sticky="nsew", padx=0, pady=(0, 10))
 
+        # 🧠 Model seçici — hangi kaynaklara bakılacağını belirler (Pro / Flash / Flash-Lite)
+        model_bar = ctk.CTkFrame(chat_area, fg_color="transparent")
+        model_bar.grid(row=1, column=0, sticky="ew", padx=4, pady=(0, 6))
+        self._model_by_name = {model_display_name(k): k for k in AI_MODELS}
+        self.model_menu = ctk.CTkOptionMenu(
+            model_bar, values=list(self._model_by_name), command=self._on_model_choice, width=210,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold"),
+            fg_color=Theme.BG_CARD, button_color=Theme.CYAN_DARK, button_hover_color=Theme.CYAN_DIM,
+            text_color=Theme.CYAN_PRIMARY)
+        self.model_menu.set(model_display_name(get_ai_model()))
+        self.model_menu.pack(side="left")
+        self.model_desc_lbl = ctk.CTkLabel(
+            model_bar, text=AI_MODELS[get_ai_model()]["desc"],
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11), text_color=Theme.TEXT_SECONDARY,
+            anchor="w", justify="left", wraplength=560)
+        self.model_desc_lbl.pack(side="left", padx=10, fill="x", expand=True)
+
         # Alt Giriş Paneli
         input_container = ctk.CTkFrame(chat_area, fg_color="transparent")
-        input_container.grid(row=1, column=0, sticky="ew", padx=4, pady=0)
+        input_container.grid(row=2, column=0, sticky="ew", padx=4, pady=0)
         input_container.grid_columnconfigure(0, weight=1)
 
         # Metin Giriş Kutusu
@@ -1186,7 +1279,14 @@ class MehburApp(ctk.CTk):
             animate=True,
             on_done=_after_typing,
             image_path=result.get("image_path"),
+            model_name=result.get("model"),
         )
+
+    def _on_model_choice(self, name: str):
+        key = self._model_by_name.get(name)
+        if key:
+            set_ai_model(key)
+            self.model_desc_lbl.configure(text=AI_MODELS[key]["desc"])
 
     def _set_processing(self, processing: bool):
         """Soru işlenirken UI butonlarını yönetir."""
@@ -1203,7 +1303,7 @@ class MehburApp(ctk.CTk):
 
     def _add_message_bubble(self, role: str, message: str, source: Optional[str] = None,
                             is_online: bool = True, animate: bool = True, on_done=None,
-                            image_path: Optional[str] = None):
+                            image_path: Optional[str] = None, model_name: Optional[str] = None):
         """Sohbet alanına şık bir mesaj kutucuğu ekler.
 
         MehburAI mesajları `animate=True` iken harf harf yazılır; yazım bitince
@@ -1259,7 +1359,7 @@ class MehburApp(ctk.CTk):
 
             name_lbl = ctk.CTkLabel(
                 header_box,
-                text="🤖 MehburAI",
+                text=f"🤖 {model_name or 'MehburAI'}",
                 font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold"),
                 text_color=Theme.CYAN_PRIMARY,
             )
@@ -1443,7 +1543,7 @@ class MehburApp(ctk.CTk):
 
         lbl = ctk.CTkLabel(
             bubble,
-            text="🤖 MehburAI araştırıyor ve düşünüyor... ⚡",
+            text=f"🤖 {model_display_name()} araştırıyor ve düşünüyor... ⚡",
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, slant="italic"),
             text_color=Theme.CYAN_PRIMARY,
             padx=14,
@@ -1885,7 +1985,7 @@ class MehburApp(ctk.CTk):
                      font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=16, weight="bold"),
                      text_color=Theme.CYAN_PRIMARY).pack(anchor="w", padx=16, pady=(16, 4))
         ctk.CTkLabel(card, text="Arayüzün vurgu rengini ve arka plan tonunu istediğin gibi değiştir. "
-                                "Önizlemeyi aşağıda gör; 'Uygula' dersen uygulama yeniden başlar.",
+                                "Önizlemeyi aşağıda gör; 'Uygula' dersen renkler hemen değişir.",
                      font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
                      text_color=Theme.TEXT_SECONDARY, justify="left",
                      wraplength=700).pack(anchor="w", padx=16, pady=(0, 10))
@@ -1930,14 +2030,14 @@ class MehburApp(ctk.CTk):
 
         btns = ctk.CTkFrame(card, fg_color="transparent")
         btns.pack(fill="x", padx=16, pady=(0, 14))
-        ctk.CTkButton(btns, text="✅ Uygula ve Yeniden Başlat", height=36,
+        ctk.CTkButton(btns, text="✅ Uygula", height=36,
                       fg_color=Theme.CYAN_PRIMARY, text_color=Theme.BG_DARKEST,
                       hover_color=Theme.CYAN_GLOW,
                       font=ctk.CTkFont(size=12, weight="bold"),
-                      command=self._apply_theme_and_restart).pack(side="left", padx=(0, 8))
+                      command=self._apply_theme_now).pack(side="left", padx=(0, 8))
         ctk.CTkButton(btns, text="↺ Varsayılan (Neon Cyan)", height=36,
                       fg_color=Theme.BG_CARD_HOVER, hover_color=Theme.CYAN_DARK,
-                      command=self._reset_theme_and_restart).pack(side="left")
+                      command=self._reset_theme_now).pack(side="left")
 
     def _refresh_theme_preview(self):
         c = derive_theme_colors(self._theme_pending["accent"], self._theme_pending["bg"])
@@ -1972,22 +2072,33 @@ class MehburApp(ctk.CTk):
             self._theme_pending["bg"] = THEME_BACKGROUNDS[name]
         self._refresh_theme_preview()
 
-    def _restart_now(self, why: str):
-        if not messagebox.askyesno("Yeniden başlat", f"{why}\n\nMehburAI şimdi yeniden başlatılsın mı?", parent=self):
-            return
-        if restart_app():
-            self._real_quit()
-        else:
-            messagebox.showwarning("Yeniden başlat", "Otomatik yeniden başlatılamadı — "
-                                   "lütfen uygulamayı kapatıp elle aç.", parent=self)
+    def _apply_theme_live(self, accent: str, bg: str):
+        """Yeni renkleri yeniden başlatmadan uygular: Theme'i günceller, sonra penceredeki her
+        bileşenin eski tema rengini yenisiyle değiştirir (sonradan açılan her şey zaten
+        güncel Theme'i kullanır)."""
+        names = list(derive_theme_colors(accent, bg))
+        old = {n: str(getattr(Theme, n)).upper() for n in names}
+        apply_theme(accent, bg)
+        remap = {}
+        for n in names:
+            new = str(getattr(Theme, n)).upper()
+            if old[n] != new:
+                remap.setdefault(old[n], new)
+        if remap:
+            recolor_widgets(self, remap)
+        self._refresh_theme_preview()
 
-    def _apply_theme_and_restart(self):
-        update_theme_config(accent=self._theme_pending["accent"], bg=self._theme_pending["bg"])
-        self._restart_now("Renk ayarları kaydedildi.")
+    def _apply_theme_now(self):
+        accent, bg = self._theme_pending["accent"], self._theme_pending["bg"]
+        update_theme_config(accent=accent, bg=bg)
+        self._apply_theme_live(accent, bg)
 
-    def _reset_theme_and_restart(self):
+    def _reset_theme_now(self):
         reset_theme_config()
-        self._restart_now("Varsayılan renklere dönüldü.")
+        self._theme_pending = {"accent": THEME_DEFAULT_ACCENT, "bg": THEME_DEFAULT_BG}
+        self.theme_accent_menu.set(self._name_for_color(THEME_ACCENTS, THEME_DEFAULT_ACCENT))
+        self.theme_bg_menu.set(self._name_for_color(THEME_BACKGROUNDS, THEME_DEFAULT_BG))
+        self._apply_theme_live(THEME_DEFAULT_ACCENT, THEME_DEFAULT_BG)
 
     # ─────────────────────────────────────────
     # 🧠 OTOMATİK ÖĞRENME KARTI
@@ -2059,19 +2170,19 @@ class MehburApp(ctk.CTk):
                             border_width=1, border_color=Theme.CYAN_DARK)
         card.pack(fill="x", padx=0, pady=(0, 12))
 
-        ctk.CTkLabel(card, text="🌐 Yanıt Dili",
+        ctk.CTkLabel(card, text="🌐 Dil",
                      font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=16, weight="bold"),
                      text_color=Theme.CYAN_PRIMARY).pack(anchor="w", padx=16, pady=(16, 4))
-        ctk.CTkLabel(card, text="MehburAI artık Wikipedia dışındaki kaynaklardan da (haber siteleri, "
-                                "resmi siteler vb.) bilgi toplayabiliyor; bu kaynaklar hangi dilde olursa "
-                                "olsun yanıtı burada seçtiğin dile çevirip verir.",
+        ctk.CTkLabel(card, text="Seçtiğin dil hemen uygulanır: bütün yazılar, butonlar ve MehburAI'nin "
+                                "cevapları bu dilde olur. Kaynaklar hangi dilde olursa olsun cevap bu dile "
+                                "çevrilir; hafızaya kaydedilen bilgiler de bütün dillerde saklanır.",
                      font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
                      text_color=Theme.TEXT_SECONDARY, justify="left",
                      wraplength=700).pack(anchor="w", padx=16, pady=(0, 10))
 
         row = ctk.CTkFrame(card, fg_color="transparent")
         row.pack(fill="x", padx=16, pady=(0, 16))
-        ctk.CTkLabel(row, text="Yanıt dili", width=110, anchor="w",
+        ctk.CTkLabel(row, text="Dil", width=110, anchor="w",
                      text_color=Theme.TEXT_PRIMARY).pack(side="left")
         self._lang_by_name = {name: code for code, name in SUPPORTED_LANGUAGES.items()}
         self.language_menu = ctk.CTkOptionMenu(
@@ -2085,6 +2196,10 @@ class MehburApp(ctk.CTk):
         code = self._lang_by_name.get(name)
         if code:
             set_response_language(code)
+            # Tüm arayüz yazıları yeniden başlatmadan yeni dile geçer
+            i18n.set_language(code)
+            i18n.relocalize(self)
+            self.title(i18n.t("MehburAI — Hibrit Akıllı Asistan"))
 
     # ─────────────────────────────────────────
     # 🎙️ SESLİ SOHBET KARTI
@@ -2961,9 +3076,9 @@ class MehburApp(ctk.CTk):
             d.ellipse([34, 22, 44, 32], fill=(7, 7, 11, 255))
 
         menu = pystray.Menu(
-            pystray.MenuItem("MehburAI'yi Aç", lambda *_: self.after(0, self._restore_window), default=True),
+            pystray.MenuItem(i18n.t("MehburAI'yi Aç"), lambda *_: self.after(0, self._restore_window), default=True),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Tamamen Çıkış", lambda *_: self.after(0, self._real_quit)),
+            pystray.MenuItem(i18n.t("Tamamen Çıkış"), lambda *_: self.after(0, self._real_quit)),
         )
         self._tray = pystray.Icon("MehburAI", img, "MehburAI", menu)
         threading.Thread(target=self._tray.run, daemon=True, name="MehburAI-Tray").start()
@@ -3040,7 +3155,7 @@ class MehburApp(ctk.CTk):
         """'Çıkış' düğmesi — Telegram uzaktan kontrol açıksa uyar, değilse direkt kapat."""
         if get_security_config().get("telegram_remote_enabled"):
             dlg = ctk.CTkToplevel(self)
-            dlg.title("Çıkış")
+            dlg.title(i18n.t("Çıkış"))
             dlg.geometry("420x180")
             dlg.transient(self)
             dlg.attributes("-topmost", True)

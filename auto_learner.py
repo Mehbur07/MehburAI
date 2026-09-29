@@ -118,7 +118,8 @@ class IdleLearner:
         sources = ["Wikipedia"]
 
         source_label = "otomatik öğrenme (" + " + ".join(sources) + ")"
-        self._memory.save_knowledge(question=question, answer=answer, source=source_label)
+        self._memory.save_knowledge(question=question, answer=answer, source=source_label,
+                                   translate=False)
         result = {"topic": topic, "source": source_label, "product": is_product, "time": time.time()}
         self.last_result = result
         if self._on_learned:

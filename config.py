@@ -19,7 +19,7 @@ import sys
 #   • KÜÇÜK ekleme (ince ayar, küçük düzeltme/iyileştirme) → SON basamak artar: 1.2 → 1.2.1 → 1.2.2 → ...
 #     (bir sonraki BÜYÜK eklemede üçüncü basamak sıfırlanıp ORTA basamak artar, örn. 1.2.3 → 1.3)
 # (Elle güncellenir — kod her eklemede otomatik saymaz.)
-APP_VERSION = "2.0.3"
+APP_VERSION = "2.1"
 
 # Güncelleme denetimi (updater.py): yeni sürüm GitHub'da yayınlanınca eski sürümü olan
 # bilgisayarlarda uygulama açılınca uyarı çıkar. Depo herkese açık değilse denetim sessizce atlanır.
@@ -810,6 +810,51 @@ SUPPORTED_LANGUAGES = {
     "ja": "日本語",
 }
 LANGUAGE_DEFAULT = "tr"
+
+
+# ─────────────────────────────────────────────
+# 🧠 MehburAI Modelleri (hangi kaynaklara bakılacağı)
+# ─────────────────────────────────────────────
+# Adlar sürümle birlikte gösterilir: "MehburAI Pro 2.1" (sürüm = APP_VERSION'ın ilk iki basamağı).
+AI_MODELS = {
+    "pro": {
+        "label": "Pro",
+        "desc": "Bakabildiği her yere bakar (Google Arama ile tüm web); kaynakları yalan haber süzgecinden geçirir.",
+    },
+    "flash": {
+        "label": "Flash",
+        "desc": "Bilinen kaynaklara bakar: Wikipedia, Reddit ve (teknik sorularda) Stack Overflow.",
+    },
+    "flash_lite": {
+        "label": "Flash-Lite",
+        "desc": "Yalnızca güvenilir kaynağa bakar: Wikipedia.",
+    },
+}
+AI_MODEL_DEFAULT = "pro"
+
+
+def model_version() -> str:
+    """Model adlarında görünen sürüm: APP_VERSION'ın ilk iki basamağı (2.1.3 → 2.1)."""
+    return ".".join(APP_VERSION.split(".")[:2])
+
+
+def get_ai_model() -> str:
+    key = str(load_config().get("ai_model") or "").strip()
+    return key if key in AI_MODELS else AI_MODEL_DEFAULT
+
+
+def set_ai_model(key: str) -> None:
+    if key not in AI_MODELS:
+        return
+    config = load_config()
+    config["ai_model"] = key
+    save_config(config)
+
+
+def model_display_name(key: str | None = None) -> str:
+    """Örn. 'MehburAI Flash-Lite 2.1'."""
+    key = key if key in AI_MODELS else get_ai_model()
+    return f"MehburAI {AI_MODELS[key]['label']} {model_version()}"
 
 
 def get_response_language() -> str:

@@ -49,11 +49,19 @@ def run_full_validation():
     print("  🤖 MEHBUR AI — FAZ 5 ENTEGRASYON VE DOĞRULAMA TESTLERİ")
     print("=" * 65)
     passed_tests = 0
-    total_tests = 28
+    total_tests = 30
 
     memory = MemoryEngine()
     network = NetworkMonitor()
     ai = AIEngine(memory_engine=memory, network_monitor=network)
+
+    # Testler gerçek Reddit/Stack Overflow'a istek atmasın (Reddit'in istek sınırı çok düşük);
+    # topluluk araması TEST 29'da sahte verilerle ayrıca sınanır.
+    import ai_engine as _ae0
+    _real_community_search = _ae0.CommunitySourceFetcher.search
+    _ae0.CommunitySourceFetcher.search = classmethod(lambda cls, q: [])
+    # Hafıza kayıtları testlerde arka planda gerçek Gemini ile çevrilmesin (TEST 30'da sahteyle sınanır)
+    ai.translator.enabled = False
 
     # ─────────────────────────────────────────
     # TEST 1: Ağ Bağlantı Kontrolü (Cloudflare 1.1.1.1)
@@ -823,7 +831,7 @@ def run_full_validation():
     finally:
         if _raw19 is not None:
             open(_cfg19.CONFIG_FILE, "w", encoding="utf-8").write(_raw19)
-    for m in ("_build_appearance_card", "_apply_theme_and_restart", "_build_learn_card", "_dictation_done"):
+    for m in ("_build_appearance_card", "_apply_theme_now", "_build_learn_card", "_dictation_done"):
         assert hasattr(_gui.MehburApp, m), f"gui_app.MehburApp.{m} eksik"
     print("  • Vurgu/arka plan rengi türetiliyor, kaydediliyor, geçersiz değer reddediliyor ✓")
 
@@ -1862,6 +1870,272 @@ def run_full_validation():
     print("  • Kurulum hatası artık ekranda gösteriliyor ve günlüğe yazılıyor ✓")
 
     print("  ✅ TEST 28 BAŞARILI: Kurucu, indirilenleri ne işe yaradıklarıyla listeliyor.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 29: 🧠 MehburAI Modelleri — Pro (her yer) / Flash (bilinen kaynaklar) / Flash-Lite (güvenilir)
+    # ─────────────────────────────────────────
+    print("\n[TEST 29] MehburAI Modelleri (Pro / Flash / Flash-Lite):")
+    _CSF = _ae27.CommunitySourceFetcher
+
+    # 29a. Adlar sürümden üretiliyor, seçim kalıcı
+    _ver29 = ".".join(APP_VERSION.split(".")[:2])
+    assert _cfg19.model_display_name("pro") == f"MehburAI Pro {_ver29}"
+    assert _cfg19.model_display_name("flash") == f"MehburAI Flash {_ver29}"
+    assert _cfg19.model_display_name("flash_lite") == f"MehburAI Flash-Lite {_ver29}"
+    _prev_model29 = _cfg19.get_ai_model()
+    try:
+        _cfg19.set_ai_model("yok-boyle-model")
+        assert _cfg19.get_ai_model() == _prev_model29
+        _cfg19.set_ai_model("flash")
+        assert _cfg19.get_ai_model() == "flash"
+    finally:
+        _cfg19.set_ai_model(_prev_model29)
+    print(f"  • Adlar: MehburAI Pro/Flash/Flash-Lite {_ver29}; seçim kalıcı, geçersiz model yok sayılıyor ✓")
+
+    # 29b. Reddit RSS ayrıştırma + 429'da bir süre denememe; Stack Overflow yalnız teknik sorularda
+    _rss29 = (b'<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://www.w3.org/2005/Atom">'
+              b'<entry><category term="iphone" label="r/iphone"/><title>Battery life after 1 year</title>'
+              b'<link href="https://www.reddit.com/r/iphone/comments/abc/x/"/>'
+              b'<content type="html">&lt;p&gt;Still 91% health.&lt;/p&gt; submitted by /u/someone [link] [comments]'
+              b'</content></entry></feed>')
+    _orig_get29 = _ae27.requests.get
+    _gets29 = []
+    try:
+        _CSF._reddit_off_until = 0.0
+
+        def _fake_get29(url, **k):
+            _gets29.append(url)
+            if "reddit" in url:
+                r = _Resp(200); r.content = _rss29; return r
+            return _Resp(200, {"items": [{"question_id": 42, "title": "List &amp; tuple",
+                                          "excerpt": "Use <span>tuple()</span>", "is_answered": True,
+                                          "score": 7}]})
+        _ae27.requests.get = _fake_get29
+        _red = _CSF.search_reddit("iphone battery")
+        assert _red == [{"title": "Battery life after 1 year",
+                         "uri": "https://www.reddit.com/r/iphone/comments/abc/x/",
+                         "text": "Still 91% health.", "site": "Reddit r/iphone"}], _red
+        _so = _CSF.search_stackoverflow("python list")
+        assert _so[0]["uri"] == "https://stackoverflow.com/q/42" and _so[0]["title"] == "List & tuple"
+        assert _CSF.is_technical("python'da liste nasıl sıralanır") and not _CSF.is_technical("Adana kebap tarifi")
+        _gets29.clear()
+        _real_community_search("Adana kebap tarifi")
+        assert all("stackexchange" not in u for u in _gets29)
+
+        _ae27.requests.get = lambda url, **k: (_gets29.append(url), _Resp(429))[1]
+        _gets29.clear()
+        assert _CSF.search_reddit("x") == [] and _CSF.search_reddit("y") == [] and len(_gets29) == 1
+    finally:
+        _ae27.requests.get = _orig_get29
+        _CSF._reddit_off_until = 0.0
+    print("  • Reddit (RSS) ayrıştırılıyor, 429'da bir süre denenmiyor; Stack Overflow yalnız teknik sorularda ✓")
+
+    # 29c. Uçtan uca: her model yalnızca kendi kaynaklarına bakıyor; yalan haberli gönderi bağlama girmiyor
+    _saved29 = dict(grounded=ai.gemini.generate_grounded_response, gen=ai.gemini.generate_response,
+                    stream=ai.gemini._stream_call, wiki=TrustedSourceFetcher.search_wikipedia,
+                    comm=_CSF.search, key=_gk19(), model=_cfg19.get_ai_model())
+    _log29 = {"grounded": 0, "community": 0, "ctx": None}
+    _sk19("AIzaSyD_TestValidGeminiKey1234567890XYZ")
+    try:
+        ai.gemini.generate_grounded_response = lambda q: (_log29.__setitem__("grounded", _log29["grounded"] + 1), None)[1]
+        TrustedSourceFetcher.search_wikipedia = classmethod(
+            lambda cls, q, lang="tr", product=False: {"title": "Z", "extract": "Wiki metni.", "source": "Wikipedia (Z)",
+                                                       "url": "https://tr.wikipedia.org/wiki/Z", "truncated": False})
+        _CSF.search = classmethod(lambda cls, q: (_log29.__setitem__("community", _log29["community"] + 1), [
+            {"title": "Gerçek deneyim", "uri": "https://www.reddit.com/r/a/1", "text": "iyi", "site": "Reddit r/a"},
+            {"title": "Aşılar mikroçip içeriyor", "uri": "https://www.reddit.com/r/b/2", "text": "yalan", "site": "Reddit r/b"},
+        ])[1])
+        ai.gemini._stream_call = lambda payload: "1: GÜVENİLİR\n2: YALAN_HABER"
+        ai.gemini.generate_response = lambda q, context=None: (_log29.__setitem__("ctx", context), "Yanıt.")[1]
+
+        def _ask29(model, q):
+            _cfg19.set_ai_model(model)
+            _log29.update(grounded=0, community=0, ctx=None)
+            return ai.process_query(q)
+
+        if network.check_now():
+            _r = _ask29("flash_lite", "model testi zzq29a")
+            assert _log29["grounded"] == 0 and _log29["community"] == 0 and "Reddit" not in _r["answer"]
+            assert _r["model"] == f"MehburAI Flash-Lite {_ver29}"
+
+            _r = _ask29("flash", "model testi zzq29b")
+            assert _log29["grounded"] == 0 and _log29["community"] == 1
+            assert "Gerçek deneyim" in _log29["ctx"] and "mikroçip" not in _log29["ctx"]
+            assert "reddit.com/r/a/1" in _r["answer"] and "reddit.com/r/b/2" not in _r["answer"]
+            assert _r["model"] == f"MehburAI Flash {_ver29}" and "Reddit" in _r["source"]
+
+            _r = _ask29("pro", "model testi zzq29c")
+            assert _log29["grounded"] == 1 and _log29["community"] == 1        # arama yoksa Flash kaynaklarına düşer
+            print("  • Flash-Lite yalnız Wikipedia; Flash + Reddit/Stack Overflow; Pro önce tüm web, olmazsa Flash kaynakları ✓")
+            print("  • Yalan haber şüpheli topluluk gönderisi tek tek eleniyor, yanıta hiç girmiyor ✓")
+        else:
+            print("  • (Çevrimdışı — uçtan uca model testi atlandı)")
+    finally:
+        ai.gemini.generate_grounded_response = _saved29["grounded"]
+        ai.gemini.generate_response = _saved29["gen"]
+        ai.gemini._stream_call = _saved29["stream"]
+        TrustedSourceFetcher.search_wikipedia = _saved29["wiki"]
+        _CSF.search = _saved29["comm"]
+        _cfg19.set_ai_model(_saved29["model"])
+        (_sk19(_saved29["key"]) if _saved29["key"] else _rk19())
+
+    # 29d. Arayüz: sohbet alanında model seçici var, balon başlığında cevabı veren model yazıyor
+    _src29 = _insp26.getsource(_gui.MehburApp._build_chat_panel)
+    assert "self.model_menu" in _src29 and "model_display_name" in _src29
+    assert "model_name" in _insp26.getsource(_gui.MehburApp._handle_query_response)
+    print("  • Sohbet ekranında model seçici var; her cevabın başlığında hangi modelin verdiği yazıyor ✓")
+
+    print("  ✅ TEST 29 BAŞARILI: MehburAI Pro / Flash / Flash-Lite modelleri hazır.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 30: 🌐 Tüm arayüz seçili dilde · 🧠 Hafıza bütün dillerde · 🎨 Renk yeniden başlatmadan
+    # ─────────────────────────────────────────
+    print("\n[TEST 30] Arayüz Çevirisi, Çok Dilli Hafıza, Anında Renk Değişimi:")
+    import json as _json30
+    import i18n as _i18n
+    import customtkinter as _ctk30
+
+    # 30a. t(): sözlükteki yazı + '{}' kalıbı çevriliyor, bilinmeyen (ör. sohbet mesajı) aynen kalıyor
+    _dir30 = _tmp28.mkdtemp()
+    with open(_os28.path.join(_dir30, "en.json"), "w", encoding="utf-8") as _fh:
+        _json30.dump({"strings": {"💾 Kaydet": "💾 Save"},
+                      "templates": {"📌 Kaynak: {} — {}": "📌 Source: {} — {}"}}, _fh)
+    _saved_bundle30, _saved_lang30 = _i18n.BUNDLE_DIR, _i18n.current_language()
+    _i18n.BUNDLE_DIR, _i18n._tables = _dir30, {}
+    _root30 = None
+    try:
+        _i18n.set_language("en")
+        assert _i18n.t("💾 Kaydet") == "💾 Save"
+        assert _i18n.t("📌 Kaynak: Wikipedia (X) — https://a/b{c}") == "📌 Source: Wikipedia (X) — https://a/b{c}"
+        assert _i18n.t("Bugün hava nasıl olacak?") == "Bugün hava nasıl olacak?"
+        _i18n.set_language("tr")
+        assert _i18n.t("💾 Kaydet") == "💾 Kaydet"
+
+        # 30b. Kancalar: bileşen yazısı oluşturulurken/değiştirilirken çevriliyor; dil değişince
+        # relocalize() açık penceredeki yazıları yeniden başlatmadan değiştiriyor
+        _i18n.install_hooks()
+        _i18n.set_language("en")
+        _root30 = _ctk30.CTk(); _root30.withdraw()
+        _btn30 = _ctk30.CTkButton(_root30, text="💾 Kaydet")
+        _lbl30 = _ctk30.CTkLabel(_root30, text="Sohbet mesajı olduğu gibi kalmalı")
+        assert _btn30.cget("text") == "💾 Save" and _lbl30.cget("text") == "Sohbet mesajı olduğu gibi kalmalı"
+        _i18n.set_language("tr")
+        _i18n.relocalize(_root30)
+        assert _btn30.cget("text") == "💾 Kaydet"
+        _i18n.set_language("en")
+        _lbl30.configure(text="💾 Kaydet")
+        assert _lbl30.cget("text") == "💾 Save"
+
+        # Açılır menü: ekranda çeviri, koda (get/command) Türkçe asıl değer — dil değişse de
+        with open(_os28.path.join(_dir30, "de.json"), "w", encoding="utf-8") as _fh:
+            _json30.dump({"strings": {"Siyah": "Schwarz", "Lacivert": "Marineblau"}}, _fh)
+        with open(_os28.path.join(_dir30, "en.json"), "w", encoding="utf-8") as _fh:
+            _json30.dump({"strings": {"Siyah": "Black", "Lacivert": "Navy", "💾 Kaydet": "💾 Save"}}, _fh)
+        _i18n._tables = {}
+        _i18n.set_language("de")
+        _got30 = []
+        _om30 = _ctk30.CTkOptionMenu(_root30, values=["Siyah", "Lacivert"], command=_got30.append)
+        _om30.set("Siyah")
+        assert _om30.cget("values") == ["Schwarz", "Marineblau"] and _om30.get() == "Siyah"
+        _om30._dropdown_callback("Marineblau")
+        assert _got30 == ["Lacivert"] and _om30.get() == "Lacivert"
+        _i18n.set_language("en")
+        _i18n.relocalize(_root30)
+        assert _om30.cget("values") == ["Black", "Navy"] and _om30.get() == "Lacivert"
+        assert _om30._text_label.cget("text") == "Navy"
+    finally:
+        _i18n.BUNDLE_DIR, _i18n._tables = _saved_bundle30, {}
+        _i18n.set_language(_saved_lang30)
+        if _root30 is not None:
+            _root30.destroy()
+    print("  • Arayüz yazıları seçili dile çevriliyor, dil değişince anında güncelleniyor; sohbet mesajları değişmiyor ✓")
+
+    # 30c. Gerçek sözlükler: her dilde ekrandaki yazıların (neredeyse) hepsi çevrilmiş
+    import sys as _sys30
+    _sys30.path.insert(0, _os28.path.join(_os28.path.dirname(_os28.path.abspath(__file__)), "assets", "i18n"))
+    import make_i18n as _mk30
+    _items30 = _mk30.extract()
+    for _code in _langs27:
+        if _code == "tr":
+            continue
+        _i18n._tables.pop(_code, None)
+        _st30, _tp30 = _i18n._load(_code)
+        _covered = sum(1 for s in _items30 if (s in _st30) or ("{}" in s and any(
+            rx.pattern.startswith("^" + _mk30.re.escape(s.split("{}")[0])) for rx, _ in _tp30)))
+        assert _covered >= 0.95 * len(_items30), (_code, _covered, len(_items30))
+    _i18n._tables.clear()
+    print(f"  • {len(_langs27) - 1} dilin sözlüğü ekrandaki {len(_items30)} yazının en az %95'ini kapsıyor ✓")
+
+    # 30d. Hafıza: kaydedilen bilgi arka planda bütün dillere çevriliyor; hangi dilde sorulursa
+    # sorulsun bulunuyor ve cevap seçili dilde geliyor; boşta öğrenilenler kotayı yormuyor
+    _mem30 = MemoryEngine(db_path=_os28.path.join(_tmp28.mkdtemp(), "m.db"))
+    _kid30, _ = _mem30.save_knowledge("Kara delik nedir", "Kara delik, ışığın bile kaçamadığı bölgedir.",
+                                      source="test", lang="tr")
+    _mem30.save_knowledge("Otomatik konu nedir", "x", source="oto", translate=False)
+    assert [r["id"] for r in _mem30.pending_translations(10)] == [_kid30]
+
+    class _FakeGem30:
+        calls = 0
+
+        def _stream_call(self, payload):
+            _FakeGem30.calls += 1
+            txt = payload["contents"][0]["parts"][0]["text"]
+            _s = txt.index("{", txt.index("language codes"))
+            codes = list(_json30.loads(txt[_s:txt.index("}", _s) + 1]))
+            names = {"en": ("What is a black hole", "A black hole is a region light cannot escape."),
+                     "de": ("Was ist ein Schwarzes Loch", "Ein Schwarzes Loch ist ein Bereich, dem nicht einmal Licht entkommt.")}
+            return _json30.dumps({c: {"q": names.get(c, (f"{c} q", f"{c} a"))[0],
+                                      "a": names.get(c, (f"{c} q", f"{c} a"))[1]} for c in codes})
+    _kt30 = _ae27.KnowledgeTranslator(_mem30, _FakeGem30())
+    assert _kt30.run_pending() == 1 and _FakeGem30.calls == 1          # 9 dil tek istekte (kota)
+    assert _mem30.pending_translations(10) == []
+    assert set(_mem30.get_translations(_kid30)) == set(_langs27) - {"tr"}
+    _hit_de = _mem30.search_knowledge("Was ist ein Schwarzes Loch", lang="de")
+    assert _hit_de and _hit_de["answer"].startswith("Ein Schwarzes Loch")
+    _hit_en = _mem30.search_knowledge("Kara delik nedir", lang="en")
+    assert _hit_en and _hit_en["answer"] == "A black hole is a region light cannot escape."
+    assert _mem30.search_knowledge("Kara delik nedir", lang="tr")["answer"].startswith("Kara delik")
+
+    # Gemini çökerse: kayıt 'bekliyor' kalır, gelen diller saklanır, sonra yalnız eksikler denenir
+    _kid30b, _ = _mem30.save_knowledge("Mars nedir", "Mars bir gezegendir.", source="test", lang="tr")
+
+    class _HalfGem30(_FakeGem30):
+        def _stream_call(self, payload):         # yalnızca ilk 3 dili döndürür (kesilmiş yanıt)
+            full = _json30.loads(super()._stream_call(payload))
+            return _json30.dumps(dict(list(full.items())[:3]))
+    _kt30b = _ae27.KnowledgeTranslator(_mem30, _HalfGem30())
+    assert _kt30b.run_pending() == 0
+    assert _mem30.pending_translations(10)[0]["id"] == _kid30b and len(_mem30.translated_langs(_kid30b)) == 3
+    assert _kt30.run_pending() == 1 and len(_mem30.translated_langs(_kid30b)) == 9
+    assert _mem30.delete_knowledge(_kid30b) and _mem30.get_translations(_kid30b) == {}
+
+    # AIEngine kaydı seçili dille yapıp çevirmeni tetikliyor
+    _src30 = _insp26.getsource(_ae27.AIEngine.remember)
+    assert "lang=get_response_language()" in _src30 and "self.translator.kick()" in _src30
+    assert "translate=False" in _insp26.getsource(_IdleLearner.learn_once)
+    print("  • Kaydedilen bilgi arka planda 9 dile çevriliyor; hangi dilde sorulsa bulunup seçili dilde cevaplanıyor ✓")
+    print("  • Gemini çökerse kayıt bekliyor kalıp eksik diller sonra tamamlanıyor; otomatik öğrenilenler çevrilmiyor ✓")
+
+    # 30e. Renk değişimi yeniden başlatmadan uygulanıyor (cmd penceresi açan yeniden başlatma kaldırıldı)
+    import background as _bg30
+    assert not hasattr(_bg30, "restart_app")
+    for _m30 in ("_apply_theme_now", "_reset_theme_now", "_apply_theme_live"):
+        assert hasattr(_gui.MehburApp, _m30), _m30
+    assert not hasattr(_gui.MehburApp, "_restart_now")
+    _r30 = _ctk30.CTk(); _r30.withdraw()
+    try:
+        _f30 = _ctk30.CTkFrame(_r30, fg_color="#12121A", border_color="#004D55")
+        _keep30 = _ctk30.CTkButton(_f30, fg_color="#FF2A4D", text="sil")
+        assert _gui.recolor_widgets(_r30, {"#12121A": "#161B29", "#004D55": "#38155D"}) >= 2
+        assert _f30.cget("fg_color") == "#161B29" and _f30.cget("border_color") == "#38155D"
+        assert _keep30.cget("fg_color") == "#FF2A4D"
+    finally:
+        _r30.destroy()
+    print("  • Renk 'Uygula' ile anında değişiyor; yeniden başlatma / cmd penceresi yok ✓")
+
+    print("  ✅ TEST 30 BAŞARILI: Tüm arayüz seçili dilde, hafıza bütün dillerde, renk anında değişiyor.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
