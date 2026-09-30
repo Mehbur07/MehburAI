@@ -60,12 +60,17 @@ from config import (
     get_logo_path,
     get_response_language,
     get_security_config,
+    get_sidebar_config,
     get_theme_config,
     get_voice_config,
     reset_theme_config,
     set_last_seen_version,
     set_response_language,
+    SIDEBAR_COLLAPSED_WIDTH,
+    SIDEBAR_MIN_WIDTH,
+    SIDEBAR_MAX_WIDTH,
     update_learn_config,
+    update_sidebar_config,
     update_theme_config,
     is_valid_bot_token,
     load_config,
@@ -393,44 +398,17 @@ class MehburApp(ctk.CTk):
         self.update_msg_lbl.configure(text="🔔 Yeni sürüm yayınlandı!")
         self.update_ver_lbl.configure(text=f"Sizdeki sürüm: {info['current']}  •  Yeni sürüm: {info['latest']}")
         self.update_banner.grid()
+        # Başlıktaki 🔄 Güncelle tuşu da yalnızca gerçekten bir güncelleme varken görünür
+        self.header_update_btn.pack(side="left", padx=(10, 0), pady=(3, 0))
 
     # ─────────────────────────────────────────
     # 🔄 Tek Tuşla Güncelleme
     # ─────────────────────────────────────────
-    # Bant üzerindeki "Şimdi Güncelle" düğmesi artık kullanıcıyı GitHub'a
-    # yönlendirmiyor: küçük çevrimiçi kurucuyu (MehburAI.Setup.exe, GitHub
-    # Release'teki MehburAI.zip içinde) indirip çalıştırıyor. O da kendi
-    # penceresinde ilerlemeyi gösterip uygulama dosyalarını günceller
-    # (ayarlar/hafıza korunur) ve güncelleme bitince MehburAI'ı kendisi açar.
-
-    def _on_header_update_click(self):
-        """Başlıktaki 🔄 Güncelle: yeni sürüm varsa hemen günceller; yoksa sorar."""
-        if self._update_in_progress:
-            return
-        self.header_update_btn.configure(state="disabled", text="⏳ Denetleniyor…")
-
-        def work():
-            try:
-                info = check_for_update()
-            except Exception:
-                info = None
-            self._ui_call(lambda: self._after_manual_update_check(info))
-        threading.Thread(target=work, daemon=True, name="MehburAI-ManualUpdateCheck").start()
-
-    def _after_manual_update_check(self, info):
-        self.header_update_btn.configure(state="normal", text="🔄 Güncelle")
-        if info:
-            self._show_update_banner(info)
-            self._start_in_app_update()
-            return
-        if messagebox.askyesno(
-            "Güncelle",
-            f"Yeni sürüm bulunamadı (sende v{APP_VERSION} var).\n\n"
-            "Yine de en son sürümü indirip yeniden kurayım mı? MehburAI kapanıp kurulum açılacak; "
-            "ayarların ve hafızan korunur.",
-            parent=self,
-        ):
-            self._start_in_app_update()
+    # Bant üzerindeki "Şimdi Güncelle" düğmesi ve başlıktaki 🔄 Güncelle tuşu (yalnızca yeni sürüm
+    # bulununca görünür) artık kullanıcıyı GitHub'a yönlendirmiyor: küçük çevrimiçi kurucuyu
+    # (MehburAI.Setup.exe, GitHub Release'teki MehburAI.zip içinde) indirip çalıştırıyor. O da kendi
+    # penceresinde ilerlemeyi gösterip uygulama dosyalarını günceller (ayarlar/hafıza korunur) ve
+    # güncelleme bitince MehburAI'ı kendisi açar.
 
     def _set_update_status(self, text: str, color=None):
         """Güncelleme durumunu hem alttaki şeritte hem başlıktaki tuşta gösterir."""
@@ -625,16 +603,17 @@ class MehburApp(ctk.CTk):
         )
         subtitle_lbl.pack(side="left", pady=(4, 0))
 
-        # 🔄 Her zaman görünen güncelleme tuşu: basınca en son MehburAI.Setup.exe indirilir,
-        # açılır ve MehburAI kapanır (kurulum bitince kurucu MehburAI'ı yeniden açar).
+        # 🔄 Güncelleme tuşu: yalnızca yeni bir sürüm bulununca görünür (bkz. _show_update_banner).
+        # Basınca en son MehburAI.Setup.exe indirilir, açılır ve MehburAI kapanır (kurulum bitince
+        # kurucu MehburAI'ı yeniden açar). Rengi diğer birincil eylem düğmeleriyle (Gönder, Uygula)
+        # aynı vurgu rengini kullanır ki arka planla uyumlu, tema değişince de birlikte güncellensin.
         self.header_update_btn = ctk.CTkButton(
             logo_frame, text="🔄 Güncelle", width=100, height=26,
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11, weight="bold"),
-            fg_color=Theme.BG_CARD_HOVER, hover_color=Theme.CYAN_DARK, text_color=Theme.CYAN_PRIMARY,
-            border_width=1, border_color=Theme.CYAN_DARK, corner_radius=8,
-            command=self._on_header_update_click,
+            fg_color=Theme.CYAN_PRIMARY, hover_color=Theme.CYAN_GLOW, text_color=Theme.BG_DARKEST,
+            corner_radius=8, command=self._start_in_app_update,
         )
-        self.header_update_btn.pack(side="left", padx=(10, 0), pady=(3, 0))
+        self.header_update_btn.pack_forget()
 
         # Orta: Belirgin Sekme Butonları (Navbar)
         nav_frame = ctk.CTkFrame(self.header_frame, fg_color=Theme.BG_DARKEST, corner_radius=10)
@@ -771,13 +750,32 @@ class MehburApp(ctk.CTk):
     # ─────────────────────────────────────────
 
     def _build_chat_panel(self):
-        """Sol: Sohbetler kenar çubuğu · Sağ: mesajlaşma alanı ve giriş kutusu."""
+        """Sol: Sohbetler kenar çubuğu (gizlenebilir + sürükleyerek boyutlandırılabilir) · Sağ: mesajlaşma alanı ve giriş kutusu."""
+        sc = get_sidebar_config()
+        self._sidebar_width = sc["width"]
+        self._sidebar_collapsed = sc["collapsed"]
+
         self.panel_chat.grid_rowconfigure(0, weight=1)
-        self.panel_chat.grid_columnconfigure(0, weight=0, minsize=196)
+        self.panel_chat.grid_columnconfigure(
+            0, weight=0,
+            minsize=SIDEBAR_COLLAPSED_WIDTH if self._sidebar_collapsed else self._sidebar_width)
         self.panel_chat.grid_columnconfigure(1, weight=1)
 
         # ── SOL: Sohbetler kenar çubuğu ──
         self._build_conversation_sidebar()
+
+        # Panel kapalıyken tek başına görünen "»" genişlet düğmesi (aynı grid hücresinde)
+        self.sidebar_expand_btn = ctk.CTkButton(
+            self.panel_chat, text="»", width=SIDEBAR_COLLAPSED_WIDTH - 8, height=32,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color=Theme.BG_CARD, hover_color=Theme.BG_CARD_HOVER, text_color=Theme.CYAN_PRIMARY,
+            corner_radius=8, command=self._toggle_sidebar,
+        )
+        self.sidebar_expand_btn.grid(row=0, column=0, sticky="n", pady=(0, 10))
+        if self._sidebar_collapsed:
+            self.sidebar_frame.grid_remove()
+        else:
+            self.sidebar_expand_btn.grid_remove()
 
         # ── SAĞ: Sohbet alanı ──
         chat_area = ctk.CTkFrame(self.panel_chat, fg_color="transparent")
@@ -956,16 +954,25 @@ class MehburApp(ctk.CTk):
             border_width=1,
             border_color=Theme.BORDER_DEFAULT,
         )
+        self.sidebar_frame = side
         side.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
-        side.grid_rowconfigure(2, weight=1)
+        side.grid_rowconfigure(3, weight=1)
         side.grid_columnconfigure(0, weight=1)
 
+        header_row = ctk.CTkFrame(side, fg_color="transparent")
+        header_row.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
+        header_row.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
-            side,
+            header_row,
             text="💬 Sohbetler",
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold"),
             text_color=Theme.TEXT_SECONDARY,
-        ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 4))
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(
+            header_row, text="«", width=22, height=22, font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="transparent", hover_color=Theme.BG_CARD_HOVER, text_color=Theme.TEXT_SECONDARY,
+            corner_radius=6, command=self._toggle_sidebar,
+        ).grid(row=0, column=1, sticky="e")
 
         ctk.CTkButton(
             side,
@@ -980,7 +987,7 @@ class MehburApp(ctk.CTk):
         ).grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
 
         self.conv_list_box = ctk.CTkScrollableFrame(side, fg_color="transparent")
-        self.conv_list_box.grid(row=2, column=0, sticky="nsew", padx=4, pady=2)
+        self.conv_list_box.grid(row=3, column=0, sticky="nsew", padx=4, pady=2)
         self.conv_list_box.grid_columnconfigure(0, weight=1)
 
         self.btn_delete_conv = ctk.CTkButton(
@@ -996,7 +1003,43 @@ class MehburApp(ctk.CTk):
             corner_radius=8,
             command=self._delete_active_conversation,
         )
-        self.btn_delete_conv.grid(row=3, column=0, sticky="ew", padx=8, pady=(6, 10))
+        self.btn_delete_conv.grid(row=4, column=0, sticky="ew", padx=8, pady=(6, 10))
+
+        # Sağ kenarda ince sürükleme tutamacı — panel_chat'in 0. sütun genişliğini değiştirir
+        handle = ctk.CTkFrame(self.panel_chat, fg_color="transparent", width=6, cursor="sb_h_double_arrow")
+        handle.grid(row=0, column=0, sticky="nse", padx=(0, 0))
+        handle.grid_propagate(False)
+        handle.bind("<ButtonPress-1>", self._on_sidebar_resize_start)
+        handle.bind("<B1-Motion>", self._on_sidebar_resize_drag)
+        handle.bind("<ButtonRelease-1>", self._on_sidebar_resize_end)
+
+    def _toggle_sidebar(self):
+        self._sidebar_collapsed = not self._sidebar_collapsed
+        update_sidebar_config(collapsed=self._sidebar_collapsed)
+        if self._sidebar_collapsed:
+            self.sidebar_frame.grid_remove()
+            self.sidebar_expand_btn.grid()
+            self.panel_chat.grid_columnconfigure(0, minsize=SIDEBAR_COLLAPSED_WIDTH)
+        else:
+            self.sidebar_expand_btn.grid_remove()
+            self.sidebar_frame.grid()
+            self.panel_chat.grid_columnconfigure(0, minsize=self._sidebar_width)
+
+    def _on_sidebar_resize_start(self, event):
+        self._resize_start_x = event.x_root
+        self._resize_start_width = self._sidebar_width
+
+    def _on_sidebar_resize_drag(self, event):
+        if self._sidebar_collapsed:
+            return
+        new_width = self._resize_start_width + (event.x_root - self._resize_start_x)
+        new_width = max(SIDEBAR_MIN_WIDTH, min(SIDEBAR_MAX_WIDTH, new_width))
+        self._sidebar_width = new_width
+        self.panel_chat.grid_columnconfigure(0, minsize=new_width)
+
+    def _on_sidebar_resize_end(self, event):
+        if not self._sidebar_collapsed:
+            update_sidebar_config(width=self._sidebar_width)
 
     def _refresh_conversation_list(self):
         """Sohbet listesini yeniden çizer; aktif olan vurgulanır, ruh hali ikonlanır."""
@@ -1536,7 +1579,7 @@ class MehburApp(ctk.CTk):
         tick()
 
     def _add_loading_bubble(self):
-        """Cevap beklenirken dönen yükleniyor balonu."""
+        """Cevap beklenirken dönen yükleniyor balonu — model adı + animasyonlu '...' noktalar."""
         self._loading_frame = ctk.CTkFrame(self.chat_history_box, fg_color="transparent")
         self._loading_frame.pack(fill="x", padx=8, pady=4)
 
@@ -1549,19 +1592,33 @@ class MehburApp(ctk.CTk):
         )
         bubble.pack(side="left", padx=(0, 60))
 
-        lbl = ctk.CTkLabel(
+        self._loading_lbl = ctk.CTkLabel(
             bubble,
-            text=f"🤖 {model_display_name()} araştırıyor ve düşünüyor... ⚡",
-            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, slant="italic"),
+            text=f"🤖 {model_display_name()}",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=13, weight="bold"),
             text_color=Theme.CYAN_PRIMARY,
             padx=14,
             pady=10,
         )
-        lbl.pack()
+        self._loading_lbl.pack()
+        self._loading_dots = 0
+        self._loading_after_id = None
+        self._animate_loading_dots()
         self.after(50, lambda: self.chat_history_box._parent_canvas.yview_moveto(1.0))
 
+    def _animate_loading_dots(self):
+        """~450ms'de bir '.' → '..' → '...' arasında döner (yazı yerine sade animasyon)."""
+        if not getattr(self, "_loading_frame", None) or not self._loading_frame.winfo_exists():
+            return
+        self._loading_dots = (self._loading_dots % 3) + 1
+        self._loading_lbl.configure(text=f"🤖 {model_display_name()} {'.' * self._loading_dots}")
+        self._loading_after_id = self.after(450, self._animate_loading_dots)
+
     def _remove_loading_bubble(self):
-        """Yükleniyor balonunu kaldırır."""
+        """Yükleniyor balonunu (ve nokta animasyonunu) kaldırır."""
+        if getattr(self, "_loading_after_id", None):
+            self.after_cancel(self._loading_after_id)
+            self._loading_after_id = None
         if hasattr(self, "_loading_frame") and self._loading_frame:
             self._loading_frame.destroy()
             self._loading_frame = None

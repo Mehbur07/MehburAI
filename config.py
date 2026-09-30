@@ -19,7 +19,7 @@ import sys
 #   • KÜÇÜK ekleme (ince ayar, küçük düzeltme/iyileştirme) → SON basamak artar: 1.2 → 1.2.1 → 1.2.2 → ...
 #     (bir sonraki BÜYÜK eklemede üçüncü basamak sıfırlanıp ORTA basamak artar, örn. 1.2.3 → 1.3)
 # (Elle güncellenir — kod her eklemede otomatik saymaz.)
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.2"
 
 # Güncelleme denetimi (updater.py): yeni sürüm GitHub'da yayınlanınca eski sürümü olan
 # bilgisayarlarda uygulama açılınca uyarı çıkar. Depo herkese açık değilse denetim sessizce atlanır.
@@ -181,6 +181,35 @@ THEME_DEFAULT_BG = THEME_BACKGROUNDS["Siyah"]
 def is_valid_hex_color(value) -> bool:
     import re
     return bool(re.fullmatch(r"#[0-9A-Fa-f]{6}", str(value or "").strip()))
+
+
+# ─────────────────────────────────────────────
+# 💬 Sohbetler Yan Paneli (genişlik + gizle/göster) — kalıcı
+# ─────────────────────────────────────────────
+SIDEBAR_DEFAULT_WIDTH = 196
+SIDEBAR_MIN_WIDTH = 160
+SIDEBAR_MAX_WIDTH = 420
+SIDEBAR_COLLAPSED_WIDTH = 34
+
+
+def get_sidebar_config() -> dict:
+    """Kayıtlı yan panel genişliği (sınırlar içinde) ve gizli/görünür durumu."""
+    config = load_config()
+    try:
+        width = int(config.get("sidebar_width"))
+    except (TypeError, ValueError):
+        width = SIDEBAR_DEFAULT_WIDTH
+    width = max(SIDEBAR_MIN_WIDTH, min(SIDEBAR_MAX_WIDTH, width))
+    return {"width": width, "collapsed": bool(config.get("sidebar_collapsed", False))}
+
+
+def update_sidebar_config(width: int | None = None, collapsed: bool | None = None) -> None:
+    config = load_config()
+    if width is not None:
+        config["sidebar_width"] = max(SIDEBAR_MIN_WIDTH, min(SIDEBAR_MAX_WIDTH, int(width)))
+    if collapsed is not None:
+        config["sidebar_collapsed"] = bool(collapsed)
+    save_config(config)
 
 
 def _hex_to_rgb(h: str):

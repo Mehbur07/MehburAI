@@ -2135,13 +2135,16 @@ def run_full_validation():
         _r30.destroy()
     print("  • Renk 'Uygula' ile anında değişiyor; yeniden başlatma / cmd penceresi yok ✓")
 
-    # 30f. Başlıkta her zaman görünen 🔄 Güncelle tuşu: yeni sürüm varsa indirip kurucuyu açar ve
-    # MehburAI'yi kapatır; yoksa sorar. Sohbet alt çubuğu yazı kutusunun üstüne binmiyor.
+    # 30f. Başlıktaki 🔄 Güncelle tuşu YALNIZCA yeni sürüm bulununca görünür (varsayılan gizli),
+    # tema rengiyle uyumlu (Gönder/Uygula ile aynı vurgu rengi), tıklayınca doğrudan günceller.
+    # Sohbet alt çubuğu yazı kutusunun üstüne binmiyor.
     _hdr30 = _insp26.getsource(_gui.MehburApp._build_header)
-    assert "self.header_update_btn" in _hdr30 and "_on_header_update_click" in _hdr30
-    _chk30 = _insp26.getsource(_gui.MehburApp._after_manual_update_check)
-    assert "_start_in_app_update" in _chk30 and "askyesno" in _chk30
+    assert "self.header_update_btn" in _hdr30 and "pack_forget" in _hdr30
+    assert "fg_color=Theme.CYAN_PRIMARY" in _hdr30.split("header_update_btn = ctk.CTkButton")[1][:400]
+    _banner30 = _insp26.getsource(_gui.MehburApp._show_update_banner)
+    assert "header_update_btn.pack(" in _banner30
     assert "self._real_quit" in _insp26.getsource(_gui.MehburApp._launch_updater)
+    assert not hasattr(_gui.MehburApp, "_on_header_update_click")
     _chat30 = _insp26.getsource(_gui.MehburApp._build_chat_panel)
     import re as _re30
     _rows30 = [int(r) for r in _re30.findall(
@@ -2149,7 +2152,32 @@ def run_full_validation():
     assert len(_rows30) == 4, _rows30
     assert len(_rows30) == len(set(_rows30)), f"sohbet alanında iki bileşen aynı satırda: {_rows30}"
     assert "Örnek: adın ne" not in _chat30 and "Gemini API Ayarları" not in _chat30
-    print("  • Başlıkta 🔄 Güncelle tuşu var (kurucuyu açıp MehburAI'yi kapatıyor); alt çubuk artık üst üste binmiyor ✓")
+    print("  • 🔄 Güncelle tuşu yalnızca yeni sürüm bulununca görünüyor, tema rengiyle uyumlu ✓")
+
+    # 30g. Yan panel gizlenebilir ve genişliği sürükleyerek/kalıcı olarak ayarlanabilir
+    _prev_sb30 = _cfg19.get_sidebar_config()
+    try:
+        _cfg19.update_sidebar_config(width=250, collapsed=True)
+        _sb30 = _cfg19.get_sidebar_config()
+        assert _sb30 == {"width": 250, "collapsed": True}
+        _cfg19.update_sidebar_config(width=9999)          # sınırın üstü kırpılmalı
+        assert _cfg19.get_sidebar_config()["width"] == _cfg19.SIDEBAR_MAX_WIDTH
+        _cfg19.update_sidebar_config(width=1)
+        assert _cfg19.get_sidebar_config()["width"] == _cfg19.SIDEBAR_MIN_WIDTH
+    finally:
+        _cfg19.update_sidebar_config(width=_prev_sb30["width"], collapsed=_prev_sb30["collapsed"])
+    _sb_src30 = _insp26.getsource(_gui.MehburApp._build_conversation_sidebar)
+    assert "self.sidebar_frame" in _sb_src30 and "_on_sidebar_resize_start" in _sb_src30
+    assert "_toggle_sidebar" in _insp26.getsource(_gui.MehburApp._build_chat_panel)
+    print("  • Yan panel gizlenebiliyor, genişliği sürüklenerek ayarlanıp kalıcı kaydediliyor ✓")
+
+    # 30h. Yükleniyor balonu artık "araştırıyor ve düşünüyor" yazısı yerine animasyonlu nokta gösteriyor
+    _load_src30 = _insp26.getsource(_gui.MehburApp._add_loading_bubble)
+    assert "araştırıyor ve düşünüyor" not in _load_src30 and "_animate_loading_dots" in _load_src30
+    _dot_src30 = _insp26.getsource(_gui.MehburApp._animate_loading_dots)
+    assert "'.' * self._loading_dots" in _dot_src30 and "self.after(450" in _dot_src30
+    assert "after_cancel" in _insp26.getsource(_gui.MehburApp._remove_loading_bubble)
+    print("  • Yükleniyor balonunda sabit yazı yerine animasyonlu '...' noktalar var ✓")
 
     print("  ✅ TEST 30 BAŞARILI: Tüm arayüz seçili dilde, hafıza bütün dillerde, renk anında değişiyor.")
     passed_tests += 1
