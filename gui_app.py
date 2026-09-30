@@ -18,6 +18,7 @@ Neon Cyan & Derin Siyah temalı CustomTkinter masaüstü arayüzü.
 import math
 import os
 import re
+import requests
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,8 @@ from auto_learner import IdleLearner
 from config import (
     AI_MODELS,
     APP_VERSION,
+    clear_account_session,
+    get_account_config,
     get_ai_model,
     model_display_name,
     set_ai_model,
@@ -70,6 +73,7 @@ from config import (
     SIDEBAR_COLLAPSED_WIDTH,
     SIDEBAR_MIN_WIDTH,
     SIDEBAR_MAX_WIDTH,
+    update_account_config,
     update_learn_config,
     update_sidebar_config,
     update_theme_config,
@@ -1964,10 +1968,11 @@ class MehburApp(ctk.CTk):
         # 2b. 🎙️ Sesli Sohbet Kartı
         self._build_voice_card(self.settings_scroll)
 
-        # 2c. 🎨 Görünüm (renk ayarı) + 2d. 🧠 Otomatik Öğrenme + 2e. 🌐 Yanıt Dili
+        # 2c. 🎨 Görünüm (renk ayarı) + 2d. 🧠 Otomatik Öğrenme + 2e. 🌐 Yanıt Dili + 2f. 👤 Hesap
         self._build_appearance_card(self.settings_scroll)
         self._build_learn_card(self.settings_scroll)
         self._build_language_card(self.settings_scroll)
+        self._build_account_card(self.settings_scroll)
 
         # 3. Ağ Testi & Durum Kartı
         net_card = ctk.CTkFrame(
@@ -2280,6 +2285,156 @@ class MehburApp(ctk.CTk):
             i18n.set_language(code)
             i18n.relocalize(self)
             self.title(i18n.t("MehburAI — Hibrit Akıllı Asistan"))
+
+    # ─────────────────────────────────────────
+    # 👤 HESAP KARTI (kendi barındırdığın account_server.py'ye e-posta+şifre)
+    # ─────────────────────────────────────────
+
+    def _build_account_card(self, parent):
+        """Kayıt Ol / Giriş Yap — sunucu MehburAI.exe'nin İÇİNDE DEĞİL, account_server.py'yi
+        çalıştıran kişinin kendi bilgisayarında çalışır. Buradaki adres o sunucuyu gösterir."""
+        acc = get_account_config()
+        card = ctk.CTkFrame(parent, fg_color=Theme.BG_CARD, corner_radius=12,
+                            border_width=1, border_color=Theme.CYAN_DARK)
+        card.pack(fill="x", padx=0, pady=(0, 12))
+
+        ctk.CTkLabel(card, text="👤 Hesap",
+                     font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=16, weight="bold"),
+                     text_color=Theme.CYAN_PRIMARY).pack(anchor="w", padx=16, pady=(16, 4))
+        ctk.CTkLabel(card, text="E-posta + şifreyle kayıt ol / giriş yap. Sunucu MehburAI'nin içinde "
+                                "değildir — birinin (örn. arkadaşının) kendi bilgisayarında "
+                                "account_server.py'yi çalıştırması ve adresini aşağıya girmen gerekir.",
+                     font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+                     text_color=Theme.TEXT_SECONDARY, justify="left",
+                     wraplength=760).pack(anchor="w", padx=16, pady=(0, 10))
+
+        row1 = ctk.CTkFrame(card, fg_color="transparent")
+        row1.pack(fill="x", padx=16, pady=(0, 8))
+        ctk.CTkLabel(row1, text="Sunucu adresi", width=110, anchor="w",
+                     text_color=Theme.TEXT_PRIMARY).pack(side="left")
+        self.account_server_entry = ctk.CTkEntry(
+            row1, placeholder_text="http://192.168.1.5:8765", height=36, corner_radius=8,
+            fg_color=Theme.BG_INPUT, border_color=Theme.CYAN_DARK)
+        self.account_server_entry.pack(side="left", fill="x", expand=True)
+        if acc["account_server_url"]:
+            self.account_server_entry.insert(0, acc["account_server_url"])
+        self.account_server_entry.bind("<FocusOut>", lambda e: update_account_config(
+            account_server_url=self.account_server_entry.get().strip()))
+
+        self.account_form_frame = ctk.CTkFrame(card, fg_color="transparent")
+        self.account_form_frame.pack(fill="x", padx=16, pady=(0, 4))
+        row2 = ctk.CTkFrame(self.account_form_frame, fg_color="transparent")
+        row2.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(row2, text="E-posta", width=110, anchor="w",
+                     text_color=Theme.TEXT_PRIMARY).pack(side="left")
+        self.account_email_entry = ctk.CTkEntry(row2, placeholder_text="sen@ornek.com", height=36,
+                                                corner_radius=8, fg_color=Theme.BG_INPUT,
+                                                border_color=Theme.CYAN_DARK)
+        self.account_email_entry.pack(side="left", fill="x", expand=True)
+
+        row3 = ctk.CTkFrame(self.account_form_frame, fg_color="transparent")
+        row3.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(row3, text="Şifre", width=110, anchor="w",
+                     text_color=Theme.TEXT_PRIMARY).pack(side="left")
+        self.account_password_entry = ctk.CTkEntry(row3, placeholder_text="en az 8 karakter", show="•",
+                                                    height=36, corner_radius=8, fg_color=Theme.BG_INPUT,
+                                                    border_color=Theme.CYAN_DARK)
+        self.account_password_entry.pack(side="left", fill="x", expand=True)
+
+        btn_row = ctk.CTkFrame(self.account_form_frame, fg_color="transparent")
+        btn_row.pack(fill="x", pady=(0, 8))
+        self.account_register_btn = ctk.CTkButton(
+            btn_row, text="📝 Kayıt Ol", height=34, fg_color=Theme.BG_CARD_HOVER,
+            hover_color=Theme.CYAN_DARK, text_color=Theme.CYAN_PRIMARY, border_width=1,
+            border_color=Theme.CYAN_DARK, command=lambda: self._account_action("register"))
+        self.account_register_btn.pack(side="left", padx=(0, 8))
+        self.account_login_btn = ctk.CTkButton(
+            btn_row, text="🔓 Giriş Yap", height=34, fg_color=Theme.CYAN_PRIMARY,
+            hover_color=Theme.CYAN_GLOW, text_color=Theme.BG_DARKEST,
+            command=lambda: self._account_action("login"))
+        self.account_login_btn.pack(side="left")
+
+        self.account_logged_frame = ctk.CTkFrame(card, fg_color="transparent")
+        self.account_logged_lbl = ctk.CTkLabel(
+            self.account_logged_frame, text="", font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=13, weight="bold"),
+            text_color=Theme.STATUS_ONLINE)
+        self.account_logged_lbl.pack(side="left", padx=(0, 10))
+        ctk.CTkButton(self.account_logged_frame, text="🚪 Çıkış Yap", height=30, width=110,
+                      fg_color=Theme.BG_CARD_HOVER, hover_color="#44111E", text_color="#FF8888",
+                      command=self._account_logout).pack(side="left")
+
+        self.account_status_lbl = ctk.CTkLabel(
+            card, text="", font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+            text_color=Theme.TEXT_SECONDARY, justify="left", wraplength=760)
+        self.account_status_lbl.pack(anchor="w", padx=16, pady=(0, 14))
+
+        self._refresh_account_view()
+
+    def _refresh_account_view(self):
+        """account_email doluysa 'giriş yapılmış' görünümü, boşsa kayıt/giriş formu gösterir."""
+        acc = get_account_config()
+        if acc["account_email"]:
+            self.account_form_frame.pack_forget()
+            self.account_logged_lbl.configure(text=f"✅ Giriş yapıldı: {acc['account_email']}")
+            self.account_logged_frame.pack(fill="x", padx=16, pady=(0, 8))
+        else:
+            self.account_logged_frame.pack_forget()
+            self.account_form_frame.pack(fill="x", padx=16, pady=(0, 4))
+
+    def _account_action(self, kind: str):
+        """kind: 'register' ya da 'login' — account_server.py'ye istek atar (arka planda)."""
+        base = self.account_server_entry.get().strip().rstrip("/")
+        email = self.account_email_entry.get().strip()
+        password = self.account_password_entry.get()
+        if not base:
+            self.account_status_lbl.configure(text="⚠️ Önce sunucu adresini gir.", text_color=Theme.STATUS_WARNING)
+            return
+        if not email or not password:
+            self.account_status_lbl.configure(text="⚠️ E-posta ve şifre gerekli.", text_color=Theme.STATUS_WARNING)
+            return
+        update_account_config(account_server_url=base)
+        btn = self.account_register_btn if kind == "register" else self.account_login_btn
+        btn.configure(state="disabled")
+        self.account_status_lbl.configure(text="Bağlanılıyor...", text_color=Theme.TEXT_SECONDARY)
+
+        def work():
+            try:
+                r = requests.post(f"{base}/api/{kind}", json={"email": email, "password": password}, timeout=10)
+                data = r.json()
+            except requests.RequestException as e:
+                data = {"ok": False, "message": f"Sunucuya bağlanılamadı ({type(e).__name__})."}
+            except ValueError:
+                data = {"ok": False, "message": "Sunucudan geçersiz yanıt geldi."}
+            self._ui_call(lambda: self._on_account_result(kind, data))
+        threading.Thread(target=work, daemon=True, name="MehburAI-Account").start()
+
+    def _on_account_result(self, kind: str, data: dict):
+        btn = self.account_register_btn if kind == "register" else self.account_login_btn
+        if btn.winfo_exists():
+            btn.configure(state="normal")
+        ok = bool(data.get("ok"))
+        self.account_status_lbl.configure(
+            text=("✅ " if ok else "❌ ") + str(data.get("message") or ""),
+            text_color=Theme.STATUS_ONLINE if ok else Theme.STATUS_OFFLINE,
+        )
+        if ok and kind == "login" and data.get("token"):
+            update_account_config(account_email=data.get("email", ""), account_token=data["token"])
+            self.account_password_entry.delete(0, "end")
+            self._refresh_account_view()
+
+    def _account_logout(self):
+        acc = get_account_config()
+        base, token = acc["account_server_url"].rstrip("/"), acc["account_token"]
+
+        def work():
+            try:
+                requests.post(f"{base}/api/logout", json={"token": token}, timeout=8)
+            except requests.RequestException:
+                pass
+        threading.Thread(target=work, daemon=True, name="MehburAI-AccountLogout").start()
+        clear_account_session()
+        self.account_status_lbl.configure(text="Çıkış yapıldı.", text_color=Theme.TEXT_SECONDARY)
+        self._refresh_account_view()
 
     # ─────────────────────────────────────────
     # 🎙️ SESLİ SOHBET KARTI

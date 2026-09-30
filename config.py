@@ -19,7 +19,7 @@ import sys
 #   • KÜÇÜK ekleme (ince ayar, küçük düzeltme/iyileştirme) → SON basamak artar: 1.2 → 1.2.1 → 1.2.2 → ...
 #     (bir sonraki BÜYÜK eklemede üçüncü basamak sıfırlanıp ORTA basamak artar, örn. 1.2.3 → 1.3)
 # (Elle güncellenir — kod her eklemede otomatik saymaz.)
-APP_VERSION = "2.3"
+APP_VERSION = "2.4"
 
 # Güncelleme denetimi (updater.py): yeni sürüm GitHub'da yayınlanınca eski sürümü olan
 # bilgisayarlarda uygulama açılınca uyarı çıkar. Depo herkese açık değilse denetim sessizce atlanır.
@@ -210,6 +210,31 @@ def update_sidebar_config(width: int | None = None, collapsed: bool | None = Non
     if collapsed is not None:
         config["sidebar_collapsed"] = bool(collapsed)
     save_config(config)
+
+
+# ─────────────────────────────────────────────
+# 👤 Hesap (kendi barındırdığın account_server.py'ye e-posta+şifre ile giriş)
+# ─────────────────────────────────────────────
+ACCOUNT_DEFAULTS = {"account_server_url": "", "account_email": "", "account_token": ""}
+
+
+def get_account_config() -> dict:
+    """Kayıtlı hesap sunucusu adresi + oturum bilgisi (yoksa boş)."""
+    config = load_config()
+    return {k: str(config.get(k) or ACCOUNT_DEFAULTS[k]) for k in ACCOUNT_DEFAULTS}
+
+
+def update_account_config(**changes) -> None:
+    config = load_config()
+    for key, value in changes.items():
+        if key in ACCOUNT_DEFAULTS:
+            config[key] = value
+    save_config(config)
+
+
+def clear_account_session() -> None:
+    """Yalnızca oturumu (email/token) temizler; sunucu adresini korur."""
+    update_account_config(account_email="", account_token="")
 
 
 def _hex_to_rgb(h: str):

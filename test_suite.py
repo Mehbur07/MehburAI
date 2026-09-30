@@ -49,7 +49,7 @@ def run_full_validation():
     print("  🤖 MEHBUR AI — FAZ 5 ENTEGRASYON VE DOĞRULAMA TESTLERİ")
     print("=" * 65)
     passed_tests = 0
-    total_tests = 31
+    total_tests = 32
 
     memory = MemoryEngine()
     network = NetworkMonitor()
@@ -2266,6 +2266,106 @@ def run_full_validation():
     print("  • Ayarlar'daki anahtar kartı artık evrensel; kaydedince tespit edilen şirketi gösteriyor ✓")
 
     print("  ✅ TEST 31 BAŞARILI: Evrensel API anahtarı — şirket tespiti + sohbet yönlendirmesi hazır.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 32: 👤 Hesap Sunucusu (Kayıt Ol / Giriş Yap, e-posta + şifre)
+    # ─────────────────────────────────────────
+    print("\n[TEST 32] Hesap Sunucusu (Kayıt Ol / Giriş Yap):")
+    import account_server as _acc32
+    import tempfile as _tmp32b
+
+    _orig_db32 = _acc32.DB_PATH
+    _acc32.DB_PATH = _os28.path.join(_tmp32b.mkdtemp(), "accounts.db")
+    _acc32._failed_attempts.clear()
+    try:
+        _acc32.init_db()
+
+        # 32a. Doğrulama: geçersiz e-posta / kısa şifre reddediliyor
+        assert _acc32.register("gecersiz", "gecerlisifre1") == (False, "Geçerli bir e-posta adresi gir.")
+        assert _acc32.register("x@y.com", "kisa") == (False, "Şifre en az 8 karakter olmalı.")
+
+        # 32b. Kayıt + aynı e-postayla (büyük/küçük harf farketmeden) tekrar kayıt reddediliyor
+        assert _acc32.register("Test@Ornek.com", "supersifre123") == (True, "Kayıt başarılı.")
+        _ok32, _msg32 = _acc32.register("test@ornek.com", "baskasifre123")
+        assert not _ok32 and "zaten" in _msg32
+
+        # 32c. Yanlış şifre reddediliyor; doğru şifre bir oturum token'ı veriyor
+        _ok32b, _msg32b, _tok32b = _acc32.login("test@ornek.com", "yanlissifre")
+        assert not _ok32b and _tok32b is None and "yanlış" in _msg32b
+        _ok32c, _msg32c, _tok32c = _acc32.login("test@ornek.com", "supersifre123")
+        assert _ok32c and _tok32c and "başarılı" in _msg32c
+
+        # 32d. Şifreler düz metin DEĞİL, salt+scrypt ile saklanıyor
+        with _acc32._db() as _conn32:
+            _row32 = _conn32.execute("SELECT salt, hash FROM users WHERE email = ?", ("test@ornek.com",)).fetchone()
+        assert _row32["hash"] != b"supersifre123" and len(_row32["salt"]) == 16 and len(_row32["hash"]) == 32
+
+        # 32e. Token ile kimlik doğrulama; geçersiz/süresi geçmiş token reddediliyor; çıkış token'ı geçersiz kılıyor
+        assert _acc32.whoami(_tok32c) == "test@ornek.com"
+        assert _acc32.whoami("gecersiz-token") is None
+        with _acc32._db() as _conn32:
+            _conn32.execute("UPDATE sessions SET expires_at = 0 WHERE token = ?", (_tok32c,))
+            _conn32.commit()
+        assert _acc32.whoami(_tok32c) is None      # süresi geçmiş
+        _, _, _tok32d = _acc32.login("test@ornek.com", "supersifre123")
+        assert _acc32.whoami(_tok32d) == "test@ornek.com"
+        _acc32.logout(_tok32d)
+        assert _acc32.whoami(_tok32d) is None
+        print("  • Doğrulama, tekrar-kayıt engeli, şifre salt+scrypt ile saklama, token/çıkış doğru çalışıyor ✓")
+
+        # 32f. Art arda yanlış şifre e-posta bazında geçici kilitleniyor (kaba kuvvet koruması)
+        _acc32._failed_attempts.clear()
+        for _ in range(_acc32.MAX_FAILED_ATTEMPTS):
+            _acc32.login("test@ornek.com", "yanlis")
+        _ok32e, _msg32e, _ = _acc32.login("test@ornek.com", "supersifre123")   # doğru şifre bile artık reddedilir
+        assert not _ok32e and "fazla" in _msg32e
+        print("  • Art arda başarısız girişten sonra hesap geçici olarak kilitleniyor ✓")
+
+        # 32g. Gerçek HTTP üzerinden uçtan uca (kendi başlattığımız geçici sunucu, ağır dış bağımlılık yok)
+        import threading as _th32
+        from http.server import ThreadingHTTPServer as _THS32
+        _acc32._failed_attempts.clear()
+        _srv32 = _THS32(("127.0.0.1", 0), _acc32.Handler)
+        _port32 = _srv32.server_address[1]
+        _th32.Thread(target=_srv32.serve_forever, daemon=True).start()
+        try:
+            _base32 = f"http://127.0.0.1:{_port32}"
+            _r32 = _requests_mod = __import__("requests")
+            _rr = _r32.post(f"{_base32}/api/register", json={"email": "http-test@ornek.com", "password": "supersifre123"}, timeout=5)
+            assert _rr.status_code == 200 and _rr.json()["ok"] is True
+            _rl = _r32.post(f"{_base32}/api/login", json={"email": "http-test@ornek.com", "password": "supersifre123"}, timeout=5)
+            assert _rl.status_code == 200 and _rl.json()["ok"] is True
+            _htoken = _rl.json()["token"]
+            _rm = _r32.get(f"{_base32}/api/me", params={"token": _htoken}, timeout=5)
+            assert _rm.status_code == 200 and _rm.json()["email"] == "http-test@ornek.com"
+            _rlo = _r32.post(f"{_base32}/api/logout", json={"token": _htoken}, timeout=5)
+            assert _rlo.status_code == 200
+            _rm2 = _r32.get(f"{_base32}/api/me", params={"token": _htoken}, timeout=5)
+            assert _rm2.status_code == 401
+        finally:
+            _srv32.shutdown()
+        print("  • Gerçek HTTP üzerinden kayıt → giriş → oturum doğrulama → çıkış uçtan uca çalışıyor ✓")
+    finally:
+        _acc32.DB_PATH = _orig_db32
+        _acc32._failed_attempts.clear()
+
+    # 32h. account_server.py MehburAI.exe'nin İÇİNE paketlenmiyor (ayrı, elle çalıştırılan sunucu)
+    _spec32 = open(_os28.path.join(_os28.path.dirname(_os28.path.abspath(__file__)), "MehburAI.spec"),
+                   encoding="utf-8").read()
+    assert "account_server" not in _spec32
+    print("  • account_server.py MehburAI.exe'ye paketlenmiyor — barındıran kişi elle çalıştırır ✓")
+
+    # 32i. Ayarlar'daki 👤 Hesap kartı: sunucu adresi + e-posta/şifre formu var, arayüz kısmı i18n ile çevriliyor
+    _acc_src32 = _insp26.getsource(_gui.MehburApp._build_account_card)
+    assert "account_server_entry" in _acc_src32 and "account_email_entry" in _acc_src32 \
+        and "account_password_entry" in _acc_src32
+    assert "account_server.py" in _acc_src32           # sunucunun exe'nin dışında olduğu ayarlarda da belirtiliyor
+    _res_src32 = _insp26.getsource(_gui.MehburApp._on_account_result)
+    assert "update_account_config" in _res_src32 and "account_password_entry.delete" in _res_src32
+    print("  • Ayarlar'daki 👤 Hesap kartı sunucu adresi + e-posta/şifre formunu doğru şekilde bağlıyor ✓")
+
+    print("  ✅ TEST 32 BAŞARILI: Hesap sunucusu (kayıt/giriş/oturum/kaba-kuvvet koruması) hazır.")
     passed_tests += 1
 
     # ─────────────────────────────────────────
