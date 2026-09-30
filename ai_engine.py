@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 import i18n
+from ai_providers import AnthropicService, OpenAIService, detect_provider
 
 from config import (
     DATA_DIR,
@@ -614,11 +615,22 @@ class GeminiService:
 
     def generate_response(self, question: str, context: Optional[str] = None) -> Optional[str]:
         """
-        Gemini API'den soru ve (varsa) güvenilir kaynak bağlamıyla yanıt alır.
+        Metin sohbeti YANITINI üretir. API anahtarı kutusu artık evrensel: anahtarın
+        biçiminden hangi şirkete ait olduğu anlaşılırsa (OpenAI/Anthropic) sohbet o
+        sağlayıcıyla üretilir; Google anahtarı ya da biçimi belirsiz eski/sahte
+        anahtarlarda (geriye dönük uyumluluk) her zamanki Gemini akışı çalışır.
+        Google'a özgü özellikler (arama, görsel, kamera) bundan etkilenmez — onlar
+        hâlâ yalnızca gerçek bir Google anahtarıyla çalışır.
         Anahtar yoksa veya tüm modeller başarısız olursa None döner.
         """
-        if not get_api_key():
+        api_key = get_api_key()
+        if not api_key:
             return None
+        provider = detect_provider(api_key)
+        if provider == "openai":
+            return OpenAIService.generate_response(api_key, question, context, GeminiConfig.get_system_prompt())
+        if provider == "anthropic":
+            return AnthropicService.generate_response(api_key, question, context, GeminiConfig.get_system_prompt())
         return self._stream_call(self._build_payload(question, context))
 
     GROUNDING_COOLDOWN = 3600          # sn — Google Arama kotası dolunca tekrar denemeden önce
@@ -824,13 +836,23 @@ class GeminiService:
 
     def test_key(self, api_key: Optional[str] = None) -> Tuple[bool, str]:
         """
-        Ayarlar'daki 'API'yi Test Et': verilen (yoksa kayıtlı) anahtarı iki adımda sınar —
-        1) anahtar Google'da geçerli mi (model listesi), 2) gerçekten yanıt üretiyor mu
-        (çok kısa bir istek). Anahtarı kaydetmez. Döner: (başarılı_mı, kullanıcıya_mesaj).
+        Ayarlar'daki 'API'yi Test Et': anahtar kutusu artık evrensel — önce anahtarın
+        BİÇİMİNDEN hangi şirkete ait olduğu tahmin edilir (`detect_provider`) ve mesaj
+        bunu açıkça söyler. OpenAI/Anthropic biçimi net anlaşılırsa o şirketin
+        sunucusunda sınanır; Google anahtarı ya da biçimi belirsiz (eski/sahte test
+        anahtarları dahil) durumlarda aşağıdaki Google akışı çalışır — iki adımda
+        sınar: 1) anahtar Google'da geçerli mi (model listesi), 2) gerçekten yanıt
+        üretiyor mu (çok kısa bir istek). Anahtarı kaydetmez.
+        Döner: (başarılı_mı, kullanıcıya_mesaj — hangi şirketin anahtarı olduğunu içerir).
         """
         key = (api_key if api_key is not None else get_api_key() or "").strip()
         if not key:
             return False, "API anahtarı girilmemiş."
+        provider = detect_provider(key)
+        if provider == "openai":
+            return OpenAIService.test_key(key)
+        if provider == "anthropic":
+            return AnthropicService.test_key(key)
         q = urllib.parse.quote(key)
         try:
             r = requests.get(f"{GeminiConfig.API_BASE}/models?key={q}",
@@ -858,7 +880,7 @@ class GeminiService:
                     json=payload, timeout=(GeminiConfig.CONNECT_TIMEOUT, 25.0), stream=True,
                 ) as resp:
                     if resp.status_code == 200 and self._parse_sse_stream(resp):
-                        return True, (f"Anahtar geçerli ve Gemini yanıt veriyor "
+                        return True, (f"🟦 Bu bir Google Gemini anahtarı — anahtar geçerli ve yanıt veriyor "
                                       f"(model: {model}, {time.time() - t1:.1f} sn).")
                     last = f"{model}: HTTP {resp.status_code}"
             except requests.RequestException as e:

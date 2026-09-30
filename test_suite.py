@@ -49,7 +49,7 @@ def run_full_validation():
     print("  🤖 MEHBUR AI — FAZ 5 ENTEGRASYON VE DOĞRULAMA TESTLERİ")
     print("=" * 65)
     passed_tests = 0
-    total_tests = 30
+    total_tests = 31
 
     memory = MemoryEngine()
     network = NetworkMonitor()
@@ -2180,6 +2180,92 @@ def run_full_validation():
     print("  • Yükleniyor balonunda sabit yazı yerine animasyonlu '...' noktalar var ✓")
 
     print("  ✅ TEST 30 BAŞARILI: Tüm arayüz seçili dilde, hafıza bütün dillerde, renk anında değişiyor.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 31: 🌍 Evrensel API Anahtarı (Google / OpenAI / Anthropic tespiti + yönlendirme)
+    # ─────────────────────────────────────────
+    print("\n[TEST 31] Evrensel API Anahtarı (Google / OpenAI / Anthropic):")
+    import ai_providers as _prov31
+
+    # 31a. Biçimden şirket tahmini; belirsiz/eski-sahte anahtarlar güvenli varsayılan olarak
+    # 'unknown' döner (çağıran taraf bunu Google akışına yönlendirir — geriye dönük uyumluluk)
+    assert _prov31.detect_provider("AIzaSyD_TestValidGeminiKey1234567890XYZ") == "google"
+    assert _prov31.detect_provider("AQ.Ab8xyz123") == "google"
+    assert _prov31.detect_provider("sk-ant-api03-abcdefghij1234567890") == "anthropic"
+    assert _prov31.detect_provider("sk-proj-abcdefghijklmnopqrstuvwx") == "openai"
+    assert _prov31.detect_provider("gecerli-anahtar") == "unknown"
+    assert _prov31.detect_provider("") == "unknown"
+    print("  • Anahtar biçiminden şirket doğru tahmin ediliyor; belirsiz biçim güvenli varsayılana (Google) düşüyor ✓")
+
+    # 31b. GeminiService.generate_response: OpenAI/Anthropic biçimindeki anahtar o şirkete
+    # yönlendiriliyor; Google/belirsiz biçim eskisi gibi _stream_call'a gidiyor
+    _saved_key31 = _gk19()
+    _calls31 = {"openai": 0, "anthropic": 0, "gemini": 0}
+    _orig_oa31, _orig_an31 = _prov31.OpenAIService.generate_response, _prov31.AnthropicService.generate_response
+    _orig_stream31 = ai.gemini._stream_call
+    try:
+        _prov31.OpenAIService.generate_response = classmethod(
+            lambda cls, key, q, ctx, sp: (_calls31.__setitem__("openai", _calls31["openai"] + 1), "OpenAI yanıtı.")[1])
+        _prov31.AnthropicService.generate_response = classmethod(
+            lambda cls, key, q, ctx, sp: (_calls31.__setitem__("anthropic", _calls31["anthropic"] + 1), "Claude yanıtı.")[1])
+        ai.gemini._stream_call = lambda payload: (_calls31.__setitem__("gemini", _calls31["gemini"] + 1), "Gemini yanıtı.")[1]
+
+        _sk19("sk-proj-abcdefghijklmnopqrstuvwx")
+        assert ai.gemini.generate_response("soru") == "OpenAI yanıtı." and _calls31 == {"openai": 1, "anthropic": 0, "gemini": 0}
+
+        _sk19("sk-ant-api03-abcdefghij1234567890")
+        assert ai.gemini.generate_response("soru") == "Claude yanıtı." and _calls31["anthropic"] == 1 and _calls31["gemini"] == 0
+
+        _sk19("AIzaSyD_TestValidGeminiKey1234567890XYZ")
+        assert ai.gemini.generate_response("soru") == "Gemini yanıtı." and _calls31["gemini"] == 1
+
+        _sk19("gecerli-anahtar")               # eski/sahte test anahtarı → yine Google akışı (geriye dönük uyum)
+        assert ai.gemini.generate_response("soru") == "Gemini yanıtı." and _calls31["gemini"] == 2
+        assert _calls31["openai"] == 1 and _calls31["anthropic"] == 1   # başka çağrı yapılmadı
+    finally:
+        _prov31.OpenAIService.generate_response = _orig_oa31
+        _prov31.AnthropicService.generate_response = _orig_an31
+        ai.gemini._stream_call = _orig_stream31
+        (_sk19(_saved_key31) if _saved_key31 else _rk19())
+    print("  • Sohbet yanıtı: OpenAI/Anthropic biçimindeki anahtar o şirkete gidiyor, Google/belirsiz eskisi gibi çalışıyor ✓")
+
+    # 31c. test_key: hangi şirketin anahtarı olduğunu tespit edip mesajda söylüyor
+    _saved_key31b = _gk19()
+    _orig_oat31, _orig_ant31 = _prov31.OpenAIService.test_key, _prov31.AnthropicService.test_key
+    try:
+        _prov31.OpenAIService.test_key = classmethod(lambda cls, key: (True, "🟩 Bu bir OpenAI anahtarı, geçerli ve yanıt veriyor (0.1 sn)."))
+        _prov31.AnthropicService.test_key = classmethod(lambda cls, key: (False, "Bu bir Anthropic (Claude) anahtarı ama geçersiz ya da yetkisiz."))
+        _ok31, _msg31 = ai.gemini.test_key("sk-proj-abcdefghijklmnopqrstuvwx")
+        assert _ok31 and "OpenAI" in _msg31
+        _ok31b, _msg31b = ai.gemini.test_key("sk-ant-api03-abcdefghij1234567890")
+        assert not _ok31b and "Anthropic" in _msg31b
+    finally:
+        _prov31.OpenAIService.test_key = _orig_oat31
+        _prov31.AnthropicService.test_key = _orig_ant31
+        (_sk19(_saved_key31b) if _saved_key31b else _rk19())
+    # Google yolu (belirsiz biçim, TEST 19h'de zaten ağ üzerinden sınanıyor): kaynak kodda mesajın
+    # artık "Bu bir Google Gemini anahtarı" dediğini doğrula
+    _src_google31 = _insp26.getsource(_ae27.GeminiService.test_key)
+    assert "Bu bir Google Gemini anahtarı" in _src_google31
+    print("  • 'API'yi Test Et' hangi şirketin anahtarı olduğunu tespit edip mesajda söylüyor ✓")
+
+    # 31d. Gerçek OpenAI sunucusu (ağ varsa, uydurma ama doğru BİÇİMDE anahtar): 401 'geçersiz' diye dönüyor
+    if network.check_now():
+        _ok31c, _msg31c = _prov31.OpenAIService.test_key("sk-clearlyinvalidtestkey1234567890abcdefgh")
+        assert not _ok31c and "OpenAI" in _msg31c and ("geçersiz" in _msg31c or "yetkisiz" in _msg31c), _msg31c
+        print("  • Gerçek OpenAI sunucusu uydurma anahtarı 401 ile reddediyor, mesaj doğru okunuyor ✓")
+    else:
+        print("  • (Çevrimdışı — gerçek OpenAI sunucu testi atlandı)")
+
+    # 31e. Ayarlar: API kartı artık evrensel ("Google Gemini API Anahtarı" değil), kaydedince/
+    # gösterirken şirket adını belirtiyor
+    _api_card_src31 = _insp26.getsource(_gui.MehburApp._build_settings_panel)
+    assert "🔑 Yapay Zeka API Anahtarı" in _api_card_src31 and "🔑 Google Gemini API Anahtarı" not in _api_card_src31
+    assert "PROVIDER_NAMES" in _insp26.getsource(_gui.MehburApp._save_api_key)
+    print("  • Ayarlar'daki anahtar kartı artık evrensel; kaydedince tespit edilen şirketi gösteriyor ✓")
+
+    print("  ✅ TEST 31 BAŞARILI: Evrensel API anahtarı — şirket tespiti + sohbet yönlendirmesi hazır.")
     passed_tests += 1
 
     # ─────────────────────────────────────────

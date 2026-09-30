@@ -37,6 +37,7 @@ from typing import Optional
 import customtkinter as ctk
 
 from ai_engine import AIEngine, VisionAssistant
+from ai_providers import PROVIDER_NAMES, detect_provider
 from auto_learner import IdleLearner
 from config import (
     AI_MODELS,
@@ -114,6 +115,16 @@ _CTK_COLOR_OPTIONS = (
 )
 _TK_COLOR_OPTIONS = ("bg", "fg", "highlightbackground", "highlightcolor", "insertbackground",
                      "selectbackground")
+
+
+def _api_key_status_text(key: str) -> str:
+    """'✅ API Anahtarı Kayıtlı' — biçim tanınıyorsa (Google/OpenAI/Anthropic) şirket adını da ekler.
+    Bilinmeyen biçimde şirket adı eklenmez (çeviride yalnızca şablon çevrilir, marka adları
+    değil — 'bilinmeyen' gibi bir Türkçe kelimenin diğer dillerde sızmasını da önler)."""
+    provider = detect_provider(key)
+    if provider == "unknown":
+        return i18n.t("✅ API Anahtarı Kayıtlı")
+    return i18n.t("✅ API Anahtarı Kayıtlı ({} biçiminde)").format(PROVIDER_NAMES[provider])
 
 
 def recolor_widgets(root, remap: dict) -> int:
@@ -734,7 +745,7 @@ class MehburApp(ctk.CTk):
         if hasattr(self, "api_status_lbl") and self.api_status_lbl:
             if current_key:
                 self.api_status_lbl.configure(
-                    text="✅ API Anahtarı Kayıtlı",
+                    text=_api_key_status_text(current_key),
                     text_color=Theme.STATUS_ONLINE
                 )
             else:
@@ -1841,7 +1852,7 @@ class MehburApp(ctk.CTk):
 
         api_title = ctk.CTkLabel(
             api_card,
-            text="🔑 Google Gemini API Anahtarı",
+            text="🔑 Yapay Zeka API Anahtarı",
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=16, weight="bold"),
             text_color=Theme.CYAN_PRIMARY,
         )
@@ -1850,14 +1861,18 @@ class MehburApp(ctk.CTk):
         api_desc = ctk.CTkLabel(
             api_card,
             text=(
-                "MehburAI'nin çevrim içi modda en güncel yapay zeka gücüyle çalışabilmesi için "
-                "Google Gemini API anahtarınızı giriniz.\n"
-                "Ücretsiz anahtar: https://aistudio.google.com/apikey  (AIzaSy... veya AQ... ile başlar)\n"
+                "Bu kutu evrenseldir: Google Gemini, OpenAI ya da Anthropic (Claude) anahtarlarından "
+                "hangisini yapıştırırsan yapıştır — 'Test Et' hangi şirkete ait olduğunu anlayıp söyler, "
+                "sohbet o sağlayıcıyla çalışır.\n"
+                "Ücretsiz Google anahtarı: https://aistudio.google.com/apikey\n"
+                "Not: Tüm-web arama (Pro), görsel oluşturma/düzenleme ve kamera/görsel anlama yalnızca "
+                "GERÇEK bir Google Gemini anahtarıyla çalışır — diğer şirketlerin karşılığı yoktur.\n"
                 "(API anahtarı olmadan yalnızca Wikipedia özetleri ve kayıtlı hafıza çalışır.)"
             ),
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
             text_color=Theme.TEXT_SECONDARY,
             justify="left",
+            wraplength=760,
         )
         api_desc.pack(anchor="w", padx=16, pady=(0, 12))
 
@@ -1869,7 +1884,7 @@ class MehburApp(ctk.CTk):
         current_key = get_api_key() or ""
         self.api_key_entry = ctk.CTkEntry(
             api_input_row,
-            placeholder_text="AIzaSy... veya AQ... ile başlayan Gemini API anahtarınızı yapıştırın",
+            placeholder_text="Google / OpenAI / Anthropic API anahtarınızı yapıştırın",
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
             fg_color=Theme.BG_INPUT,
             border_color=Theme.CYAN_DARK,
@@ -1910,7 +1925,7 @@ class MehburApp(ctk.CTk):
         # Durum Geri Bildirim Etiketi
         self.api_status_lbl = ctk.CTkLabel(
             api_card,
-            text="✅ API Anahtarı Kayıtlı" if current_key else "⚠️ API Anahtarı Henüz Girilmedi",
+            text=(_api_key_status_text(current_key) if current_key else "⚠️ API Anahtarı Henüz Girilmedi"),
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold"),
             text_color=Theme.STATUS_ONLINE if current_key else Theme.STATUS_WARNING,
         )
@@ -1935,7 +1950,7 @@ class MehburApp(ctk.CTk):
         self.api_test_btn.pack(side="left")
         self.api_test_lbl = ctk.CTkLabel(
             test_row,
-            text="Anahtarın çalışıp çalışmadığını Gemini'ye kısa bir istek atarak dener.",
+            text="Anahtarın hangi şirkete ait olduğunu anlayıp çalışıp çalışmadığını kısa bir istekle dener.",
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
             text_color=Theme.TEXT_SECONDARY,
             justify="left",
@@ -2995,12 +3010,14 @@ class MehburApp(ctk.CTk):
         self.after(1800, self._refresh_security_status)
 
     def _save_api_key(self):
-        """API anahtarını kaydeder."""
+        """API anahtarını kaydeder; biçiminden anlaşılan şirketi de belirtir."""
         key = self.api_key_entry.get().strip()
         if key:
             set_api_key(key)
+            provider = PROVIDER_NAMES.get(detect_provider(key), "bilinmeyen")
+            suffix = f" ({provider} biçiminde)" if provider != "bilinmeyen" else ""
             self.api_status_lbl.configure(
-                text="✅ API Anahtarı Başarıyla Kaydedildi!",
+                text=f"✅ API Anahtarı Kaydedildi!{suffix}",
                 text_color=Theme.STATUS_ONLINE
             )
         else:
@@ -3025,7 +3042,7 @@ class MehburApp(ctk.CTk):
             self.api_test_lbl.configure(text="⚠️ Önce bir API anahtarı gir.", text_color=Theme.STATUS_WARNING)
             return
         self.api_test_btn.configure(state="disabled", text="⏳ Test ediliyor...")
-        self.api_test_lbl.configure(text="Gemini'ye bağlanılıyor...", text_color=Theme.TEXT_SECONDARY)
+        self.api_test_lbl.configure(text="Bağlanılıyor...", text_color=Theme.TEXT_SECONDARY)
 
         def work():
             try:
