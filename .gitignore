@@ -64,6 +64,11 @@ data/remote_captures/
 
 # ⏰ Telegram hatırlatmaları (kişisel içerik, repoya girmez)
 data/reminders.json
+# ⏰ Masaüstü hatırlatıcıları (sohbet/sesli komutla kurulanlar)
+data/desktop_reminders.json
+
+# 👤 Hesap sunucusunun veritabanı (e-posta + şifre özetleri — asla repoya girmez)
+account_server_data/
 
 # Sesli sohbet — indirilen Vosk Türkçe modeli (~35 MB, ilk açılışta iner)
 data/models/

@@ -11,7 +11,6 @@ motoruyla hafızasındaki en uygun cevabı bulup getirir.
   • SQLite kalıcı veri tabanı (data/mehbur_memory.db)
   • Türkçe karakter & ek duyarlı normalizasyon (Turkish Stem & Tokenizer)
   • Hibrit Semantik Eşleme: Karakter N-Gram + Kelime TF-IDF Kosinüs Benzerliği
-  • sentence-transformers desteği (mevcutsa otomatik aktifleşir)
   • Otomatik güncelleme (Aynı/çok yakın soru gelirse yanıtı günceller)
   • Sohbet geçmişi (chat_logs) ve istatistik takip mekanizması
 """
@@ -615,6 +614,53 @@ class MemoryEngine:
                 ORDER BY id ASC
                 LIMIT ?
             """, (conv_id, limit)).fetchall()
+            return [dict(r) for r in rows]
+
+    @staticmethod
+    def _like_pattern(query: str) -> str:
+        """LIKE için kullanıcı metnindeki %, _ ve \\ karakterlerini kaçırır."""
+        esc = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return f"%{esc}%"
+
+    def search_conversations(self, query: str) -> Dict[int, str]:
+        """Başlığı ya da mesajlarında anahtar kelime geçen sohbetleri bulur.
+
+        {sohbet_id: eşleşen kısa alıntı} döndürür (başlık eşleşmesinde alıntı boş).
+        """
+        query = (query or "").strip()
+        if not query:
+            return {}
+        pat = self._like_pattern(query)
+        found: Dict[int, str] = {}
+        with self._get_connection() as conn:
+            for r in conn.execute(
+                "SELECT id FROM conversations WHERE title LIKE ? ESCAPE '\\'", (pat,)
+            ):
+                found[r["id"]] = ""
+            for r in conn.execute(
+                """SELECT conversation_id, message FROM chat_logs
+                   WHERE conversation_id IS NOT NULL AND message LIKE ? ESCAPE '\\'
+                   ORDER BY id DESC""",
+                (pat,),
+            ):
+                if not found.get(r["conversation_id"]):
+                    found[r["conversation_id"]] = r["message"]
+        return found
+
+    def search_knowledge_text(self, query: str, limit: int = 200) -> List[Dict[str, Any]]:
+        """Hafızadaki soru/cevaplarda anahtar kelime araması (tüm kayıtlar üzerinde)."""
+        query = (query or "").strip()
+        if not query:
+            return []
+        pat = self._like_pattern(query)
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """SELECT id, question, answer, source, created_at, access_count, last_accessed
+                   FROM knowledge_base
+                   WHERE question LIKE ? ESCAPE '\\' OR answer LIKE ? ESCAPE '\\'
+                   ORDER BY id DESC LIMIT ?""",
+                (pat, pat, limit),
+            ).fetchall()
             return [dict(r) for r in rows]
 
     def get_recent_chat(self, limit: int = 50) -> List[Dict[str, Any]]:

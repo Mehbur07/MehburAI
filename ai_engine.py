@@ -47,6 +47,7 @@ from config import (
 )
 from memory_engine import MemoryEngine, clean_text, tokenize_and_stem, turkish_lower
 from network_manager import NetworkMonitor
+from reminders import get_reminder_service
 from system_tools import SystemTools
 
 
@@ -1955,7 +1956,10 @@ class AIEngine:
         # 1. ADIM: Bilgisayar & Sistem Araçları Kontrolü
         # (Açık bir komut — "... klasörü oluştur", "not defteri aç" — selam/kimlik
         #  filtresinden önce gelir ki yanlış eşleşmeyle ele geçirilmesin.)
-        system_response = SystemTools.handle_system_query(query)
+        # (⏰ "20 dakika sonra hatırlat" / "yarın 9'da uyandır" önce — "iptal et" gibi
+        #  sözcükler güç komutlarıyla karışmasın.)
+        system_response = get_reminder_service().handle_query(query) \
+            or SystemTools.handle_system_query(query)
         if system_response:
             is_online = self.network.is_online
             log("user", query, is_online)

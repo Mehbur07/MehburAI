@@ -28,7 +28,7 @@ import tkinter as tk
 import urllib.request
 import webbrowser
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from tkinter import filedialog
 from tkinter import messagebox as _tk_messagebox
 
@@ -87,6 +87,8 @@ from config import (
 )
 from memory_engine import MemoryEngine
 from network_manager import NetworkMonitor
+from account_client import authenticate, verify_session
+from reminders import LATE_NOTE_SECONDS, get_reminder_service
 from telegram_bot import TelegramControlBot, TelegramNotifier
 from updater import check_for_update, fetch_latest_release_notes
 from background import SingleInstance, is_autostart_enabled, set_autostart
@@ -264,6 +266,11 @@ class MehburApp(ctk.CTk):
         )
         self.learner.start()
 
+        # ⏰ Hatırlatıcı & alarm (sohbet/sesli komutla kurulanlar burada çalar)
+        self.reminders = get_reminder_service()
+        self.reminders.on_fire = self._on_reminder_fired
+        self.reminders.start()
+
         # Telegram'dan uzaktan kontrol etkinse bot dinlemesini başlat
         if get_security_config().get("telegram_remote_enabled"):
             if self.telegram_bot.start():
@@ -283,6 +290,9 @@ class MehburApp(ctk.CTk):
         # Sohbet listesi + aktif sohbetin geçmişi
         self._refresh_conversation_list()
         self._load_active_conversation()
+
+        # 🔐 Oturum yoksa açılışta giriş / kayıt ekranı uygulamanın üstünü kaplar
+        self._init_auth_gate()
 
         # Pencere Kapanış Olayı
         # Bazı Windows kurulumlarında kısayoldan açılışın hemen ardından, pencere
@@ -1001,9 +1011,35 @@ class MehburApp(ctk.CTk):
             command=self._new_conversation,
         ).grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
 
+        self.conv_search_entry = ctk.CTkEntry(
+            side,
+            placeholder_text="🔍 Sohbetlerde ara...",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11),
+            fg_color=Theme.BG_INPUT,
+            border_color=Theme.CYAN_DARK,
+            height=28,
+            corner_radius=8,
+        )
+        self.conv_search_entry.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 4))
+        self.conv_search_entry.bind("<KeyRelease>", self._on_conv_search_key)
+
         self.conv_list_box = ctk.CTkScrollableFrame(side, fg_color="transparent")
         self.conv_list_box.grid(row=3, column=0, sticky="nsew", padx=4, pady=2)
         self.conv_list_box.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkButton(
+            side,
+            text="💾  Dışa Aktar",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11, weight="bold"),
+            fg_color="transparent",
+            border_width=1,
+            border_color=Theme.CYAN_PRIMARY,
+            text_color=Theme.CYAN_PRIMARY,
+            hover_color=Theme.BG_CARD_HOVER,
+            height=30,
+            corner_radius=8,
+            command=self._export_active_conversation,
+        ).grid(row=4, column=0, sticky="ew", padx=8, pady=(6, 0))
 
         self.btn_delete_conv = ctk.CTkButton(
             side,
@@ -1018,7 +1054,7 @@ class MehburApp(ctk.CTk):
             corner_radius=8,
             command=self._delete_active_conversation,
         )
-        self.btn_delete_conv.grid(row=4, column=0, sticky="ew", padx=8, pady=(6, 10))
+        self.btn_delete_conv.grid(row=5, column=0, sticky="ew", padx=8, pady=(6, 10))
 
         # Sağ kenarda ince sürükleme tutamacı — panel_chat'in 0. sütun genişliğini değiştirir
         handle = ctk.CTkFrame(self.panel_chat, fg_color="transparent", width=6, cursor="sb_h_double_arrow")
@@ -1063,12 +1099,30 @@ class MehburApp(ctk.CTk):
         for w in self.conv_list_box.winfo_children():
             w.destroy()
 
+        query = self.conv_search_entry.get().strip() if hasattr(self, "conv_search_entry") else ""
+        hits = self.memory.search_conversations(query) if query else None
+
         mood_icon = {"normal": "", "provoked": "  ⚠️", "rude": "  😠"}
-        for conv in self.memory.list_conversations():
+        convs = self.memory.list_conversations()
+        if hits is not None:
+            convs = [c for c in convs if c["id"] in hits]
+            if not convs:
+                ctk.CTkLabel(
+                    self.conv_list_box, text="Sonuç bulunamadı",
+                    font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11),
+                    text_color=Theme.TEXT_SECONDARY,
+                ).grid(pady=12)
+        for conv in convs:
             cid = conv["id"]
             active = (cid == self.active_conv_id)
             title = (conv.get("title") or "Yeni Sohbet").strip()[:20]
             label = f"{title}{mood_icon.get(conv.get('mood', 'normal'), '')}"
+            snippet = (hits or {}).get(cid, "")
+            if snippet:
+                one_line = " ".join(snippet.split())
+                i = one_line.lower().find(query.lower())
+                start = max(0, i - 12)
+                label += "\n…" + one_line[start:start + 34] + "…"
             ctk.CTkButton(
                 self.conv_list_box,
                 text=label,
@@ -1080,10 +1134,16 @@ class MehburApp(ctk.CTk):
                 fg_color=Theme.CYAN_DARK if active else "transparent",
                 text_color=Theme.CYAN_PRIMARY if active else Theme.TEXT_SECONDARY,
                 hover_color=Theme.BG_CARD_HOVER,
-                height=30,
+                height=44 if snippet else 30,
                 corner_radius=6,
                 command=lambda c=cid: self._select_conversation(c),
             ).grid(sticky="ew", pady=2, padx=2)
+
+    def _on_conv_search_key(self, _event=None):
+        pending = getattr(self, "_conv_search_after", None)
+        if pending:
+            self.after_cancel(pending)
+        self._conv_search_after = self.after(250, self._refresh_conversation_list)
 
     def _new_conversation(self):
         """Yeni boş bir sohbet açar ve ona geçer."""
@@ -1102,6 +1162,46 @@ class MehburApp(ctk.CTk):
         self.active_conv_id = conv_id
         self._refresh_conversation_list()
         self._load_active_conversation()
+
+    def _export_active_conversation(self):
+        """Aktif sohbeti kullanıcının seçtiği yere .md veya .txt olarak kaydeder."""
+        conv = self.memory.get_conversation(self.active_conv_id)
+        messages = self.memory.get_conversation_messages(self.active_conv_id, limit=100000)
+        if not conv or not messages:
+            messagebox.showinfo("Dışa Aktar", "Bu sohbette dışa aktarılacak mesaj yok.", parent=self)
+            return
+
+        title = (conv.get("title") or "Yeni Sohbet").strip()
+        safe = re.sub(r'[\\/:*?"<>|]+', "_", title).strip() or "sohbet"
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Sohbeti Dışa Aktar",
+            defaultextension=".md",
+            initialfile=f"{safe}.md",
+            filetypes=[("Markdown", "*.md"), ("Metin dosyası", "*.txt")],
+        )
+        if not path:
+            return
+
+        as_md = path.lower().endswith(".md")
+        lines = [f"# {title}" if as_md else title, ""]
+        lines.append(f"Dışa aktarma: {datetime.now():%d.%m.%Y %H:%M}")
+        lines.append("")
+        for m in messages:
+            who = "Sen" if m["role"] == "user" else "MehburAI"
+            stamp = str(m.get("timestamp") or "")[:16]
+            text = m["message"]
+            if m["role"] == "user" and text == "[küfür filtresi]":
+                text = "(küfürlü mesaj)"
+            head = f"**{who}** · {stamp}" if as_md else f"[{stamp}] {who}:"
+            lines += [head, text, ""]
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+        except OSError as e:
+            messagebox.showerror("Dışa Aktar", f"Dosya kaydedilemedi:\n{e}", parent=self)
+            return
+        messagebox.showinfo("Dışa Aktar", f"Sohbet kaydedildi:\n{path}", parent=self)
 
     def _delete_active_conversation(self):
         """Aktif sohbeti ve tüm mesajlarını kalıcı olarak siler (onaylı)."""
@@ -1718,12 +1818,21 @@ class MehburApp(ctk.CTk):
         for widget in self.memory_list_box.winfo_children():
             widget.destroy()
 
-        records = self.memory.get_all_knowledge(limit=100)
+        search_txt = self.memory_search_entry.get().strip()
+        if search_txt:
+            records = self.memory.search_knowledge_text(search_txt)
+        else:
+            records = self.memory.get_all_knowledge(limit=100)
 
         if not records:
+            empty_text = (
+                f"🔍 \"{search_txt}\" için hafızada sonuç bulunamadı."
+                if search_txt else
+                "🧠 Henüz hafızada kayıtlı bilgi bulunmuyor.\nÇevrim içiyken soru sordukça MehburAI bilgileri buraya kaydedecektir!"
+            )
             empty_lbl = ctk.CTkLabel(
                 self.memory_list_box,
-                text="🧠 Henüz hafızada kayıtlı bilgi bulunmuyor.\nÇevrim içiyken soru sordukça MehburAI bilgileri buraya kaydedecektir!",
+                text=empty_text,
                 font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=13),
                 text_color=Theme.TEXT_SECONDARY,
                 pady=40,
@@ -1735,14 +1844,11 @@ class MehburApp(ctk.CTk):
             self._create_memory_card(rec)
 
     def _filter_memory_list(self):
-        """Arama çubuğuna göre hafıza listesini filtreler."""
-        search_txt = self.memory_search_entry.get().strip().lower()
-        for card in self.memory_list_box.winfo_children():
-            if hasattr(card, "search_data"):
-                if not search_txt or search_txt in card.search_data:
-                    card.pack(fill="x", padx=6, pady=4)
-                else:
-                    card.pack_forget()
+        """Arama çubuğuna göre hafızayı veritabanının tamamında arar (yazma duraklayınca)."""
+        pending = getattr(self, "_memory_search_after", None)
+        if pending:
+            self.after_cancel(pending)
+        self._memory_search_after = self.after(250, self._refresh_memory_list)
 
     def _create_memory_card(self, rec: dict):
         """Tek bir hafıza kartı oluşturur."""
@@ -2291,136 +2397,33 @@ class MehburApp(ctk.CTk):
     # ─────────────────────────────────────────
 
     def _build_account_card(self, parent):
-        """Kayıt Ol / Giriş Yap — sunucu MehburAI.exe'nin İÇİNDE DEĞİL, account_server.py'yi
-        çalıştıran kişinin kendi bilgisayarında çalışır. Buradaki adres o sunucuyu gösterir."""
-        acc = get_account_config()
+        """Ayarlar'da yalnızca oturum bilgisi + Çıkış Yap. Giriş / kayıt, açılışta çıkan
+        giriş ekranında yapılır (bkz. _build_auth_gate); sunucu adresini MehburAI kendisi bulur."""
         card = ctk.CTkFrame(parent, fg_color=Theme.BG_CARD, corner_radius=12,
                             border_width=1, border_color=Theme.CYAN_DARK)
         card.pack(fill="x", padx=0, pady=(0, 12))
 
         ctk.CTkLabel(card, text="👤 Hesap",
                      font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=16, weight="bold"),
-                     text_color=Theme.CYAN_PRIMARY).pack(anchor="w", padx=16, pady=(16, 4))
-        ctk.CTkLabel(card, text="E-posta + şifreyle kayıt ol / giriş yap. Sunucu MehburAI'nin içinde "
-                                "değildir — birinin (örn. arkadaşının) kendi bilgisayarında "
-                                "account_server.py'yi çalıştırması ve adresini aşağıya girmen gerekir.",
-                     font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
-                     text_color=Theme.TEXT_SECONDARY, justify="left",
-                     wraplength=760).pack(anchor="w", padx=16, pady=(0, 10))
+                     text_color=Theme.CYAN_PRIMARY).pack(anchor="w", padx=16, pady=(16, 8))
 
-        row1 = ctk.CTkFrame(card, fg_color="transparent")
-        row1.pack(fill="x", padx=16, pady=(0, 8))
-        ctk.CTkLabel(row1, text="Sunucu adresi", width=110, anchor="w",
-                     text_color=Theme.TEXT_PRIMARY).pack(side="left")
-        self.account_server_entry = ctk.CTkEntry(
-            row1, placeholder_text="http://192.168.1.5:8765", height=36, corner_radius=8,
-            fg_color=Theme.BG_INPUT, border_color=Theme.CYAN_DARK)
-        self.account_server_entry.pack(side="left", fill="x", expand=True)
-        if acc["account_server_url"]:
-            self.account_server_entry.insert(0, acc["account_server_url"])
-        self.account_server_entry.bind("<FocusOut>", lambda e: update_account_config(
-            account_server_url=self.account_server_entry.get().strip()))
-
-        self.account_form_frame = ctk.CTkFrame(card, fg_color="transparent")
-        self.account_form_frame.pack(fill="x", padx=16, pady=(0, 4))
-        row2 = ctk.CTkFrame(self.account_form_frame, fg_color="transparent")
-        row2.pack(fill="x", pady=(0, 6))
-        ctk.CTkLabel(row2, text="E-posta", width=110, anchor="w",
-                     text_color=Theme.TEXT_PRIMARY).pack(side="left")
-        self.account_email_entry = ctk.CTkEntry(row2, placeholder_text="sen@ornek.com", height=36,
-                                                corner_radius=8, fg_color=Theme.BG_INPUT,
-                                                border_color=Theme.CYAN_DARK)
-        self.account_email_entry.pack(side="left", fill="x", expand=True)
-
-        row3 = ctk.CTkFrame(self.account_form_frame, fg_color="transparent")
-        row3.pack(fill="x", pady=(0, 8))
-        ctk.CTkLabel(row3, text="Şifre", width=110, anchor="w",
-                     text_color=Theme.TEXT_PRIMARY).pack(side="left")
-        self.account_password_entry = ctk.CTkEntry(row3, placeholder_text="en az 8 karakter", show="•",
-                                                    height=36, corner_radius=8, fg_color=Theme.BG_INPUT,
-                                                    border_color=Theme.CYAN_DARK)
-        self.account_password_entry.pack(side="left", fill="x", expand=True)
-
-        btn_row = ctk.CTkFrame(self.account_form_frame, fg_color="transparent")
-        btn_row.pack(fill="x", pady=(0, 8))
-        self.account_register_btn = ctk.CTkButton(
-            btn_row, text="📝 Kayıt Ol", height=34, fg_color=Theme.BG_CARD_HOVER,
-            hover_color=Theme.CYAN_DARK, text_color=Theme.CYAN_PRIMARY, border_width=1,
-            border_color=Theme.CYAN_DARK, command=lambda: self._account_action("register"))
-        self.account_register_btn.pack(side="left", padx=(0, 8))
-        self.account_login_btn = ctk.CTkButton(
-            btn_row, text="🔓 Giriş Yap", height=34, fg_color=Theme.CYAN_PRIMARY,
-            hover_color=Theme.CYAN_GLOW, text_color=Theme.BG_DARKEST,
-            command=lambda: self._account_action("login"))
-        self.account_login_btn.pack(side="left")
-
-        self.account_logged_frame = ctk.CTkFrame(card, fg_color="transparent")
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(0, 14))
         self.account_logged_lbl = ctk.CTkLabel(
-            self.account_logged_frame, text="", font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=13, weight="bold"),
+            row, text="", font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=13, weight="bold"),
             text_color=Theme.STATUS_ONLINE)
         self.account_logged_lbl.pack(side="left", padx=(0, 10))
-        ctk.CTkButton(self.account_logged_frame, text="🚪 Çıkış Yap", height=30, width=110,
+        ctk.CTkButton(row, text="🚪 Çıkış Yap", height=30, width=110,
                       fg_color=Theme.BG_CARD_HOVER, hover_color="#44111E", text_color="#FF8888",
                       command=self._account_logout).pack(side="left")
-
-        self.account_status_lbl = ctk.CTkLabel(
-            card, text="", font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
-            text_color=Theme.TEXT_SECONDARY, justify="left", wraplength=760)
-        self.account_status_lbl.pack(anchor="w", padx=16, pady=(0, 14))
 
         self._refresh_account_view()
 
     def _refresh_account_view(self):
-        """account_email doluysa 'giriş yapılmış' görünümü, boşsa kayıt/giriş formu gösterir."""
-        acc = get_account_config()
-        if acc["account_email"]:
-            self.account_form_frame.pack_forget()
-            self.account_logged_lbl.configure(text=f"✅ Giriş yapıldı: {acc['account_email']}")
-            self.account_logged_frame.pack(fill="x", padx=16, pady=(0, 8))
-        else:
-            self.account_logged_frame.pack_forget()
-            self.account_form_frame.pack(fill="x", padx=16, pady=(0, 4))
-
-    def _account_action(self, kind: str):
-        """kind: 'register' ya da 'login' — account_server.py'ye istek atar (arka planda)."""
-        base = self.account_server_entry.get().strip().rstrip("/")
-        email = self.account_email_entry.get().strip()
-        password = self.account_password_entry.get()
-        if not base:
-            self.account_status_lbl.configure(text="⚠️ Önce sunucu adresini gir.", text_color=Theme.STATUS_WARNING)
-            return
-        if not email or not password:
-            self.account_status_lbl.configure(text="⚠️ E-posta ve şifre gerekli.", text_color=Theme.STATUS_WARNING)
-            return
-        update_account_config(account_server_url=base)
-        btn = self.account_register_btn if kind == "register" else self.account_login_btn
-        btn.configure(state="disabled")
-        self.account_status_lbl.configure(text="Bağlanılıyor...", text_color=Theme.TEXT_SECONDARY)
-
-        def work():
-            try:
-                r = requests.post(f"{base}/api/{kind}", json={"email": email, "password": password}, timeout=10)
-                data = r.json()
-            except requests.RequestException as e:
-                data = {"ok": False, "message": f"Sunucuya bağlanılamadı ({type(e).__name__})."}
-            except ValueError:
-                data = {"ok": False, "message": "Sunucudan geçersiz yanıt geldi."}
-            self._ui_call(lambda: self._on_account_result(kind, data))
-        threading.Thread(target=work, daemon=True, name="MehburAI-Account").start()
-
-    def _on_account_result(self, kind: str, data: dict):
-        btn = self.account_register_btn if kind == "register" else self.account_login_btn
-        if btn.winfo_exists():
-            btn.configure(state="normal")
-        ok = bool(data.get("ok"))
-        self.account_status_lbl.configure(
-            text=("✅ " if ok else "❌ ") + str(data.get("message") or ""),
-            text_color=Theme.STATUS_ONLINE if ok else Theme.STATUS_OFFLINE,
-        )
-        if ok and kind == "login" and data.get("token"):
-            update_account_config(account_email=data.get("email", ""), account_token=data["token"])
-            self.account_password_entry.delete(0, "end")
-            self._refresh_account_view()
+        email = get_account_config()["account_email"]
+        if hasattr(self, "account_logged_lbl"):
+            self.account_logged_lbl.configure(
+                text=f"✅ Giriş yapıldı: {email}" if email else "Giriş yapılmadı")
 
     def _account_logout(self):
         acc = get_account_config()
@@ -2431,10 +2434,162 @@ class MehburApp(ctk.CTk):
                 requests.post(f"{base}/api/logout", json={"token": token}, timeout=8)
             except requests.RequestException:
                 pass
-        threading.Thread(target=work, daemon=True, name="MehburAI-AccountLogout").start()
+        if base and token:
+            threading.Thread(target=work, daemon=True, name="MehburAI-AccountLogout").start()
         clear_account_session()
-        self.account_status_lbl.configure(text="Çıkış yapıldı.", text_color=Theme.TEXT_SECONDARY)
         self._refresh_account_view()
+        self._show_auth_gate()
+
+    # ─────────────────────────────────────────
+    # 🔐 AÇILIŞ GİRİŞ / KAYIT EKRANI (oturum yoksa uygulamanın üstünü kaplar)
+    # ─────────────────────────────────────────
+
+    def _build_auth_gate(self):
+        self._auth_mode = "login"
+        self._auth_busy = False
+        gate = ctk.CTkFrame(self, fg_color=Theme.BG_DARK, corner_radius=0)
+        self.auth_gate = gate
+
+        card = ctk.CTkFrame(gate, fg_color=Theme.BG_CARD, corner_radius=16,
+                            border_width=1, border_color=Theme.CYAN_DARK)
+        card.place(relx=0.5, rely=0.5, anchor="center")
+
+        ctk.CTkLabel(card, text="MehburAI",
+                     font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=13),
+                     text_color=Theme.TEXT_SECONDARY).pack(pady=(28, 0))
+        self.auth_title = ctk.CTkLabel(
+            card, text="GİRİŞ YAP",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=28, weight="bold"),
+            text_color=Theme.CYAN_PRIMARY)
+        self.auth_title.pack(padx=60, pady=(2, 20))
+
+        entry_kw = dict(width=320, height=42, corner_radius=10,
+                        fg_color=Theme.BG_INPUT, border_color=Theme.CYAN_DARK)
+        cap_kw = dict(font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+                      text_color=Theme.TEXT_SECONDARY, anchor="w")
+        ctk.CTkLabel(card, text="E-posta", **cap_kw).pack(padx=44, pady=(0, 3), anchor="w")
+        self.auth_email_entry = ctk.CTkEntry(card, **entry_kw)
+        self.auth_email_entry.pack(padx=40, pady=(0, 10))
+        self.auth_pass_caption = ctk.CTkLabel(card, text="Şifre", **cap_kw)
+        self.auth_pass_caption.pack(padx=44, pady=(0, 3), anchor="w")
+        self.auth_pass_entry = ctk.CTkEntry(card, show="•", **entry_kw)
+        self.auth_pass_entry.pack(padx=40, pady=(0, 14))
+        for e in (self.auth_email_entry, self.auth_pass_entry):
+            e.bind("<Return>", lambda _e: self._auth_submit())
+
+        self.auth_btn = ctk.CTkButton(
+            card, text="Giriş Yap", width=320, height=42, corner_radius=10,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=14, weight="bold"),
+            fg_color=Theme.CYAN_PRIMARY, hover_color=Theme.CYAN_GLOW,
+            text_color=Theme.BG_DARKEST, command=self._auth_submit)
+        self.auth_btn.pack(padx=40, pady=(0, 8))
+
+        self.auth_status = ctk.CTkLabel(
+            card, text="", wraplength=320, justify="center",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12), text_color=Theme.TEXT_SECONDARY)
+        self.auth_status.pack(padx=40, pady=(0, 4))
+
+        # Yalnızca sunucu hiç bulunamazsa açılan, gizli gelişmiş satır
+        self.auth_server_row = ctk.CTkFrame(card, fg_color="transparent")
+        self.auth_server_entry = ctk.CTkEntry(
+            self.auth_server_row, placeholder_text="Sunucu adresi (örn. http://192.168.1.5:8765)",
+            width=320, height=32, corner_radius=8, fg_color=Theme.BG_INPUT,
+            border_color=Theme.CYAN_DARK)
+        self.auth_server_entry.pack()
+
+        self.auth_switch_row = ctk.CTkFrame(card, fg_color="transparent")
+        self.auth_switch_row.pack(padx=40, pady=(6, 26))
+        self.auth_switch_lbl = ctk.CTkLabel(
+            self.auth_switch_row, text="Eğer kayıt olmadıysanız",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12), text_color=Theme.TEXT_SECONDARY)
+        self.auth_switch_lbl.pack(side="left")
+        self.auth_switch_link = ctk.CTkLabel(
+            self.auth_switch_row, text="kayıt olun", cursor="hand2",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold", underline=True),
+            text_color=Theme.CYAN_PRIMARY)
+        self.auth_switch_link.pack(side="left", padx=(4, 0))
+        self.auth_switch_link.bind("<Button-1>", lambda _e: self._set_auth_mode(
+            "register" if self._auth_mode == "login" else "login"))
+
+    def _set_auth_mode(self, mode: str):
+        self._auth_mode = mode
+        if mode == "login":
+            self.auth_title.configure(text="GİRİŞ YAP")
+            self.auth_btn.configure(text="Giriş Yap")
+            self.auth_switch_lbl.configure(text="Eğer kayıt olmadıysanız")
+            self.auth_switch_link.configure(text="kayıt olun")
+            self.auth_pass_caption.configure(text="Şifre")
+        else:
+            self.auth_title.configure(text="KAYIT OL")
+            self.auth_btn.configure(text="Devam Et")
+            self.auth_switch_lbl.configure(text="Zaten bir hesabınız var mı?")
+            self.auth_switch_link.configure(text="giriş yapın")
+            self.auth_pass_caption.configure(text="Şifre (en az 8 karakter)")
+        self.auth_status.configure(text="")
+        self.auth_pass_entry.delete(0, "end")
+
+    def _show_auth_gate(self):
+        self._set_auth_mode("login")
+        self.auth_gate.place(x=0, y=0, relwidth=1, relheight=1)
+        self.auth_gate.lift()
+        self.auth_email_entry.delete(0, "end")
+        self.after(100, self.auth_email_entry.focus)
+
+    def _hide_auth_gate(self):
+        self.auth_gate.place_forget()
+
+    def _init_auth_gate(self):
+        """Açılışta: oturum kayıtlıysa uygulamayı aç (arkada doğrula), değilse giriş ekranını göster."""
+        self._build_auth_gate()
+        acc = get_account_config()
+        if acc["account_email"] and acc["account_token"]:
+            def verify():
+                if verify_session() is False:      # sunucu "geçersiz" dedi (None = çevrimdışı → izin ver)
+                    clear_account_session()
+                    self._ui_call(lambda: (self._refresh_account_view(), self._show_auth_gate()))
+            threading.Thread(target=verify, daemon=True, name="MehburAI-SessionCheck").start()
+        else:
+            self._show_auth_gate()
+
+    def _auth_submit(self):
+        if self._auth_busy:
+            return
+        email = self.auth_email_entry.get().strip()
+        password = self.auth_pass_entry.get()
+        if not email or not password:
+            self.auth_status.configure(text="⚠️ E-posta ve şifre gerekli.", text_color=Theme.STATUS_WARNING)
+            return
+        if self._auth_mode == "register" and len(password) < 8:
+            self.auth_status.configure(text="⚠️ Şifre en az 8 karakter olmalı.", text_color=Theme.STATUS_WARNING)
+            return
+        manual = self.auth_server_entry.get().strip() if self.auth_server_row.winfo_ismapped() else ""
+        if manual:
+            update_account_config(account_server_url=manual.rstrip("/"))
+        kind = "register" if self._auth_mode == "register" else "login"
+        self._auth_busy = True
+        self.auth_btn.configure(state="disabled")
+        self.auth_status.configure(text="Sunucu aranıyor...", text_color=Theme.TEXT_SECONDARY)
+
+        def work():
+            data = authenticate(kind, email, password)
+            self._ui_call(lambda: self._on_auth_result(data))
+        threading.Thread(target=work, daemon=True, name="MehburAI-Auth").start()
+
+    def _on_auth_result(self, data: dict):
+        self._auth_busy = False
+        self.auth_btn.configure(state="normal")
+        if data.get("ok") and data.get("token"):
+            update_account_config(account_email=data.get("email", ""), account_token=data["token"])
+            self.auth_pass_entry.delete(0, "end")
+            self.auth_server_row.pack_forget()
+            self._refresh_account_view()
+            self._hide_auth_gate()
+            self.query_entry.focus()
+            return
+        self.auth_status.configure(text="❌ " + str(data.get("message") or "Bir hata oluştu."),
+                                   text_color=Theme.STATUS_OFFLINE)
+        if data.get("no_server") and not self.auth_server_row.winfo_ismapped():
+            self.auth_server_row.pack(padx=40, pady=(0, 4), before=self.auth_switch_row)
 
     # ─────────────────────────────────────────
     # 🎙️ SESLİ SOHBET KARTI
@@ -3320,6 +3475,61 @@ class MehburApp(ctk.CTk):
         self._tray = pystray.Icon("MehburAI", img, "MehburAI", menu)
         threading.Thread(target=self._tray.run, daemon=True, name="MehburAI-Tray").start()
 
+    def _on_reminder_fired(self, r: dict):
+        """Hatırlatıcının zamanı geldi (zamanlayıcı thread'inde): pencere + ses + Telegram."""
+        text = r.get("message", "")
+        late = r.get("late_seconds", 0)
+        note = ""
+        if late > LATE_NOTE_SECONDS:
+            due = datetime.fromtimestamp(r["due_ts"]).strftime("%d.%m %H:%M")
+            note = f" (kaçırıldı: {due})"
+        if TelegramNotifier.is_configured():
+            threading.Thread(
+                target=TelegramNotifier.send_message,
+                args=(f"⏰ Hatırlatma: {text}{note}",),
+                daemon=True, name="MehburAI-ReminderTG",
+            ).start()
+        self._ui_call(lambda: self._show_reminder_popup(text, note))
+        if TextToSpeech is not None and get_voice_config().get("voice_enabled"):
+            try:
+                TextToSpeech.speak(f"Hatırlatma. {text}", blocking=True)
+            except Exception:
+                pass
+
+    def _show_reminder_popup(self, text: str, note: str = ""):
+        """Her zaman üstte duran hatırlatma penceresi (Tamam / 10 dk ertele)."""
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+        except Exception:
+            pass
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("⏰ MehburAI Hatırlatma")
+        dlg.configure(fg_color=Theme.BG_DARK)
+        dlg.geometry("380x190")
+        dlg.attributes("-topmost", True)
+        ctk.CTkLabel(
+            dlg, text=f"⏰ {text}", wraplength=340, justify="center",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=16, weight="bold"),
+            text_color=Theme.CYAN_PRIMARY,
+        ).pack(padx=20, pady=(24, 4), expand=True)
+        if note:
+            ctk.CTkLabel(dlg, text=note.strip(), text_color=Theme.TEXT_SECONDARY,
+                         font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11)).pack()
+        row = ctk.CTkFrame(dlg, fg_color="transparent")
+        row.pack(pady=16)
+
+        def snooze():
+            self.reminders.add(datetime.now() + timedelta(minutes=10), text)
+            dlg.destroy()
+
+        ctk.CTkButton(row, text="10 dk ertele", width=120, fg_color=Theme.BG_CARD_HOVER,
+                      hover_color=Theme.CYAN_DARK, command=snooze).pack(side="left", padx=6)
+        ctk.CTkButton(row, text="Tamam", width=120, fg_color=Theme.CYAN_PRIMARY,
+                      text_color=Theme.BG_DARKEST, hover_color=Theme.CYAN_GLOW,
+                      command=dlg.destroy).pack(side="left", padx=6)
+        dlg.after(150, lambda: dlg.winfo_exists() and (dlg.lift(), dlg.focus_force()))
+
     def _restore_window(self):
         try:
             self.deiconify()
@@ -3344,6 +3554,10 @@ class MehburApp(ctk.CTk):
         self.network.stop()
         try:
             self.learner.stop()
+        except Exception:
+            pass
+        try:
+            self.reminders.stop()
         except Exception:
             pass
         try:

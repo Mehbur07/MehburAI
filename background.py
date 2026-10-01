@@ -18,6 +18,10 @@ from typing import Callable, Optional
 BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
     else os.path.dirname(os.path.abspath(__file__))
 _SINGLETON_PORT = 50507          # localhost — sadece bu makinede
+# Windows bazı port aralıklarını kendine ayırabilir (Hyper-V/WSL/Docker; örn. 50411-50510).
+# O aralıktaki port "erişim izni yok" (WinError 10013) verir — o zaman yedek portlar denenir.
+_SINGLETON_PORTS = (_SINGLETON_PORT, 47831, 39517, 28731, 19853)
+_SHOW_REPLY = b"OK"
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
@@ -108,18 +112,31 @@ class SingleInstance:
         self._on_show = fn
 
     def acquire(self) -> bool:
-        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
-        try:
-            srv.bind(("127.0.0.1", _SINGLETON_PORT))
-        except OSError:
-            srv.close()
-            self._signal_show()
-            return False
-        srv.listen(3)
-        self._sock = srv
-        threading.Thread(target=self._listen, daemon=True, name="MehburAI-Singleton").start()
+        """İlk örnekse (ya da kilit kurulamıyorsa) True; zaten çalışıyorsa False döner."""
+        for port in _SINGLETON_PORTS:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+            try:
+                srv.bind(("127.0.0.1", port))
+            except OSError as e:
+                srv.close()
+                if self._is_addr_in_use(e):
+                    # Port dolu: gerçekten MehburAI mi? (eski sürüm yanıt vermez → ilk portta yine "çalışıyor" say)
+                    if self._signal_show(port) or port == _SINGLETON_PORT:
+                        return False
+                # Erişim izni yok (rezerve port) ya da başka bir uygulamanın portu → sonraki porta geç
+                continue
+            srv.listen(3)
+            self._sock = srv
+            threading.Thread(target=self._listen, daemon=True, name="MehburAI-Singleton").start()
+            return True
+        # Hiçbir port kullanılamadı: uygulamanın açılmasını engelleme (kilitsiz başla)
         return True
+
+    @staticmethod
+    def _is_addr_in_use(e: OSError) -> bool:
+        import errno
+        return getattr(e, "winerror", None) == 10048 or e.errno in (errno.EADDRINUSE, 98, 48)
 
     def _listen(self) -> None:
         while self._sock is not None:
@@ -129,8 +146,10 @@ class SingleInstance:
                 break
             try:
                 data = conn.recv(32)
-                if data.strip() == b"SHOW" and self._on_show:
-                    self._on_show()
+                if data.strip() == b"SHOW":
+                    conn.sendall(_SHOW_REPLY)
+                    if self._on_show:
+                        self._on_show()
             except Exception:
                 pass
             finally:
@@ -140,13 +159,17 @@ class SingleInstance:
                     pass
 
     @staticmethod
-    def _signal_show() -> None:
+    def _signal_show(port: int = _SINGLETON_PORT) -> bool:
+        """Çalışan MehburAI'ye 'öne gel' der; yanıt verirse (gerçekten MehburAI ise) True."""
         try:
-            c = socket.create_connection(("127.0.0.1", _SINGLETON_PORT), timeout=2)
-            c.sendall(b"SHOW")
-            c.close()
+            c = socket.create_connection(("127.0.0.1", port), timeout=2)
+            try:
+                c.sendall(b"SHOW")
+                return c.recv(8).strip() == _SHOW_REPLY
+            finally:
+                c.close()
         except Exception:
-            pass
+            return False
 
     def release(self) -> None:
         s, self._sock = self._sock, None

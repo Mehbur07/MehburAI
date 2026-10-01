@@ -49,7 +49,7 @@ def run_full_validation():
     print("  🤖 MEHBUR AI — FAZ 5 ENTEGRASYON VE DOĞRULAMA TESTLERİ")
     print("=" * 65)
     passed_tests = 0
-    total_tests = 32
+    total_tests = 35
 
     memory = MemoryEngine()
     network = NetworkMonitor()
@@ -2356,16 +2356,144 @@ def run_full_validation():
     assert "account_server" not in _spec32
     print("  • account_server.py MehburAI.exe'ye paketlenmiyor — barındıran kişi elle çalıştırır ✓")
 
-    # 32i. Ayarlar'daki 👤 Hesap kartı: sunucu adresi + e-posta/şifre formu var, arayüz kısmı i18n ile çevriliyor
-    _acc_src32 = _insp26.getsource(_gui.MehburApp._build_account_card)
-    assert "account_server_entry" in _acc_src32 and "account_email_entry" in _acc_src32 \
-        and "account_password_entry" in _acc_src32
-    assert "account_server.py" in _acc_src32           # sunucunun exe'nin dışında olduğu ayarlarda da belirtiliyor
-    _res_src32 = _insp26.getsource(_gui.MehburApp._on_account_result)
-    assert "update_account_config" in _res_src32 and "account_password_entry.delete" in _res_src32
-    print("  • Ayarlar'daki 👤 Hesap kartı sunucu adresi + e-posta/şifre formunu doğru şekilde bağlıyor ✓")
+    # 32i. Açılış giriş/kayıt ekranı: oturum yoksa çıkar, sunucu adresini MehburAI kendisi bulur
+    _gate_src32 = _insp26.getsource(_gui.MehburApp._build_auth_gate)
+    assert "GİRİŞ YAP" in _gate_src32 and "auth_email_entry" in _gate_src32 and "auth_pass_entry" in _gate_src32
+    assert "Eğer kayıt olmadıysanız" in _gate_src32 and "kayıt olun" in _gate_src32
+    _mode_src32 = _insp26.getsource(_gui.MehburApp._set_auth_mode)
+    assert "KAYIT OL" in _mode_src32 and "Devam Et" in _mode_src32 and "giriş yapın" in _mode_src32
+    assert "_init_auth_gate" in _insp26.getsource(_gui.MehburApp.__init__)
+    assert "authenticate" in _insp26.getsource(_gui.MehburApp._auth_submit)
+    _res_src32 = _insp26.getsource(_gui.MehburApp._on_auth_result)
+    assert "update_account_config" in _res_src32 and "_hide_auth_gate" in _res_src32
+    assert not hasattr(_gui.MehburApp, "_account_action")             # ayarlardan kayıt/giriş kalktı
+    assert "account_server_entry" not in _insp26.getsource(_gui.MehburApp._build_account_card)
+    print("  • Oturum yokken açılışta GİRİŞ YAP / KAYIT OL ekranı çıkıyor, Ayarlar'da yalnızca Çıkış Yap kaldı ✓")
+
+    # 32j. Sunucu adresi otomatik bulunuyor (kayıtlı → bu PC → LAN yayını → kaynaktan otomatik başlatma)
+    import account_client as _ac32
+    _store32 = {"account_server_url": "", "account_email": "", "account_token": ""}
+    _orig32 = (_ac32.get_account_config, _ac32.update_account_config)
+    _ac32.get_account_config = lambda: dict(_store32)
+    _ac32.update_account_config = lambda **kw: _store32.update(kw)
+    _orig_db32b = _acc32.DB_PATH
+    _acc32.DB_PATH = _os28.path.join(_tmp32b.mkdtemp(), "accounts.db")
+    _acc32.DATA_DIR = _os28.path.dirname(_acc32.DB_PATH)
+    _acc32._failed_attempts.clear()
+    try:
+        if not _ac32.is_healthy(_ac32.LOCAL_URL):
+            assert _ac32.find_server(allow_autostart=False) is None or _store32["account_server_url"]
+        _url32 = _ac32.find_server(allow_autostart=True)
+        assert _url32 and _store32["account_server_url"] == _url32
+        _reg32 = _ac32.authenticate("register", "otomatik@ornek.com", "uzunbirsifre1")
+        assert _reg32["ok"] and _reg32.get("token")                     # kayıttan sonra otomatik giriş
+        _store32.update(account_email="otomatik@ornek.com", account_token=_reg32["token"])
+        assert _ac32.verify_session() is True
+        _store32["account_token"] = "gecersiz"
+        assert _ac32.verify_session() is False
+        _store32["account_server_url"] = "http://127.0.0.1:1"             # ölü kayıtlı adres → yeniden bulur
+        assert _ac32.find_server(allow_autostart=False) == _ac32.LOCAL_URL
+    finally:
+        _ac32.get_account_config, _ac32.update_account_config = _orig32
+        _acc32.DB_PATH = _orig_db32b
+    print("  • Sunucu IP'si elle girilmiyor: bulma + kayıt→otomatik giriş + oturum doğrulama çalışıyor ✓")
 
     print("  ✅ TEST 32 BAŞARILI: Hesap sunucusu (kayıt/giriş/oturum/kaba-kuvvet koruması) hazır.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 33: Sohbet dışa aktarma + sohbet/hafıza araması
+    # ─────────────────────────────────────────
+    print("\n[TEST 33] Sohbet Araması (sohbet + hafıza) ve Dışa Aktarma:")
+    import tempfile as _tf33
+    _me33 = MemoryEngine(_os28.path.join(_tf33.mkdtemp(), "t33.db"))
+    _c1 = _me33.create_conversation("Market listesi")
+    _c2 = _me33.create_conversation("Başka")
+    _me33.log_message("user", "bugün %50 indirim var_x", True, None, _c1)
+    _me33.log_message("user", "merhaba", True, None, _c2)
+    assert set(_me33.search_conversations("indirim")) == {_c1}
+    assert set(_me33.search_conversations("market")) == {_c1}           # başlıkta arar
+    assert set(_me33.search_conversations("%")) == {_c1}               # LIKE joker karakteri kaçırılıyor
+    assert _me33.search_conversations("yokböyle") == {} and _me33.search_conversations("  ") == {}
+    _me33.save_knowledge("python nedir", "Python bir programlama dilidir", "test")
+    assert any("Python" in k["answer"] for k in _me33.search_knowledge_text("programlama"))
+    assert _me33.search_knowledge_text("zzzyok") == []
+    print("  • Sohbet başlığı/mesajı ve hafıza (soru+cevap) anahtar kelimeyle aranıyor ✓")
+    assert hasattr(_gui.MehburApp, "_export_active_conversation")
+    print("  ✅ TEST 33 BAŞARILI: Arama ve dışa aktarma hazır.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 34: Hatırlatıcı & alarm (doğal Türkçe)
+    # ─────────────────────────────────────────
+    print("\n[TEST 34] Hatırlatıcı & Alarm:")
+    from datetime import datetime as _dt34, timedelta as _td34
+    from reminders import ReminderService as _RS34, parse_natural as _pn34
+    _now34 = _dt34(2026, 10, 1, 14, 0, 0)
+    _d, _m, _e = _pn34("20 dakika sonra hatırlat çamaşırı çıkar", _now34)
+    assert _d == _now34 + _td34(minutes=20) and _m == "çamaşırı çıkar" and _e is None
+    _d, _m, _e = _pn34("yarın 9'da beni uyandır", _now34)
+    assert _d == _dt34(2026, 10, 2, 9, 0) and "Uyanma" in _m
+    _d, _m, _e = _pn34("yarın dokuzda beni uyandır", _now34)             # sesli komut: sayı sözcüğü
+    assert _d == _dt34(2026, 10, 2, 9, 0)
+    _d, _m, _e = _pn34("akşam 8'de ilaç içmemi hatırlat", _now34)
+    assert _d == _dt34(2026, 10, 1, 20, 0) and _m == "ilaç içmemi"
+    _d, _m, _e = _pn34("yarım saat sonra alarm kur", _now34)
+    assert _d == _now34 + _td34(minutes=30)
+    _d, _m, _e = _pn34("yirmi beş dakika sonra su içmeyi hatırlat", _now34)
+    assert _d == _now34 + _td34(minutes=25)
+    assert _pn34("saat kaç", _now34) is None and _pn34("ona ilaç ver", _now34) is None
+    assert _pn34("açık alarm nedir", _now34) is None                    # alarm sözcüğü tek başına tetiklemez
+    assert _pn34("ekmek almamı hatırlat", _now34)[2] is not None        # zaman yok → açıklayıcı hata
+    print("  • Doğal Türkçe: 'N dakika sonra', 'yarın 9'da', 'dokuzda', 'akşam 8'de', 'yarım saat' çözümleniyor ✓")
+
+    _fired34 = []
+    _svc34 = _RS34(_os28.path.join(_tf33.mkdtemp(), "r.json"), on_fire=_fired34.append)
+    assert "hatırlatacağım" in _svc34.handle_query("5 dakika sonra hatırlat su iç")
+    assert "hatırlatacağım" in _svc34.handle_query("yarın 8'de alarm kur")
+    assert len(_svc34.list()) == 2 and "su iç" in _svc34.handle_query("hatırlatıcılarım")
+    assert "su iç" in _svc34.handle_query("alarmı iptal et")             # en yakın olan iptal
+    assert len(_svc34.list()) == 1
+    assert "iptal edildi" in _svc34.handle_query("tüm hatırlatıcıları sil") and not _svc34.list()
+    assert _svc34.handle_query("bilgisayarı kapat") is None             # güç komutu hatırlatıcıya karışmıyor
+    # kalıcılık + zamanı gelince tetikleme + çok eski kaydı atma
+    _svc34.add(_dt34.now() - _td34(seconds=5), "şimdi")
+    _svc34.add(_dt34.now() - _td34(days=3), "çok eski")
+    _svc34.add(_dt34.now() + _td34(hours=1), "sonra")
+    _svc34b = _RS34(_svc34.path)                                         # diskten yeniden yükle
+    assert len(_svc34b.list()) == 3
+    _due34 = _svc34b.pop_due()
+    assert [r["message"] for r in _due34] == ["şimdi"] and len(_svc34b.list()) == 1
+    print("  • Kurma/listeleme/iptal, kalıcılık, zamanı gelince tetikleme ve eski kaydı atma çalışıyor ✓")
+    assert "get_reminder_service" in _insp26.getsource(AIEngine._process_query_core)
+    assert "_on_reminder_fired" in _insp26.getsource(_gui.MehburApp.__init__)
+    print("  • Sohbet/sesli komut akışına ve arayüze bağlı ✓")
+    print("  ✅ TEST 34 BAŞARILI: Hatırlatıcı & alarm hazır.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 35: Tek örnek kilidi — Windows'un ayırdığı (rezerve) portta uygulama açılmalı
+    # ─────────────────────────────────────────
+    print("\n[TEST 35] Tek Örnek Kilidi (rezerve port dayanıklılığı):")
+    import background as _bg35
+    _a35, _b35 = _bg35.SingleInstance(), _bg35.SingleInstance()
+    _shown35 = []
+    _a35.set_on_show(lambda: _shown35.append(1))
+    try:
+        assert _a35.acquire() is True                         # ilk örnek kilidi alır (50507 rezerve olsa bile yedek porta geçer)
+        assert _b35.acquire() is False                        # ikinci örnek "zaten çalışıyor" der
+        import time as _t35
+        _t35.sleep(0.3)
+        assert _shown35, "ikinci açılış ilk pencereyi öne getirmeli"
+    finally:
+        _a35.release(); _b35.release()
+    _bg35.SingleInstance._is_addr_in_use                       # erişim izni (10013) 'çalışıyor' sayılmıyor
+    _e35 = OSError(13, "izin yok"); _e35.winerror = 10013
+    assert _bg35.SingleInstance._is_addr_in_use(_e35) is False
+    _e35b = OSError(10048, "kullanımda"); _e35b.winerror = 10048
+    assert _bg35.SingleInstance._is_addr_in_use(_e35b) is True
+    print("  • Port rezerve (WinError 10013) olsa da MehburAI açılıyor; ikinci açılış mevcut pencereyi öne getiriyor ✓")
+    print("  ✅ TEST 35 BAŞARILI: Tek örnek kilidi güvenilir.")
     passed_tests += 1
 
     # ─────────────────────────────────────────

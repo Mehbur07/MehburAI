@@ -37,6 +37,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import sqlite3
 import sys
 import threading
@@ -50,6 +51,11 @@ DB_PATH = os.path.join(DATA_DIR, "accounts.db")
 
 HOST = os.environ.get("MEHBUR_ACCOUNT_HOST", "0.0.0.0")
 PORT = int(os.environ.get("MEHBUR_ACCOUNT_PORT", "8765"))
+
+# MehburAI istemcileri sunucunun IP'sini elle girmeden bulsun diye: UDP yayınına
+# ("MEHBURAI_DISCOVER") bu port üzerinden {"service", "port"} ile yanıt verilir.
+DISCOVERY_PORT = int(os.environ.get("MEHBUR_ACCOUNT_DISCOVERY_PORT", "8766"))
+DISCOVERY_MAGIC = b"MEHBURAI_DISCOVER"
 
 SESSION_DAYS = 30
 MAX_FAILED_ATTEMPTS = 6
@@ -228,13 +234,47 @@ class Handler(BaseHTTPRequestHandler):
         pass  # konsolu kirletmesin
 
 
+def start_discovery(http_port: int = None) -> bool:
+    """LAN keşif yanıtlayıcısını arka planda başlatır (port doluysa sessizce vazgeçer)."""
+    http_port = http_port or PORT
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", DISCOVERY_PORT))
+    except OSError:
+        return False
+
+    def loop():
+        reply = json.dumps({"service": "mehburai-accounts", "port": http_port}).encode("utf-8")
+        while True:
+            try:
+                data, addr = sock.recvfrom(256)
+                if data.strip() == DISCOVERY_MAGIC:
+                    sock.sendto(reply, addr)
+            except OSError:
+                return
+    threading.Thread(target=loop, name="MehburAI-AccountDiscovery", daemon=True).start()
+    return True
+
+
+def start_background(host: str = "127.0.0.1", port: int = None):
+    """Sunucuyu arka plan thread'inde başlatır (kaynaktan çalışan MehburAI kendi
+    makinesinde hesap sunucusu bulamazsa kullanır). ThreadingHTTPServer döndürür."""
+    init_db()
+    server = ThreadingHTTPServer((host, port or PORT), Handler)
+    threading.Thread(target=server.serve_forever, name="MehburAI-AccountServer", daemon=True).start()
+    return server
+
+
 def main():
     init_db()
+    start_discovery()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"MehburAI Hesap Sunucusu {HOST}:{PORT} adresinde dinliyor (Ctrl+C ile durdur).")
     print(f"Veritabanı: {DB_PATH}")
-    print("Bu bilgisayarın LAN adresi (ipconfig ile bak) + bu port, aynı ağdaki MehburAI'lerin "
-          "Ayarlar > 👤 Hesap > Sunucu adresine gireceği adrestir, örn: http://192.168.1.5:8765")
+    print("Aynı ağdaki MehburAI'ler bu sunucuyu kendiliğinden bulur (UDP "
+          f"{DISCOVERY_PORT}); adres girmeye gerek yok. İnternetten erişim için "
+          "account_client.py içindeki DEFAULT_SERVER_URL'ye HTTPS adresini yaz.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
