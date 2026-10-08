@@ -2370,33 +2370,114 @@ def run_full_validation():
     assert "account_server_entry" not in _insp26.getsource(_gui.MehburApp._build_account_card)
     print("  • Oturum yokken açılışta GİRİŞ YAP / KAYIT OL ekranı çıkıyor, Ayarlar'da yalnızca Çıkış Yap kaldı ✓")
 
-    # 32j. Sunucu adresi otomatik bulunuyor (kayıtlı → bu PC → LAN yayını → kaynaktan otomatik başlatma)
+    # 32j. Supabase Auth istemcisi (sahte yerel Supabase sunucusuna karşı): kayıt / giriş / doğrulama / yenileme / çıkış
     import account_client as _ac32
-    _store32 = {"account_server_url": "", "account_email": "", "account_token": ""}
-    _orig32 = (_ac32.get_account_config, _ac32.update_account_config)
+    import json as _js32
+    import threading as _th32
+    from http.server import BaseHTTPRequestHandler as _H32, ThreadingHTTPServer as _S32
+
+    _fake32 = {"users": {}, "tokens": {}, "refresh": {}, "confirm": True, "logged_out": []}
+
+    class _FakeSupabase(_H32):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, code, data):
+            body = _js32.dumps(data).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _body(self):
+            n = int(self.headers.get("Content-Length", 0))
+            return _js32.loads(self.rfile.read(n) or b"{}")
+
+        def _session(self, email):
+            tok, ref = f"at{len(_fake32['tokens'])}", f"rt{len(_fake32['refresh'])}"
+            _fake32["tokens"][tok] = email
+            _fake32["refresh"][ref] = email
+            return {"access_token": tok, "refresh_token": ref, "user": {"email": email}}
+
+        def do_POST(self):
+            d = self._body()
+            if self.headers.get("apikey") != "ANON-TEST":
+                return self._send(401, {"msg": "No API key found"})
+            if self.path == "/auth/v1/signup":
+                if d["email"] in _fake32["users"]:
+                    return self._send(422, {"msg": "User already registered"})
+                if len(d["password"]) < 8:
+                    return self._send(422, {"msg": "Password should be at least 8 characters"})
+                _fake32["users"][d["email"]] = d["password"]
+                return self._send(200, {"user": {"email": d["email"]}} if _fake32["confirm"]
+                                  else self._session(d["email"]))
+            if self.path.startswith("/auth/v1/token?grant_type=password"):
+                if _fake32["users"].get(d["email"]) != d["password"]:
+                    return self._send(400, {"error_description": "Invalid login credentials"})
+                return self._send(200, self._session(d["email"]))
+            if self.path.startswith("/auth/v1/token?grant_type=refresh_token"):
+                email = _fake32["refresh"].get(d["refresh_token"])
+                return self._send(200, self._session(email)) if email else self._send(400, {"msg": "bad refresh"})
+            if self.path == "/auth/v1/logout":
+                _fake32["logged_out"].append(self.headers.get("Authorization"))
+                return self._send(204, {})
+            self._send(404, {})
+
+        def do_GET(self):
+            tok = (self.headers.get("Authorization") or "").replace("Bearer ", "")
+            if self.path == "/auth/v1/user" and tok in _fake32["tokens"]:
+                return self._send(200, {"email": _fake32["tokens"][tok]})
+            self._send(401, {"msg": "invalid JWT"})
+
+    _srv32j = _S32(("127.0.0.1", 0), _FakeSupabase)
+    _th32.Thread(target=_srv32j.serve_forever, daemon=True).start()
+    _store32 = {"account_server_url": "", "account_email": "", "account_token": "",
+                "account_refresh_token": "", "account_supabase_url": f"http://127.0.0.1:{_srv32j.server_address[1]}",
+                "account_supabase_key": "ANON-TEST"}
+    _orig32 = (_ac32.get_account_config, _ac32.update_account_config, _ac32.clear_account_session)
     _ac32.get_account_config = lambda: dict(_store32)
     _ac32.update_account_config = lambda **kw: _store32.update(kw)
-    _orig_db32b = _acc32.DB_PATH
-    _acc32.DB_PATH = _os28.path.join(_tmp32b.mkdtemp(), "accounts.db")
-    _acc32.DATA_DIR = _os28.path.dirname(_acc32.DB_PATH)
-    _acc32._failed_attempts.clear()
+    _ac32.clear_account_session = lambda: _store32.update(account_email="", account_token="", account_refresh_token="")
     try:
-        if not _ac32.is_healthy(_ac32.LOCAL_URL):
-            assert _ac32.find_server(allow_autostart=False) is None or _store32["account_server_url"]
-        _url32 = _ac32.find_server(allow_autostart=True)
-        assert _url32 and _store32["account_server_url"] == _url32
-        _reg32 = _ac32.authenticate("register", "otomatik@ornek.com", "uzunbirsifre1")
-        assert _reg32["ok"] and _reg32.get("token")                     # kayıttan sonra otomatik giriş
-        _store32.update(account_email="otomatik@ornek.com", account_token=_reg32["token"])
+        assert _ac32.is_configured()
+        _r = _ac32.authenticate("register", "a@ornek.com", "kısa")
+        assert not _r["ok"] and "kısa" in _r["message"]                    # Türkçe hata iletisi
+        _r = _ac32.authenticate("register", "a@ornek.com", "uzunbirsifre1")
+        assert _r["ok"] and _r.get("confirm_email") and not _r.get("token")  # e-posta doğrulaması açık
+        assert "doğrulama" in _r["message"]
+        _r = _ac32.authenticate("register", "a@ornek.com", "uzunbirsifre1")
+        assert not _r["ok"] and "zaten" in _r["message"]
+        _fake32["confirm"] = False
+        _r = _ac32.authenticate("register", "b@ornek.com", "uzunbirsifre1")   # doğrulama kapalıysa direkt giriş
+        assert _r["ok"] and _r["token"] and _r["email"] == "b@ornek.com"
+        _r = _ac32.authenticate("login", "a@ornek.com", "yanlis")
+        assert not _r["ok"] and "yanlış" in _r["message"]
+        _r = _ac32.authenticate("login", "A@Ornek.com", "uzunbirsifre1")      # e-posta büyük/küçük harf duyarsız
+        assert _r["ok"] and _r["token"] and _r["refresh_token"]
+        _store32.update(account_email=_r["email"], account_token=_r["token"], account_refresh_token=_r["refresh_token"])
         assert _ac32.verify_session() is True
-        _store32["account_token"] = "gecersiz"
-        assert _ac32.verify_session() is False
-        _store32["account_server_url"] = "http://127.0.0.1:1"             # ölü kayıtlı adres → yeniden bulur
-        assert _ac32.find_server(allow_autostart=False) == _ac32.LOCAL_URL
+        _store32["account_token"] = "eskimis"                                 # erişim anahtarı dolmuş → yenilenir
+        assert _ac32.verify_session() is True and _store32["account_token"] != "eskimis"
+        _store32.update(account_token="eskimis", account_refresh_token="gecersiz")
+        assert _ac32.verify_session() is False                                # yenileme de geçersiz → oturum bitti
+        _store32.update(account_token="x", account_refresh_token="y",
+                        account_supabase_url="http://127.0.0.1:1")           # internet/sunucu yok → çevrimdışı izin
+        assert _ac32.verify_session() is None
+        assert _ac32.authenticate("login", "a@ornek.com", "x").get("offline") is True
+        _store32.update(account_supabase_url="", account_supabase_key="")
+        _saved_defaults = (_ac32.SUPABASE_URL, _ac32.SUPABASE_ANON_KEY)
+        _ac32.SUPABASE_URL = _ac32.SUPABASE_ANON_KEY = ""
+        assert not _ac32.is_configured() and _ac32.authenticate("login", "a", "b").get("not_configured")
+        _ac32.SUPABASE_URL, _ac32.SUPABASE_ANON_KEY = _saved_defaults
+        _store32.update(account_supabase_url=f"http://127.0.0.1:{_srv32j.server_address[1]}",
+                        account_supabase_key="ANON-TEST", account_token="at-son")
+        _ac32.logout()
+        assert _store32["account_token"] == "" and _fake32["logged_out"] == ["Bearer at-son"]
     finally:
-        _ac32.get_account_config, _ac32.update_account_config = _orig32
-        _acc32.DB_PATH = _orig_db32b
-    print("  • Sunucu IP'si elle girilmiyor: bulma + kayıt→otomatik giriş + oturum doğrulama çalışıyor ✓")
+        _ac32.get_account_config, _ac32.update_account_config, _ac32.clear_account_session = _orig32
+        _srv32j.shutdown()
+    print("  • Supabase Auth: kayıt (doğrulamalı/doğrulamasız), giriş, yanlış şifre, oturum yenileme, çevrimdışı, çıkış çalışıyor ✓")
 
     print("  ✅ TEST 32 BAŞARILI: Hesap sunucusu (kayıt/giriş/oturum/kaba-kuvvet koruması) hazır.")
     passed_tests += 1

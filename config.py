@@ -213,9 +213,10 @@ def update_sidebar_config(width: int | None = None, collapsed: bool | None = Non
 
 
 # ─────────────────────────────────────────────
-# 👤 Hesap (kendi barındırdığın account_server.py'ye e-posta+şifre ile giriş)
+# 👤 Hesap (Supabase Auth ile e-posta+şifre girişi — bkz. account_client.py)
 # ─────────────────────────────────────────────
-ACCOUNT_DEFAULTS = {"account_server_url": "", "account_email": "", "account_token": ""}
+ACCOUNT_DEFAULTS = {"account_server_url": "", "account_email": "", "account_token": "",
+                    "account_refresh_token": "", "account_supabase_url": "", "account_supabase_key": ""}
 
 
 def get_account_config() -> dict:
@@ -234,7 +235,7 @@ def update_account_config(**changes) -> None:
 
 def clear_account_session() -> None:
     """Yalnızca oturumu (email/token) temizler; sunucu adresini korur."""
-    update_account_config(account_email="", account_token="")
+    update_account_config(account_email="", account_token="", account_refresh_token="")
 
 
 def _hex_to_rgb(h: str):

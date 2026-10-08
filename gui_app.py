@@ -87,7 +87,7 @@ from config import (
 )
 from memory_engine import MemoryEngine
 from network_manager import NetworkMonitor
-from account_client import authenticate, verify_session
+from account_client import authenticate, logout as account_logout, verify_session
 from reminders import LATE_NOTE_SECONDS, get_reminder_service
 from telegram_bot import TelegramControlBot, TelegramNotifier
 from updater import check_for_update, fetch_latest_release_notes
@@ -2426,17 +2426,7 @@ class MehburApp(ctk.CTk):
                 text=f"✅ Giriş yapıldı: {email}" if email else "Giriş yapılmadı")
 
     def _account_logout(self):
-        acc = get_account_config()
-        base, token = acc["account_server_url"].rstrip("/"), acc["account_token"]
-
-        def work():
-            try:
-                requests.post(f"{base}/api/logout", json={"token": token}, timeout=8)
-            except requests.RequestException:
-                pass
-        if base and token:
-            threading.Thread(target=work, daemon=True, name="MehburAI-AccountLogout").start()
-        clear_account_session()
+        threading.Thread(target=account_logout, daemon=True, name="MehburAI-AccountLogout").start()
         self._refresh_account_view()
         self._show_auth_gate()
 
@@ -2488,14 +2478,6 @@ class MehburApp(ctk.CTk):
             card, text="", wraplength=320, justify="center",
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12), text_color=Theme.TEXT_SECONDARY)
         self.auth_status.pack(padx=40, pady=(0, 4))
-
-        # Yalnızca sunucu hiç bulunamazsa açılan, gizli gelişmiş satır
-        self.auth_server_row = ctk.CTkFrame(card, fg_color="transparent")
-        self.auth_server_entry = ctk.CTkEntry(
-            self.auth_server_row, placeholder_text="Sunucu adresi (örn. http://192.168.1.5:8765)",
-            width=320, height=32, corner_radius=8, fg_color=Theme.BG_INPUT,
-            border_color=Theme.CYAN_DARK)
-        self.auth_server_entry.pack()
 
         self.auth_switch_row = ctk.CTkFrame(card, fg_color="transparent")
         self.auth_switch_row.pack(padx=40, pady=(6, 26))
@@ -2562,13 +2544,10 @@ class MehburApp(ctk.CTk):
         if self._auth_mode == "register" and len(password) < 8:
             self.auth_status.configure(text="⚠️ Şifre en az 8 karakter olmalı.", text_color=Theme.STATUS_WARNING)
             return
-        manual = self.auth_server_entry.get().strip() if self.auth_server_row.winfo_ismapped() else ""
-        if manual:
-            update_account_config(account_server_url=manual.rstrip("/"))
         kind = "register" if self._auth_mode == "register" else "login"
         self._auth_busy = True
         self.auth_btn.configure(state="disabled")
-        self.auth_status.configure(text="Sunucu aranıyor...", text_color=Theme.TEXT_SECONDARY)
+        self.auth_status.configure(text="Bağlanılıyor...", text_color=Theme.TEXT_SECONDARY)
 
         def work():
             data = authenticate(kind, email, password)
@@ -2579,17 +2558,21 @@ class MehburApp(ctk.CTk):
         self._auth_busy = False
         self.auth_btn.configure(state="normal")
         if data.get("ok") and data.get("token"):
-            update_account_config(account_email=data.get("email", ""), account_token=data["token"])
+            update_account_config(account_email=data.get("email", ""), account_token=data["token"],
+                                  account_refresh_token=data.get("refresh_token", ""))
             self.auth_pass_entry.delete(0, "end")
-            self.auth_server_row.pack_forget()
             self._refresh_account_view()
             self._hide_auth_gate()
             self.query_entry.focus()
             return
+        if data.get("ok"):
+            # Kayıt oldu ama e-posta doğrulaması gerekiyor → giriş ekranına dön
+            self._set_auth_mode("login")
+            self.auth_status.configure(text="✅ " + str(data.get("message") or ""),
+                                       text_color=Theme.STATUS_ONLINE)
+            return
         self.auth_status.configure(text="❌ " + str(data.get("message") or "Bir hata oluştu."),
                                    text_color=Theme.STATUS_OFFLINE)
-        if data.get("no_server") and not self.auth_server_row.winfo_ismapped():
-            self.auth_server_row.pack(padx=40, pady=(0, 4), before=self.auth_switch_row)
 
     # ─────────────────────────────────────────
     # 🎙️ SESLİ SOHBET KARTI

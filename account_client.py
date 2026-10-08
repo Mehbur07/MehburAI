@@ -1,156 +1,168 @@
 # -*- coding: utf-8 -*-
 """
-MehburAI - Hesap İstemcisi (sunucuyu kendisi bulur)
-===================================================
-Giriş / kayıt ekranının arkasındaki iş: hesap sunucusunun adresini kullanıcıya
-SORMADAN bulur. Sırayla dener:
+MehburAI - Hesap İstemcisi (Supabase Auth)
+==========================================
+Giriş / kayıt ekranının arkasındaki iş: e-posta + şifreyle Supabase Auth'a
+(GoTrue REST API) bağlanır. Kendi sunucunu çalıştırmaya gerek yoktur.
 
-  1. Daha önce çalışmış kayıtlı adres
-  2. Bu bilgisayar (http://127.0.0.1:8765)
-  3. DEFAULT_SERVER_URL  (internetten erişilen sunucu için — derlemeden önce BİR KEZ doldur)
-  4. Yerel ağda (LAN) UDP yayınıyla sunucu arama (account_server.py yanıt verir)
-  5. Kaynaktan (python run_mehbur.py) çalışıyorsa ve hiçbiri yoksa: bu bilgisayarda
-     account_server.py'yi arka planda başlat (yalnızca 127.0.0.1'e açık)
+Kurulum (bir kez):
+  1. supabase.com'da proje aç  →  Project Settings > API
+  2. "Project URL" ve "anon / publishable" anahtarı aşağıya yaz
+     (anon anahtar tarayıcı/istemci içinde durmak için tasarlanmıştır, gizli değildir;
+      ASLA "service_role" anahtarını buraya yazma).
+  3. Authentication > Providers > Email: "Confirm email" açıksa kayıttan sonra kullanıcı
+     e-postasındaki bağlantıyla hesabını doğrular; kapalıysa kayıt olunca direkt giriş yapılır.
+
+İstersen aynı değerleri data/config.json içindeki `account_supabase_url` ve
+`account_supabase_key` alanlarına da yazabilirsin (kaynak koddakilerin yerine geçer).
 """
 
-import json
-import os
-import socket
-import sys
 from typing import Optional
 
 import requests
 
-from config import get_account_config, update_account_config
+from config import clear_account_session, get_account_config, update_account_config
 
-# İnternetten erişilebilir (HTTPS önerilir) hesap sunucunuz varsa buraya yazın; örn.
-# "https://hesap.ornek.com". Boş bırakılırsa yalnızca bu PC ve yerel ağ aranır.
-DEFAULT_SERVER_URL = ""
+SUPABASE_URL = ""         # örn. "https://abcdxyz.supabase.co"
+SUPABASE_ANON_KEY = ""    # "anon" / "publishable" anahtar (service_role DEĞİL)
 
-LOCAL_URL = "http://127.0.0.1:8765"
-DISCOVERY_PORT = 8766
-DISCOVERY_MAGIC = b"MEHBURAI_DISCOVER"
+TIMEOUT = 10
+
+NOT_CONFIGURED_MSG = ("Hesap sistemi ayarlanmamış (Supabase proje adresi ve anahtarı eksik). "
+                      "account_client.py dosyasına yazılmalı.")
+OFFLINE_MSG = "Sunucuya bağlanılamadı. İnternet bağlantını kontrol et."
 
 
-def is_healthy(url: str, timeout: float = 1.5) -> bool:
+def _settings() -> tuple:
+    acc = get_account_config()
+    url = (acc.get("account_supabase_url") or SUPABASE_URL).strip().rstrip("/")
+    key = (acc.get("account_supabase_key") or SUPABASE_ANON_KEY).strip()
+    return url, key
+
+
+def is_configured() -> bool:
+    url, key = _settings()
+    return bool(url and key)
+
+
+def _headers(key: str, bearer: str = "") -> dict:
+    return {"apikey": key, "Authorization": f"Bearer {bearer or key}",
+            "Content-Type": "application/json"}
+
+
+# Supabase'in (İngilizce) hata iletilerini Türkçeleştirir
+_ERRORS = (
+    ("invalid login credentials", "E-posta ya da şifre yanlış."),
+    ("email not confirmed", "E-postanı henüz doğrulamadın. Gelen kutundaki bağlantıya tıkla."),
+    ("user already registered", "Bu e-posta ile zaten bir hesap var."),
+    ("already been registered", "Bu e-posta ile zaten bir hesap var."),
+    ("password should be at least", "Şifre çok kısa (en az 8 karakter olmalı)."),
+    ("weak password", "Şifre çok zayıf; daha uzun ya da karmaşık bir şifre dene."),
+    ("unable to validate email", "Geçerli bir e-posta adresi gir."),
+    ("invalid email", "Geçerli bir e-posta adresi gir."),
+    ("rate limit", "Çok fazla deneme yapıldı — biraz bekleyip tekrar dene."),
+    ("signups not allowed", "Yeni kayıtlar şu an kapalı."),
+)
+
+
+def _error_message(resp: requests.Response) -> str:
     try:
-        r = requests.get(url.rstrip("/") + "/api/health", timeout=timeout)
-        return r.ok and r.json().get("service") == "MehburAI Hesap Sunucusu"
-    except (requests.RequestException, ValueError):
-        return False
+        body = resp.json()
+    except ValueError:
+        body = {}
+    raw = str(body.get("msg") or body.get("error_description") or body.get("message")
+              or body.get("error") or "").strip()
+    low = raw.lower()
+    for needle, tr in _ERRORS:
+        if needle in low:
+            return tr
+    if resp.status_code == 429:
+        return "Çok fazla deneme yapıldı — biraz bekleyip tekrar dene."
+    return raw or f"İşlem başarısız (HTTP {resp.status_code})."
 
 
-def discover_lan(timeout: float = 1.5) -> Optional[str]:
-    """Yerel ağa UDP yayını atıp hesap sunucusunun adresini bulur (yoksa None)."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.settimeout(timeout)
-        for target in ("255.255.255.255", "127.0.0.1"):
-            try:
-                sock.sendto(DISCOVERY_MAGIC, (target, DISCOVERY_PORT))
-            except OSError:
-                pass
-        while True:
-            data, addr = sock.recvfrom(512)
-            try:
-                info = json.loads(data.decode("utf-8"))
-            except ValueError:
-                continue
-            if info.get("service") == "mehburai-accounts" and info.get("port"):
-                return f"http://{addr[0]}:{int(info['port'])}"
-    except (OSError, ValueError):
-        return None
-    finally:
-        sock.close()
-
-
-def start_local_server() -> Optional[str]:
-    """Kaynaktan çalışırken, yan yana duran account_server.py'yi bu PC'de başlatır."""
-    if getattr(sys, "frozen", False):
-        return None                     # exe'nin içinde sunucu yok (ayrı çalıştırılır)
-    here = os.path.dirname(os.path.abspath(__file__))
-    if not os.path.isfile(os.path.join(here, "account_server.py")):
-        return None
-    try:
-        import importlib
-        srv = importlib.import_module("account_server")
-        srv.start_background("127.0.0.1")
-    except Exception:
-        return None
-    return LOCAL_URL if is_healthy(LOCAL_URL) else None
-
-
-def find_server(allow_autostart: bool = True) -> Optional[str]:
-    """Çalışan hesap sunucusunun adresini döndürür; bulursa kaydeder. Yoksa None."""
-    saved = get_account_config()["account_server_url"].rstrip("/")
-    candidates = [u for u in (saved, LOCAL_URL, DEFAULT_SERVER_URL.rstrip("/")) if u]
-    seen = set()
-    for url in candidates:
-        if url in seen:
-            continue
-        seen.add(url)
-        if is_healthy(url):
-            return _remember(url, saved)
-    url = discover_lan()
-    if url and is_healthy(url):
-        return _remember(url, saved)
-    if allow_autostart:
-        url = start_local_server()
-        if url:
-            return _remember(url, saved)
-    return None
-
-
-def _remember(url: str, saved: str) -> str:
-    if url != saved:
-        update_account_config(account_server_url=url)
-    return url
-
-
-NO_SERVER_MSG = ("Hesap sunucusuna ulaşılamadı. Sunucu (account_server.py) çalışan bir "
-                 "bilgisayar aynı ağda açık olmalı.")
+def _session_result(data: dict, fallback_email: str) -> dict:
+    user = data.get("user") or {}
+    return {"ok": True, "token": data["access_token"],
+            "refresh_token": data.get("refresh_token", ""),
+            "email": (user.get("email") or fallback_email or "").lower()}
 
 
 def authenticate(kind: str, email: str, password: str) -> dict:
-    """kind: 'login' | 'register'. Sunucuyu bulup isteği yapar.
+    """kind: 'login' | 'register'. Dönüş: {"ok", "message", "token"?, "refresh_token"?, "email"?}.
 
-    'register' başarılı olursa aynı bilgilerle otomatik giriş de yapılır; dönüş her zaman
-    {"ok", "message", "token"?, "email"?} biçimindedir.
+    Kayıt sonrası oturum açıldıysa (e-posta doğrulaması kapalı) token döner; doğrulama
+    gerekiyorsa ok=True ama token yoktur ve message kullanıcıya ne yapacağını söyler.
     """
-    base = find_server()
-    if not base:
-        return {"ok": False, "message": NO_SERVER_MSG, "no_server": True}
-
-    def post(path: str) -> dict:
-        try:
-            r = requests.post(f"{base}/api/{path}", json={"email": email, "password": password},
-                              timeout=10)
-            return r.json()
-        except requests.RequestException as e:
-            return {"ok": False, "message": f"Sunucuya bağlanılamadı ({type(e).__name__}).",
-                    "no_server": True}
-        except ValueError:
-            return {"ok": False, "message": "Sunucudan geçersiz yanıt geldi."}
-
-    data = post(kind)
-    if kind == "register" and data.get("ok"):
-        data = post("login")
-        if data.get("ok"):
-            data["message"] = "Kayıt başarılı, giriş yapıldı."
-    return data
+    url, key = _settings()
+    if not (url and key):
+        return {"ok": False, "message": NOT_CONFIGURED_MSG, "not_configured": True}
+    email = (email or "").strip().lower()
+    try:
+        if kind == "register":
+            r = requests.post(f"{url}/auth/v1/signup", headers=_headers(key),
+                              json={"email": email, "password": password}, timeout=TIMEOUT)
+            if not r.ok:
+                return {"ok": False, "message": _error_message(r)}
+            data = r.json()
+            if data.get("access_token"):
+                res = _session_result(data, email)
+                res["message"] = "Kayıt başarılı, giriş yapıldı."
+                return res
+            return {"ok": True, "confirm_email": True,
+                    "message": "Kayıt başarılı! E-postana bir doğrulama bağlantısı gönderdik — "
+                               "tıkladıktan sonra giriş yap."}
+        r = requests.post(f"{url}/auth/v1/token?grant_type=password", headers=_headers(key),
+                          json={"email": email, "password": password}, timeout=TIMEOUT)
+        if not r.ok:
+            return {"ok": False, "message": _error_message(r)}
+        res = _session_result(r.json(), email)
+        res["message"] = "Giriş başarılı."
+        return res
+    except requests.RequestException:
+        return {"ok": False, "message": OFFLINE_MSG, "offline": True}
+    except ValueError:
+        return {"ok": False, "message": "Sunucudan geçersiz yanıt geldi."}
 
 
 def verify_session() -> Optional[bool]:
-    """Kayıtlı oturum hâlâ geçerli mi? True/False; sunucuya ulaşılamazsa None (çevrimdışı)."""
+    """Kayıtlı oturum hâlâ geçerli mi? True/False; internet yoksa None (çevrimdışı → izin ver).
+
+    Erişim anahtarı (1 saatlik) dolmuşsa yenileme anahtarıyla sessizce yenilenir.
+    """
     acc = get_account_config()
-    base, token = acc["account_server_url"].rstrip("/"), acc["account_token"]
-    if not (base and token):
+    url, key = _settings()
+    token, refresh = acc["account_token"], acc.get("account_refresh_token", "")
+    if not (url and key and (token or refresh)):
         return None
     try:
-        r = requests.get(f"{base}/api/me", params={"token": token}, timeout=4)
-    except requests.RequestException:
+        r = requests.get(f"{url}/auth/v1/user", headers=_headers(key, token), timeout=5)
+        if r.ok:
+            return True
+        if r.status_code not in (401, 403):
+            return None
+        if not refresh:
+            return False
+        rr = requests.post(f"{url}/auth/v1/token?grant_type=refresh_token", headers=_headers(key),
+                           json={"refresh_token": refresh}, timeout=5)
+        if rr.ok and rr.json().get("access_token"):
+            d = rr.json()
+            update_account_config(account_token=d["access_token"],
+                                  account_refresh_token=d.get("refresh_token", refresh))
+            return True
+        return False if rr.status_code in (400, 401, 403) else None
+    except (requests.RequestException, ValueError):
         return None
-    if r.status_code == 401:
-        return False
-    return True if r.ok else None
+
+
+def logout() -> None:
+    """Oturumu sunucuda kapatır (en iyi çaba) ve yerel oturum bilgisini siler."""
+    acc = get_account_config()
+    url, key = _settings()
+    token = acc["account_token"]
+    clear_account_session()
+    if url and key and token:
+        try:
+            requests.post(f"{url}/auth/v1/logout", headers=_headers(key, token), timeout=6)
+        except requests.RequestException:
+            pass
