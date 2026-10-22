@@ -2557,6 +2557,8 @@ def run_full_validation():
     # ─────────────────────────────────────────
     print("\n[TEST 35] Tek Örnek Kilidi (rezerve port dayanıklılığı):")
     import background as _bg35
+    _bg35._SINGLETON_PORTS = (50611, 47911, 39611)           # isolated from a running MehburAI
+    _bg35._SINGLETON_PORT = 50611
     _a35, _b35 = _bg35.SingleInstance(), _bg35.SingleInstance()
     _shown35 = []
     _a35.set_on_show(lambda: _shown35.append(1))
