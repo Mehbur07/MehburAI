@@ -745,7 +745,7 @@ class MehburApp(ctk.CTk):
                 )
 
         if tab_name == "memory":
-            self._refresh_memory_list()
+            self._refresh_memory_list(force=False)
         elif tab_name == "settings":
             self._reload_settings_view()
 
@@ -1813,16 +1813,28 @@ class MehburApp(ctk.CTk):
         # Listeyi Doldur
         self._refresh_memory_list()
 
-    def _refresh_memory_list(self):
-        """Veritabanındaki tüm öğrenilen bilgileri arayüze kart olarak dizer."""
-        for widget in self.memory_list_box.winfo_children():
-            widget.destroy()
+    def _refresh_memory_list(self, force: bool = True):
+        """Veritabanındaki öğrenilen bilgileri kart olarak dizer.
 
+        force=False (sekme geçişi): kayıtlar değişmediyse hiçbir şeyi yeniden çizmez.
+        Kartlar küçük parçalar halinde çizilir; böylece arayüz donmaz.
+        """
         search_txt = self.memory_search_entry.get().strip()
         if search_txt:
             records = self.memory.search_knowledge_text(search_txt)
         else:
             records = self.memory.get_all_knowledge(limit=100)
+
+        sig = (search_txt, tuple((r["id"], r.get("access_count", 0)) for r in records))
+        if not force and sig == getattr(self, "_memory_sig", None):
+            return
+        self._memory_sig = sig
+
+        # Süren bir parçalı çizimi iptal et, listeyi temizle
+        self._memory_render_gen = getattr(self, "_memory_render_gen", 0) + 1
+        gen = self._memory_render_gen
+        for widget in self.memory_list_box.winfo_children():
+            widget.destroy()
 
         if not records:
             empty_text = (
@@ -1840,8 +1852,15 @@ class MehburApp(ctk.CTk):
             empty_lbl.pack()
             return
 
-        for rec in records:
-            self._create_memory_card(rec)
+        def render(start: int, count: int):
+            if gen != self._memory_render_gen or not self.memory_list_box.winfo_exists():
+                return
+            for rec in records[start:start + count]:
+                self._create_memory_card(rec)
+            if start + count < len(records):
+                self.after(10, render, start + count, 6)
+
+        render(0, 8)   # ilk ekran hemen dolsun, kalanı arkadan gelsin
 
     def _filter_memory_list(self):
         """Arama çubuğuna göre hafızayı veritabanının tamamında arar (yazma duraklayınca)."""
