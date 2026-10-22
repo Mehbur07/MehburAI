@@ -23,8 +23,10 @@ import requests
 
 from config import clear_account_session, get_account_config, update_account_config
 
-SUPABASE_URL = ""         # örn. "https://abcdxyz.supabase.co"
-SUPABASE_ANON_KEY = ""    # "anon" / "publishable" anahtar (service_role DEĞİL)
+SUPABASE_URL = "https://hqwlsfvsmtdacutkadub.supabase.co"
+SUPABASE_ANON_KEY = (  # "anon" role (public by design; never put service_role here)
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imhxd2xzZnZzbXRkYWN1dGthZHViIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI2ODMwMTUsImV4cCI6MjEwODI1OTAxNX0.LWecWnx8AOMEJcpWT7-Z-XqJss6azGIr96F__XGROIo"
+)
 
 TIMEOUT = 10
 
