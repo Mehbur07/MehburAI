@@ -2479,6 +2479,65 @@ def run_full_validation():
         _srv32j.shutdown()
     print("  • Supabase Auth: kayıt (doğrulamalı/doğrulamasız), giriş, yanlış şifre, oturum yenileme, çevrimdışı, çıkış çalışıyor ✓")
 
+    # 32k. Google ile giriş (sahte Supabase: authorize -> yerel callback -> PKCE token takası)
+    import base64 as _b64, hashlib as _hl
+    from urllib.parse import parse_qs as _pq, urlparse as _up
+    _g32 = {"challenge": None, "mode": "ok"}
+
+    class _FakeGoogleSupabase(_H32):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            u = _up(self.path)
+            if u.path == "/auth/v1/authorize":
+                q = {k: v[0] for k, v in _pq(u.query).items()}
+                assert q["provider"] == "google" and q["code_challenge_method"] == "s256"
+                _g32["challenge"] = q["code_challenge"]
+                dest = q["redirect_to"] + ("?code=gcode123" if _g32["mode"] == "ok"
+                                           else "?error=access_denied&error_description=denied")
+                self.send_response(302)
+                self.send_header("Location", dest)
+                self.end_headers()
+            else:
+                self.send_response(404); self.end_headers()
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0))
+            d = _js32.loads(self.rfile.read(n) or b"{}")
+            ok = (self.path.startswith("/auth/v1/token?grant_type=pkce") and d.get("auth_code") == "gcode123"
+                  and _b64.urlsafe_b64encode(_hl.sha256(d["code_verifier"].encode()).digest()).decode().rstrip("=")
+                  == _g32["challenge"])
+            body = _js32.dumps({"access_token": "gtok", "refresh_token": "grt", "user": {"email": "g@gmail.com"}}
+                               if ok else {"msg": "invalid flow state"}).encode()
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    _srvg = _S32(("127.0.0.1", 0), _FakeGoogleSupabase)
+    _th32.Thread(target=_srvg.serve_forever, daemon=True).start()
+    _orig_cfg = _ac32.get_account_config
+    _ac32.get_account_config = lambda: {"account_supabase_url": f"http://127.0.0.1:{_srvg.server_address[1]}",
+                                        "account_supabase_key": "ANON-TEST"}
+    try:
+        _browser = lambda u: _th32.Thread(target=lambda: _req32.get(u, timeout=5), daemon=True).start()
+        import requests as _req32
+        _g = _ac32.google_login(open_browser=_browser, timeout=10)
+        assert _g["ok"] and _g["token"] == "gtok" and _g["email"] == "g@gmail.com"   # PKCE takası doğrulandı
+        _g32["mode"] = "denied"
+        _g = _ac32.google_login(open_browser=_browser, timeout=10)
+        assert not _g["ok"] and "iptal" in _g["message"]
+        _g = _ac32.google_login(open_browser=lambda u: None, timeout=2)              # tarayıcıdan dönüş yok
+        assert not _g["ok"] and "zaman aşımı" in _g["message"]
+        assert "Google" in _ac32._google_error("provider is not enabled")
+    finally:
+        _ac32.get_account_config = _orig_cfg
+        _srvg.shutdown()
+    assert "_auth_google" in _insp26.getsource(_gui.MehburApp._build_auth_gate)
+    print("  • Google ile giriş: yetkilendirme → yerel callback → PKCE takası, iptal ve zaman aşımı çalışıyor ✓")
+
     print("  ✅ TEST 32 BAŞARILI: Hesap sunucusu (kayıt/giriş/oturum/kaba-kuvvet koruması) hazır.")
     passed_tests += 1
 

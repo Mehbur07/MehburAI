@@ -17,7 +17,15 @@ Kurulum (bir kez):
 `account_supabase_key` alanlarına da yazabilirsin (kaynak koddakilerin yerine geçer).
 """
 
-from typing import Optional
+import base64
+import hashlib
+import secrets
+import threading
+import time
+import webbrowser
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Callable, Optional
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 
@@ -168,3 +176,109 @@ def logout() -> None:
             requests.post(f"{url}/auth/v1/logout", headers=_headers(key, token), timeout=6)
         except requests.RequestException:
             pass
+
+
+# ─────────────────────────────────────────────
+# Google ile giriş (Supabase OAuth + PKCE, yerel geri dönüş adresi)
+# ─────────────────────────────────────────────
+
+# Geri dönüş (callback) için denenen yerel portlar. Hepsi Supabase > Authentication >
+# URL Configuration > Redirect URLs listesine eklenmeli (ya da http://127.0.0.1:*/** ).
+CALLBACK_PORTS = (53682, 53683, 53684, 61287)
+GOOGLE_TIMEOUT = 180
+
+_DONE_PAGE = ("<html><head><meta charset='utf-8'><title>MehburAI</title></head>"
+              "<body style='font-family:sans-serif;background:#0A0A0E;color:#00F0FF;"
+              "text-align:center;padding-top:15vh'><h2>{title}</h2><p style='color:#aaa'>{text}</p>"
+              "</body></html>")
+
+
+def _pkce_pair() -> tuple:
+    verifier = secrets.token_urlsafe(64)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    return verifier, challenge
+
+
+def _start_callback_server(result: dict):
+    """İlk boş portta tek seferlik geri dönüş sunucusu açar. (sunucu, port) döndürür."""
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            u = urlparse(self.path)
+            if u.path != "/callback":
+                self.send_response(404); self.end_headers(); return
+            q = parse_qs(u.query)
+            if q.get("code"):
+                result["code"] = q["code"][0]
+                page = _DONE_PAGE.format(title="Giriş başarılı ✅", text="Bu sekmeyi kapatıp MehburAI'ye dönebilirsin.")
+            else:
+                result["error"] = (q.get("error_description") or q.get("error") or ["Giriş iptal edildi."])[0]
+                page = _DONE_PAGE.format(title="Giriş tamamlanamadı", text="MehburAI'ye dönüp tekrar dene.")
+            body = page.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    for port in CALLBACK_PORTS:
+        try:
+            srv = HTTPServer(("127.0.0.1", port), Handler)
+            srv.timeout = 1
+            return srv, port
+        except OSError:
+            continue
+    return None, 0
+
+
+def google_login(open_browser: Callable[[str], object] = webbrowser.open,
+                 timeout: float = GOOGLE_TIMEOUT) -> dict:
+    """Tarayıcıda Google ile girişi yürütür. Dönüş: authenticate() ile aynı biçim."""
+    url, key = _settings()
+    if not (url and key):
+        return {"ok": False, "message": NOT_CONFIGURED_MSG, "not_configured": True}
+    result: dict = {}
+    srv, port = _start_callback_server(result)
+    if srv is None:
+        return {"ok": False, "message": "Yerel geri dönüş portu açılamadı (portlar dolu)."}
+    verifier, challenge = _pkce_pair()
+    auth_url = f"{url}/auth/v1/authorize?" + urlencode({
+        "provider": "google",
+        "redirect_to": f"http://127.0.0.1:{port}/callback",
+        "code_challenge": challenge,
+        "code_challenge_method": "s256",
+    })
+    try:
+        open_browser(auth_url)
+        deadline = time.time() + timeout
+        while time.time() < deadline and not result:
+            srv.handle_request()
+    finally:
+        srv.server_close()
+    if result.get("error"):
+        return {"ok": False, "message": _google_error(result["error"])}
+    if not result.get("code"):
+        return {"ok": False, "message": "Google girişi zaman aşımına uğradı. Tekrar dene."}
+    try:
+        r = requests.post(f"{url}/auth/v1/token?grant_type=pkce", headers=_headers(key),
+                          json={"auth_code": result["code"], "code_verifier": verifier}, timeout=TIMEOUT)
+        if not r.ok:
+            return {"ok": False, "message": _error_message(r)}
+        res = _session_result(r.json(), "")
+        res["message"] = "Google ile giriş yapıldı."
+        return res
+    except requests.RequestException:
+        return {"ok": False, "message": OFFLINE_MSG, "offline": True}
+    except (ValueError, KeyError):
+        return {"ok": False, "message": "Sunucudan geçersiz yanıt geldi."}
+
+
+def _google_error(raw: str) -> str:
+    low = raw.lower()
+    if "provider is not enabled" in low or "unsupported provider" in low:
+        return "Google girişi Supabase'te henüz açılmamış (Authentication > Sign In / Providers > Google)."
+    if "access_denied" in low or "denied" in low:
+        return "Google girişi iptal edildi."
+    return raw

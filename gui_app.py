@@ -87,7 +87,7 @@ from config import (
 )
 from memory_engine import MemoryEngine
 from network_manager import NetworkMonitor
-from account_client import authenticate, logout as account_logout, verify_session
+from account_client import authenticate, google_login, logout as account_logout, verify_session
 from reminders import LATE_NOTE_SECONDS, get_reminder_service
 from telegram_bot import TelegramControlBot, TelegramNotifier
 from updater import check_for_update, fetch_latest_release_notes
@@ -2493,6 +2493,14 @@ class MehburApp(ctk.CTk):
             text_color=Theme.BG_DARKEST, command=self._auth_submit)
         self.auth_btn.pack(padx=40, pady=(0, 8))
 
+        self.auth_google_btn = ctk.CTkButton(
+            card, text="G   Google ile devam et", width=320, height=42, corner_radius=10,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=14, weight="bold"),
+            fg_color="transparent", border_width=1, border_color=Theme.CYAN_DARK,
+            hover_color=Theme.BG_CARD_HOVER, text_color=Theme.TEXT_PRIMARY,
+            command=self._auth_google)
+        self.auth_google_btn.pack(padx=40, pady=(0, 8))
+
         self.auth_status = ctk.CTkLabel(
             card, text="", wraplength=320, justify="center",
             font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12), text_color=Theme.TEXT_SECONDARY)
@@ -2573,9 +2581,24 @@ class MehburApp(ctk.CTk):
             self._ui_call(lambda: self._on_auth_result(data))
         threading.Thread(target=work, daemon=True, name="MehburAI-Auth").start()
 
+    def _auth_google(self):
+        if self._auth_busy:
+            return
+        self._auth_busy = True
+        self.auth_btn.configure(state="disabled")
+        self.auth_google_btn.configure(state="disabled")
+        self.auth_status.configure(text="Tarayıcıda Google ile giriş yap, sonra buraya dön...",
+                                   text_color=Theme.TEXT_SECONDARY)
+
+        def work():
+            data = google_login()
+            self._ui_call(lambda: self._on_auth_result(data))
+        threading.Thread(target=work, daemon=True, name="MehburAI-GoogleAuth").start()
+
     def _on_auth_result(self, data: dict):
         self._auth_busy = False
         self.auth_btn.configure(state="normal")
+        self.auth_google_btn.configure(state="normal")
         if data.get("ok") and data.get("token"):
             update_account_config(account_email=data.get("email", ""), account_token=data["token"],
                                   account_refresh_token=data.get("refresh_token", ""))
