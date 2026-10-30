@@ -49,7 +49,7 @@ def run_full_validation():
     print("  🤖 MEHBUR AI — FAZ 5 ENTEGRASYON VE DOĞRULAMA TESTLERİ")
     print("=" * 65)
     passed_tests = 0
-    total_tests = 35
+    total_tests = 36
 
     memory = MemoryEngine()
     network = NetworkMonitor()
@@ -2636,6 +2636,26 @@ def run_full_validation():
     assert _bg35.SingleInstance._is_addr_in_use(_e35b) is True
     print("  • Port rezerve (WinError 10013) olsa da MehburAI açılıyor; ikinci açılış mevcut pencereyi öne getiriyor ✓")
     print("  ✅ TEST 35 BAŞARILI: Tek örnek kilidi güvenilir.")
+    passed_tests += 1
+
+    # ─────────────────────────────────────────
+    # TEST 36: Sınırsız özel renk (kaydırıcı / hex / okunabilirlik)
+    # ─────────────────────────────────────────
+    print("\n[TEST 36] Sınırsız Özel Tema Rengi:")
+    import config as _cfg36
+    assert _cfg36.normalize_hex_color("abc") == "#AABBCC" and _cfg36.normalize_hex_color("#ff5e00") == "#FF5E00"
+    assert _cfg36.normalize_hex_color("#12") is None and _cfg36.normalize_hex_color("zzzzzz") is None
+    for _hx in ("#FF5E00", "#3D8BFF", "#123456", "#ABCDEF"):                     # HSV round trip is lossless
+        assert _cfg36.hsv_to_hex(*_cfg36.hex_to_hsv(_hx)) == _hx
+    assert _cfg36.contrast_ratio("#000000", "#FFFFFF") > 20
+    for _acc in ("#FFFFFF", "#000000", "#1A237E", "#FF5E00", "#00F0FF"):          # any colour yields a valid, readable theme
+        _t36 = _cfg36.derive_theme_colors(_acc, "#0A0A0E")
+        assert all(_cfg36.is_valid_hex_color(v) for v in _t36.values())
+        assert _cfg36.contrast_ratio(_t36["BTN_PRIMARY_BG"], _t36["BTN_PRIMARY_FG"]) >= 4.5, _acc
+    assert all(hasattr(_gui.MehburApp, m) for m in ("_build_color_section", "_on_hsv_slider", "_on_hex_typed",
+                                                     "_pick_system_color", "_toggle_color_editor"))
+    print("  • Herhangi bir renk (hex, kaydırıcı, ekrandan seçme) geçerli ve okunabilir bir temaya dönüşüyor ✓")
+    print("  ✅ TEST 36 BAŞARILI: Tema rengi 4 renkle kısıtlı değil, sınırsız.")
     passed_tests += 1
 
     # ─────────────────────────────────────────

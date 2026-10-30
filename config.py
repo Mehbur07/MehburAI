@@ -251,6 +251,43 @@ def mix_colors(c1: str, c2: str, t: float) -> str:
         round(r1 + (r2 - r1) * t), round(g1 + (g2 - g1) * t), round(b1 + (b2 - b1) * t))
 
 
+def normalize_hex_color(value) -> str | None:
+    """'#abc', 'ABCDEF', '#aabbcc' gibi girdileri '#AABBCC' yapar; geçersizse None."""
+    import re
+    v = str(value or "").strip().lstrip("#")
+    if re.fullmatch(r"[0-9A-Fa-f]{3}", v):
+        v = "".join(ch * 2 for ch in v)
+    return "#" + v.upper() if re.fullmatch(r"[0-9A-Fa-f]{6}", v) else None
+
+
+def hex_to_hsv(h: str) -> tuple:
+    """'#RRGGBB' -> (hue 0-360, saturation 0-1, value 0-1)."""
+    import colorsys
+    r, g, b = (c / 255 for c in _hex_to_rgb(h))
+    hh, ss, vv = colorsys.rgb_to_hsv(r, g, b)
+    return hh * 360, ss, vv
+
+
+def hsv_to_hex(hue: float, sat: float, val: float) -> str:
+    import colorsys
+    r, g, b = colorsys.hsv_to_rgb((hue % 360) / 360, max(0.0, min(1.0, sat)), max(0.0, min(1.0, val)))
+    return "#{:02X}{:02X}{:02X}".format(round(r * 255), round(g * 255), round(b * 255))
+
+
+def _luminance(h: str) -> float:
+    def lin(c):
+        c /= 255
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = _hex_to_rgb(h)
+    return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+
+
+def contrast_ratio(c1: str, c2: str) -> float:
+    """WCAG kontrast oranı (1 = aynı renk, 21 = siyah/beyaz)."""
+    a, b = sorted((_luminance(c1), _luminance(c2)), reverse=True)
+    return (a + 0.05) / (b + 0.05)
+
+
 def derive_theme_colors(accent: str, bg: str) -> dict:
     """Vurgu + arka plan renginden tüm Theme renklerini türetir."""
     black, white = "#000000", "#FFFFFF"
@@ -276,7 +313,8 @@ def derive_theme_colors(accent: str, bg: str) -> dict:
         "BORDER_FOCUS": accent,
         "BTN_PRIMARY_BG": accent,
         "BTN_HOVER_BG": mix_colors(accent, white, 0.20),
-        "BTN_PRIMARY_FG": mix_colors(bg, black, 0.35),
+        # dark text on light accents, white text on dark accents (any colour stays readable)
+        "BTN_PRIMARY_FG": mix_colors(bg, black, 0.35) if contrast_ratio(accent, mix_colors(bg, black, 0.35)) >= 4.5 else white,
     }
 
 

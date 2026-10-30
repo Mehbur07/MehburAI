@@ -56,7 +56,11 @@ from config import (
     THEME_DEFAULT_BG,
     apply_theme,
     Theme,
+    contrast_ratio,
     derive_theme_colors,
+    hex_to_hsv,
+    hsv_to_hex,
+    normalize_hex_color,
     ensure_app_icon,
     get_api_key,
     get_last_seen_version,
@@ -2174,18 +2178,13 @@ class MehburApp(ctk.CTk):
     # 🎨 GÖRÜNÜM (RENK AYARI) KARTI
     # ─────────────────────────────────────────
 
-    _CUSTOM_COLOR_LABEL = "Özel renk…"
-
-    @staticmethod
-    def _name_for_color(table: dict, value: str) -> str:
-        for name, hexv in table.items():
-            if hexv.upper() == str(value).upper():
-                return name
-        return MehburApp._CUSTOM_COLOR_LABEL
+    _SWATCH_BORDER = "#4A4A5A"   # visible on both dark cards and light accents
 
     def _build_appearance_card(self, parent):
-        """Vurgu rengi + arka plan tonu seçimi; değişiklik yeniden başlatınca uygulanır."""
+        """Vurgu rengi + arka plan: hazır renkler VE sınırsız özel renk (kaydırıcı / hex / ekran seçici)."""
         self._theme_pending = dict(get_theme_config())
+        self._theme_ui = {}
+        self._theme_syncing = False
 
         card = ctk.CTkFrame(parent, fg_color=Theme.BG_CARD, corner_radius=12,
                             border_width=1, border_color=Theme.CYAN_DARK)
@@ -2194,40 +2193,24 @@ class MehburApp(ctk.CTk):
         ctk.CTkLabel(card, text="🎨 Görünüm (Renk Ayarı)",
                      font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=16, weight="bold"),
                      text_color=Theme.CYAN_PRIMARY).pack(anchor="w", padx=16, pady=(16, 4))
-        ctk.CTkLabel(card, text="Arayüzün vurgu rengini ve arka plan tonunu istediğin gibi değiştir. "
-                                "Önizlemeyi aşağıda gör; 'Uygula' dersen renkler hemen değişir.",
+        ctk.CTkLabel(card, text="Hazır renklerden birini seç ya da '🎨 Özel renk' ile istediğin rengi bul "
+                                "(kaydırıcılar, hex kodu ya da ekrandan seçme). Önizlemeyi aşağıda gör; "
+                                "'Uygula' dersen renkler hemen değişir.",
                      font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
                      text_color=Theme.TEXT_SECONDARY, justify="left",
                      wraplength=700).pack(anchor="w", padx=16, pady=(0, 10))
 
-        accent_names = list(THEME_ACCENTS) + [self._CUSTOM_COLOR_LABEL]
-        bg_names = list(THEME_BACKGROUNDS) + [self._CUSTOM_COLOR_LABEL]
+        self._build_color_section(card, "Vurgu rengi", THEME_ACCENTS, "accent")
+        self._build_color_section(card, "Arka plan", THEME_BACKGROUNDS, "bg")
 
-        row1 = ctk.CTkFrame(card, fg_color="transparent")
-        row1.pack(fill="x", padx=16, pady=(0, 8))
-        ctk.CTkLabel(row1, text="Vurgu rengi", width=110, anchor="w",
-                     text_color=Theme.TEXT_PRIMARY).pack(side="left")
-        self.theme_accent_menu = ctk.CTkOptionMenu(
-            row1, values=accent_names, command=self._on_accent_choice, width=190,
-            fg_color=Theme.BG_INPUT, button_color=Theme.CYAN_DARK,
-            button_hover_color=Theme.CYAN_DIM)
-        self.theme_accent_menu.set(self._name_for_color(THEME_ACCENTS, self._theme_pending["accent"]))
-        self.theme_accent_menu.pack(side="left")
+        self.theme_warn_lbl = ctk.CTkLabel(card, text="", justify="left", wraplength=700, anchor="w",
+                                           font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12),
+                                           text_color=Theme.STATUS_WARNING)
+        self.theme_warn_lbl.pack(anchor="w", padx=16, pady=(4, 0))
 
-        row2 = ctk.CTkFrame(card, fg_color="transparent")
-        row2.pack(fill="x", padx=16, pady=(0, 10))
-        ctk.CTkLabel(row2, text="Arka plan", width=110, anchor="w",
-                     text_color=Theme.TEXT_PRIMARY).pack(side="left")
-        self.theme_bg_menu = ctk.CTkOptionMenu(
-            row2, values=bg_names, command=self._on_bg_choice, width=190,
-            fg_color=Theme.BG_INPUT, button_color=Theme.CYAN_DARK,
-            button_hover_color=Theme.CYAN_DIM)
-        self.theme_bg_menu.set(self._name_for_color(THEME_BACKGROUNDS, self._theme_pending["bg"]))
-        self.theme_bg_menu.pack(side="left")
-
-        # Canlı önizleme: küçük bir sahte pencere
+        # Live preview: a small fake window
         self.theme_preview = ctk.CTkFrame(card, corner_radius=10, border_width=2, height=86)
-        self.theme_preview.pack(fill="x", padx=16, pady=(0, 10))
+        self.theme_preview.pack(fill="x", padx=16, pady=(8, 10))
         self.theme_preview.pack_propagate(False)
         self.theme_prev_bubble = ctk.CTkLabel(self.theme_preview, text="MehburAI: Merhaba efendim! 👋",
                                               corner_radius=8, anchor="w", padx=10, height=30)
@@ -2236,6 +2219,8 @@ class MehburApp(ctk.CTk):
                                            width=90, height=28,
                                            font=ctk.CTkFont(weight="bold"))
         self.theme_prev_btn.pack(anchor="w", padx=12)
+        self._sync_color_ui("accent")
+        self._sync_color_ui("bg")
         self._refresh_theme_preview()
 
         btns = ctk.CTkFrame(card, fg_color="transparent")
@@ -2249,38 +2234,130 @@ class MehburApp(ctk.CTk):
                       fg_color=Theme.BG_CARD_HOVER, hover_color=Theme.CYAN_DARK,
                       command=self._reset_theme_now).pack(side="left")
 
+    def _build_color_section(self, card, title: str, presets: dict, key: str):
+        """One colour row: preset swatches + a '🎨 Özel renk' button that opens an inline editor."""
+        ui = {"swatches": {}, "presets": presets}
+        self._theme_ui[key] = ui
+
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.pack(fill="x", padx=16, pady=(0, 4))
+        ui["head"] = head
+        ctk.CTkLabel(head, text=title, width=90, anchor="w",
+                     text_color=Theme.TEXT_PRIMARY).pack(side="left")
+        for hexv in presets.values():
+            b = ctk.CTkButton(head, text="", width=26, height=26, corner_radius=13,
+                              fg_color=hexv, hover_color=hexv, border_width=2,
+                              border_color=self._SWATCH_BORDER,
+                              command=lambda h=hexv, k=key: self._set_theme_color(k, h))
+            b.pack(side="left", padx=3)
+            ui["swatches"][hexv.upper()] = b
+        ctk.CTkButton(head, text="🎨 Özel renk", width=100, height=28,
+                      fg_color=Theme.BG_CARD_HOVER, hover_color=Theme.CYAN_DARK,
+                      command=lambda k=key: self._toggle_color_editor(k)).pack(side="left", padx=(10, 0))
+        ui["name_lbl"] = ctk.CTkLabel(head, text="", text_color=Theme.TEXT_SECONDARY,
+                                      font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=11))
+        ui["name_lbl"].pack(side="left", padx=10)
+
+        ed = ctk.CTkFrame(card, fg_color=Theme.BG_INPUT, corner_radius=8)   # shown by the toggle button
+        ui["editor"] = ed
+        top = ctk.CTkFrame(ed, fg_color="transparent")
+        top.pack(fill="x", padx=12, pady=(10, 4))
+        ui["box"] = ctk.CTkFrame(top, width=40, height=28, corner_radius=6, border_width=1,
+                                 border_color=Theme.BORDER_DEFAULT)
+        ui["box"].pack(side="left")
+        ctk.CTkLabel(top, text="Hex:", text_color=Theme.TEXT_SECONDARY).pack(side="left", padx=(12, 4))
+        ui["hex"] = ctk.CTkEntry(top, width=100, height=28, fg_color=Theme.BG_DARKEST,
+                                 border_color=Theme.CYAN_DARK, placeholder_text="#RRGGBB")
+        ui["hex"].pack(side="left")
+        ui["hex"].bind("<KeyRelease>", lambda _e, k=key: self._on_hex_typed(k))
+        ctk.CTkButton(top, text="🖱 Ekrandan seç…", width=130, height=28,
+                      fg_color=Theme.BG_CARD_HOVER, hover_color=Theme.CYAN_DARK,
+                      command=lambda k=key: self._pick_system_color(k)).pack(side="left", padx=(10, 0))
+        for idx, (label, top_value) in enumerate((("Ton", 360), ("Doygunluk", 100), ("Parlaklık", 100))):
+            r = ctk.CTkFrame(ed, fg_color="transparent")
+            r.pack(fill="x", padx=12, pady=2)
+            ctk.CTkLabel(r, text=label, width=80, anchor="w",
+                         text_color=Theme.TEXT_SECONDARY).pack(side="left")
+            sl = ctk.CTkSlider(r, from_=0, to=top_value, number_of_steps=top_value,
+                               button_color=Theme.CYAN_PRIMARY, progress_color=Theme.CYAN_DARK,
+                               command=lambda _v, k=key: self._on_hsv_slider(k))
+            sl.pack(side="left", fill="x", expand=True)
+            ui[f"s{idx}"] = sl
+        ctk.CTkFrame(ed, height=8, fg_color="transparent").pack()
+
+    def _toggle_color_editor(self, key: str):
+        ui = self._theme_ui[key]
+        if ui["editor"].winfo_ismapped():
+            ui["editor"].pack_forget()
+        else:
+            ui["editor"].pack(fill="x", padx=16, pady=(0, 8), after=ui["head"])
+
+    def _set_theme_color(self, key: str, hexv: str, skip_hex: bool = False, skip_sliders: bool = False):
+        norm = normalize_hex_color(hexv)
+        if not norm:
+            return
+        self._theme_pending[key] = norm
+        self._sync_color_ui(key, skip_hex=skip_hex, skip_sliders=skip_sliders)
+        self._refresh_theme_preview()
+
+    def _sync_color_ui(self, key: str, skip_hex: bool = False, skip_sliders: bool = False):
+        """Make swatch highlight, name, hex box and sliders agree with the pending colour."""
+        ui, cur = self._theme_ui[key], self._theme_pending[key].upper()
+        self._theme_syncing = True
+        try:
+            for hexv, b in ui["swatches"].items():
+                b.configure(border_color="#FFFFFF" if hexv == cur else self._SWATCH_BORDER)
+            preset = next((n for n, h in ui["presets"].items() if h.upper() == cur), None)
+            ui["name_lbl"].configure(text=preset or f"Özel {cur}")
+            ui["box"].configure(fg_color=cur)
+            if not skip_hex:
+                ui["hex"].delete(0, "end")
+                ui["hex"].insert(0, cur)
+            if not skip_sliders:
+                hue, sat, val = hex_to_hsv(cur)
+                if sat > 0.02 and val > 0.02:        # grey/black have no meaningful hue: keep the slider
+                    ui["s0"].set(hue)
+                ui["s1"].set(sat * 100)
+                ui["s2"].set(val * 100)
+        finally:
+            self._theme_syncing = False
+
+    def _on_hsv_slider(self, key: str):
+        if self._theme_syncing:
+            return
+        ui = self._theme_ui[key]
+        self._set_theme_color(key, hsv_to_hex(ui["s0"].get(), ui["s1"].get() / 100, ui["s2"].get() / 100),
+                              skip_sliders=True)
+
+    def _on_hex_typed(self, key: str):
+        if self._theme_syncing:
+            return
+        norm = normalize_hex_color(self._theme_ui[key]["hex"].get())
+        if norm:                                        # ignore half-typed values
+            self._set_theme_color(key, norm, skip_hex=True)
+
+    def _pick_system_color(self, key: str):
+        color = self._pick_custom_color(self._theme_pending[key])
+        if color:
+            self._set_theme_color(key, color)
+
     def _refresh_theme_preview(self):
-        c = derive_theme_colors(self._theme_pending["accent"], self._theme_pending["bg"])
+        accent, bg = self._theme_pending["accent"], self._theme_pending["bg"]
+        c = derive_theme_colors(accent, bg)
         self.theme_preview.configure(fg_color=c["BG_DARK"], border_color=c["CYAN_DARK"])
         self.theme_prev_bubble.configure(fg_color=c["BUBBLE_AI"], text_color="#E8E8EC")
         self.theme_prev_btn.configure(fg_color=c["BTN_PRIMARY_BG"], text_color=c["BTN_PRIMARY_FG"])
+        warn = ""
+        if contrast_ratio(accent, bg) < 3:
+            warn = "⚠️ Vurgu rengi arka plana çok yakın; başlıklar ve çerçeveler zor okunabilir."
+        elif contrast_ratio("#E8E8EC", bg) < 4.5:
+            warn = "⚠️ Arka plan çok açık; beyaz yazılar zor okunabilir. Koyu bir ton seçmeni öneririm."
+        self.theme_warn_lbl.configure(text=warn)
 
     def _pick_custom_color(self, current: str) -> Optional[str]:
         from tkinter import colorchooser
         picked = colorchooser.askcolor(color=current, parent=self, title="Renk seç")
         return picked[1].upper() if picked and picked[1] else None
-
-    def _on_accent_choice(self, name: str):
-        if name == self._CUSTOM_COLOR_LABEL:
-            color = self._pick_custom_color(self._theme_pending["accent"])
-            if not color:
-                self.theme_accent_menu.set(self._name_for_color(THEME_ACCENTS, self._theme_pending["accent"]))
-                return
-            self._theme_pending["accent"] = color
-        else:
-            self._theme_pending["accent"] = THEME_ACCENTS[name]
-        self._refresh_theme_preview()
-
-    def _on_bg_choice(self, name: str):
-        if name == self._CUSTOM_COLOR_LABEL:
-            color = self._pick_custom_color(self._theme_pending["bg"])
-            if not color:
-                self.theme_bg_menu.set(self._name_for_color(THEME_BACKGROUNDS, self._theme_pending["bg"]))
-                return
-            self._theme_pending["bg"] = color
-        else:
-            self._theme_pending["bg"] = THEME_BACKGROUNDS[name]
-        self._refresh_theme_preview()
 
     def _apply_theme_live(self, accent: str, bg: str):
         """Yeni renkleri yeniden başlatmadan uygular: Theme'i günceller, sonra penceredeki her
@@ -2306,8 +2383,8 @@ class MehburApp(ctk.CTk):
     def _reset_theme_now(self):
         reset_theme_config()
         self._theme_pending = {"accent": THEME_DEFAULT_ACCENT, "bg": THEME_DEFAULT_BG}
-        self.theme_accent_menu.set(self._name_for_color(THEME_ACCENTS, THEME_DEFAULT_ACCENT))
-        self.theme_bg_menu.set(self._name_for_color(THEME_BACKGROUNDS, THEME_DEFAULT_BG))
+        self._sync_color_ui("accent")
+        self._sync_color_ui("bg")
         self._apply_theme_live(THEME_DEFAULT_ACCENT, THEME_DEFAULT_BG)
 
     # ─────────────────────────────────────────
