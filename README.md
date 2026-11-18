@@ -134,3 +134,5 @@ MehburAI/
 ## 📄 Lisans
 Bu proje **MIT** lisansı altında geliştirilmiştir.
 Geliştirici: **[Mehbur07 (Mehmet Burak ŞAHİN)](https://mehbur07.com)**
+
+[Gizlilik Politikası](PRIVACY.md) · [Kullanım Şartları](TERMS.md)
