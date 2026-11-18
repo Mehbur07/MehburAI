@@ -72,6 +72,10 @@ _ERRORS = (
     ("invalid email", "Geçerli bir e-posta adresi gir."),
     ("rate limit", "Çok fazla deneme yapıldı — biraz bekleyip tekrar dene."),
     ("signups not allowed", "Yeni kayıtlar şu an kapalı."),
+    ("token has expired or is invalid", "Kod yanlış ya da süresi dolmuş. Yeni bir kod iste."),
+    ("otp_expired", "Kodun süresi dolmuş. Yeni bir kod iste."),
+    ("should be different from the old password", "Yeni şifre eskisiyle aynı olamaz."),
+    ("only request this after", "Güvenlik için bu isteği ancak 60 saniyede bir yapabilirsin. Biraz bekle."),
 )
 
 
@@ -294,3 +298,59 @@ def google_enabled() -> bool:
         return bool(r.ok and (r.json().get("external") or {}).get("google"))
     except (requests.RequestException, ValueError):
         return False
+
+
+# ─────────────────────────────────────────────
+# Şifremi unuttum (e-postaya gelen kod + yeni şifre)
+# ─────────────────────────────────────────────
+
+RESET_SENT_MSG = "Eğer bu e-posta ile bir hesap varsa, şifre sıfırlama kodunu gönderdik. Gelen kutunu (ve spam'i) kontrol et."
+
+
+def request_password_reset(email: str) -> dict:
+    """Sends a recovery e-mail. Always answers the same way, so nobody can probe which e-mails are registered."""
+    url, key = _settings()
+    if not (url and key):
+        return {"ok": False, "message": NOT_CONFIGURED_MSG, "not_configured": True}
+    email = (email or "").strip().lower()
+    if "@" not in email:
+        return {"ok": False, "message": "Geçerli bir e-posta adresi gir."}
+    try:
+        r = requests.post(f"{url}/auth/v1/recover", headers=_headers(key),
+                          json={"email": email}, timeout=TIMEOUT)
+        if r.status_code == 429 or (not r.ok and "only request this after" in r.text.lower()):
+            return {"ok": False, "message": _error_message(r)}
+        return {"ok": True, "message": RESET_SENT_MSG}
+    except requests.RequestException:
+        return {"ok": False, "message": OFFLINE_MSG, "offline": True}
+
+
+def confirm_password_reset(email: str, code: str, new_password: str) -> dict:
+    """Checks the e-mailed code, sets the new password and returns a signed-in session (authenticate() shape)."""
+    url, key = _settings()
+    if not (url and key):
+        return {"ok": False, "message": NOT_CONFIGURED_MSG, "not_configured": True}
+    email = (email or "").strip().lower()
+    code = "".join((code or "").split())
+    if len(new_password or "") < 8:
+        return {"ok": False, "message": "Şifre en az 8 karakter olmalı."}
+    if not code:
+        return {"ok": False, "message": "E-postana gelen kodu yaz."}
+    try:
+        r = requests.post(f"{url}/auth/v1/verify", headers=_headers(key),
+                          json={"type": "recovery", "email": email, "token": code}, timeout=TIMEOUT)
+        if not r.ok:
+            return {"ok": False, "message": _error_message(r)}
+        session = r.json()
+        token = session["access_token"]
+        r2 = requests.put(f"{url}/auth/v1/user", headers=_headers(key, token),
+                          json={"password": new_password}, timeout=TIMEOUT)
+        if not r2.ok:
+            return {"ok": False, "message": _error_message(r2)}
+        res = _session_result(session, email)
+        res["message"] = "Şifren güncellendi, giriş yapıldı."
+        return res
+    except requests.RequestException:
+        return {"ok": False, "message": OFFLINE_MSG, "offline": True}
+    except (ValueError, KeyError):
+        return {"ok": False, "message": "Sunucudan geçersiz yanıt geldi."}

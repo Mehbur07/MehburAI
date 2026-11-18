@@ -87,7 +87,10 @@ from config import (
 )
 from memory_engine import MemoryEngine
 from network_manager import NetworkMonitor
-from account_client import authenticate, google_enabled, google_login, logout as account_logout, verify_session
+from account_client import (
+    authenticate, confirm_password_reset, google_enabled, google_login,
+    logout as account_logout, request_password_reset, verify_session,
+)
 from reminders import LATE_NOTE_SECONDS, get_reminder_service
 from telegram_bot import TelegramControlBot, TelegramNotifier
 from updater import check_for_update, fetch_latest_release_notes
@@ -2479,11 +2482,32 @@ class MehburApp(ctk.CTk):
         ctk.CTkLabel(card, text="E-posta", **cap_kw).pack(padx=44, pady=(0, 3), anchor="w")
         self.auth_email_entry = ctk.CTkEntry(card, **entry_kw)
         self.auth_email_entry.pack(padx=40, pady=(0, 10))
+
+        # Reset step 2: the code from the e-mail (packed only in "reset" mode)
+        self.auth_code_caption = ctk.CTkLabel(card, text="E-postana gelen kod", **cap_kw)
+        self.auth_code_entry = ctk.CTkEntry(card, **entry_kw)
+
         self.auth_pass_caption = ctk.CTkLabel(card, text="Şifre", **cap_kw)
         self.auth_pass_caption.pack(padx=44, pady=(0, 3), anchor="w")
         self.auth_pass_entry = ctk.CTkEntry(card, show="•", **entry_kw)
-        self.auth_pass_entry.pack(padx=40, pady=(0, 14))
-        for e in (self.auth_email_entry, self.auth_pass_entry):
+        self.auth_pass_entry.pack(padx=40, pady=(0, 6))
+
+        self.auth_opts_row = ctk.CTkFrame(card, fg_color="transparent")
+        self.auth_opts_row.pack(fill="x", padx=44, pady=(0, 12))
+        self.auth_show_pw = ctk.CTkCheckBox(
+            self.auth_opts_row, text="Şifreyi göster", command=self._toggle_pw_visibility,
+            checkbox_width=18, checkbox_height=18, border_width=2,
+            fg_color=Theme.CYAN_PRIMARY, hover_color=Theme.CYAN_GLOW, border_color=Theme.CYAN_DARK,
+            checkmark_color=Theme.BG_DARKEST, text_color=Theme.TEXT_SECONDARY,
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12))
+        self.auth_show_pw.pack(side="left")
+        self.auth_forgot_link = ctk.CTkLabel(
+            self.auth_opts_row, text="Şifremi unuttum", cursor="hand2",
+            font=ctk.CTkFont(family=Theme.FONT_FAMILY, size=12, weight="bold", underline=True),
+            text_color=Theme.CYAN_PRIMARY)
+        self.auth_forgot_link.pack(side="right")
+        self.auth_forgot_link.bind("<Button-1>", lambda _e: self._set_auth_mode("forgot"))
+        for e in (self.auth_email_entry, self.auth_code_entry, self.auth_pass_entry):
             e.bind("<Return>", lambda _e: self._auth_submit())
 
         self.auth_btn = ctk.CTkButton(
@@ -2519,23 +2543,60 @@ class MehburApp(ctk.CTk):
         self.auth_switch_link.pack(side="left", padx=(4, 0))
         self.auth_switch_link.bind("<Button-1>", lambda _e: self._set_auth_mode(
             "register" if self._auth_mode == "login" else "login"))
+        self._google_ready = False   # set once Supabase reports Google sign-in as enabled
+
+    _AUTH_MODES = {
+        # mode: (title, button, switch text, switch link, password caption)
+        "login": ("GİRİŞ YAP", "Giriş Yap", "Eğer kayıt olmadıysanız", "kayıt olun", "Şifre"),
+        "register": ("KAYIT OL", "Devam Et", "Zaten bir hesabınız var mı?", "giriş yapın",
+                     "Şifre (en az 8 karakter)"),
+        "forgot": ("ŞİFREMİ UNUTTUM", "Kod Gönder", "Şifreni hatırladın mı?", "giriş yapın", ""),
+        "reset": ("YENİ ŞİFRE", "Şifreyi Güncelle", "Şifreni hatırladın mı?", "giriş yapın",
+                  "Yeni şifre (en az 8 karakter)"),
+    }
 
     def _set_auth_mode(self, mode: str):
         self._auth_mode = mode
+        title, btn, sw_lbl, sw_link, pass_cap = self._AUTH_MODES[mode]
+        self.auth_title.configure(text=title)
+        self.auth_btn.configure(text=btn)
+        self.auth_switch_lbl.configure(text=sw_lbl)
+        self.auth_switch_link.configure(text=sw_link)
+        if pass_cap:
+            self.auth_pass_caption.configure(text=pass_cap)
+
+        # Re-pack the form in the right order for this mode
+        for w in (self.auth_code_caption, self.auth_code_entry, self.auth_pass_caption,
+                  self.auth_pass_entry, self.auth_opts_row):
+            w.pack_forget()
+        if mode == "reset":
+            self.auth_code_caption.pack(padx=44, pady=(0, 3), anchor="w", before=self.auth_btn)
+            self.auth_code_entry.pack(padx=40, pady=(0, 10), before=self.auth_btn)
+        if mode != "forgot":
+            self.auth_pass_caption.pack(padx=44, pady=(0, 3), anchor="w", before=self.auth_btn)
+            self.auth_pass_entry.pack(padx=40, pady=(0, 6), before=self.auth_btn)
+            self.auth_opts_row.pack(fill="x", padx=44, pady=(0, 12), before=self.auth_btn)
         if mode == "login":
-            self.auth_title.configure(text="GİRİŞ YAP")
-            self.auth_btn.configure(text="Giriş Yap")
-            self.auth_switch_lbl.configure(text="Eğer kayıt olmadıysanız")
-            self.auth_switch_link.configure(text="kayıt olun")
-            self.auth_pass_caption.configure(text="Şifre")
+            self.auth_forgot_link.pack(side="right")
         else:
-            self.auth_title.configure(text="KAYIT OL")
-            self.auth_btn.configure(text="Devam Et")
-            self.auth_switch_lbl.configure(text="Zaten bir hesabınız var mı?")
-            self.auth_switch_link.configure(text="giriş yapın")
-            self.auth_pass_caption.configure(text="Şifre (en az 8 karakter)")
+            self.auth_forgot_link.pack_forget()
+        self._apply_google_visibility()
         self.auth_status.configure(text="")
         self.auth_pass_entry.delete(0, "end")
+        self.auth_code_entry.delete(0, "end")
+        self.auth_show_pw.deselect()
+        self._toggle_pw_visibility()
+
+    def _toggle_pw_visibility(self):
+        self.auth_pass_entry.configure(show="" if self.auth_show_pw.get() else "•")
+
+    def _apply_google_visibility(self):
+        """Google button only in login/register, and only once Supabase says Google sign-in is on."""
+        if self._google_ready and self._auth_mode in ("login", "register"):
+            if not self.auth_google_btn.winfo_ismapped():
+                self.auth_google_btn.pack(padx=40, pady=(0, 8), after=self.auth_btn)
+        else:
+            self.auth_google_btn.pack_forget()
 
     def _show_auth_gate(self):
         self._set_auth_mode("login")
@@ -2553,8 +2614,10 @@ class MehburApp(ctk.CTk):
 
         def check_google():
             if google_enabled():
-                self._ui_call(lambda: self.auth_google_btn.pack(
-                    padx=40, pady=(0, 8), after=self.auth_btn))
+                def reveal():
+                    self._google_ready = True
+                    self._apply_google_visibility()
+                self._ui_call(reveal)
         threading.Thread(target=check_google, daemon=True, name="MehburAI-GoogleCheck").start()
         acc = get_account_config()
         if acc["account_email"] and acc["account_token"]:
@@ -2569,23 +2632,47 @@ class MehburApp(ctk.CTk):
     def _auth_submit(self):
         if self._auth_busy:
             return
+        mode = self._auth_mode
         email = self.auth_email_entry.get().strip()
         password = self.auth_pass_entry.get()
-        if not email or not password:
-            self.auth_status.configure(text="⚠️ E-posta ve şifre gerekli.", text_color=Theme.STATUS_WARNING)
-            return
-        if self._auth_mode == "register" and len(password) < 8:
-            self.auth_status.configure(text="⚠️ Şifre en az 8 karakter olmalı.", text_color=Theme.STATUS_WARNING)
-            return
-        kind = "register" if self._auth_mode == "register" else "login"
+        warn = lambda t: self.auth_status.configure(text=t, text_color=Theme.STATUS_WARNING)
+        if mode == "forgot":
+            if not email:
+                return warn("⚠️ E-posta gerekli.")
+        elif not email or not password:
+            return warn("⚠️ E-posta ve şifre gerekli.")
+        if mode in ("register", "reset") and len(password) < 8:
+            return warn("⚠️ Şifre en az 8 karakter olmalı.")
+        code = self.auth_code_entry.get().strip()
+        if mode == "reset" and not code:
+            return warn("⚠️ E-postana gelen kodu yaz.")
         self._auth_busy = True
         self.auth_btn.configure(state="disabled")
         self.auth_status.configure(text="Bağlanılıyor...", text_color=Theme.TEXT_SECONDARY)
 
         def work():
-            data = authenticate(kind, email, password)
+            if mode == "forgot":
+                data = request_password_reset(email)
+                self._ui_call(lambda: self._on_reset_requested(data))
+                return
+            if mode == "reset":
+                data = confirm_password_reset(email, code, password)
+            else:
+                data = authenticate("register" if mode == "register" else "login", email, password)
             self._ui_call(lambda: self._on_auth_result(data))
         threading.Thread(target=work, daemon=True, name="MehburAI-Auth").start()
+
+    def _on_reset_requested(self, data: dict):
+        self._auth_busy = False
+        self.auth_btn.configure(state="normal")
+        if data.get("ok"):
+            self._set_auth_mode("reset")          # step 2: code + new password
+            self.auth_status.configure(text="✅ " + str(data.get("message") or ""),
+                                       text_color=Theme.STATUS_ONLINE)
+            self.auth_code_entry.focus()
+        else:
+            self.auth_status.configure(text="❌ " + str(data.get("message") or "Bir hata oluştu."),
+                                       text_color=Theme.STATUS_OFFLINE)
 
     def _auth_google(self):
         if self._auth_busy:
