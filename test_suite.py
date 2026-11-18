@@ -2360,8 +2360,8 @@ def run_full_validation():
     _gate_src32 = _insp26.getsource(_gui.MehburApp._build_auth_gate)
     assert "GİRİŞ YAP" in _gate_src32 and "auth_email_entry" in _gate_src32 and "auth_pass_entry" in _gate_src32
     assert "Eğer kayıt olmadıysanız" in _gate_src32 and "kayıt olun" in _gate_src32
-    _mode_src32 = _insp26.getsource(_gui.MehburApp._set_auth_mode)
-    assert "KAYIT OL" in _mode_src32 and "Devam Et" in _mode_src32 and "giriş yapın" in _mode_src32
+    _reg32 = _gui.MehburApp._AUTH_MODES["register"]          # (title, button, switch text, switch link, password caption)
+    assert _reg32[0] == "KAYIT OL" and _reg32[1] == "Devam Et" and _reg32[3] == "giriş yapın"
     assert "_init_auth_gate" in _insp26.getsource(_gui.MehburApp.__init__)
     assert "authenticate" in _insp26.getsource(_gui.MehburApp._auth_submit)
     _res_src32 = _insp26.getsource(_gui.MehburApp._on_auth_result)
@@ -2560,6 +2560,76 @@ def run_full_validation():
     assert "hqwlsfvsmtdacutkadub" not in open(_os28.path.join(_os28.path.dirname(_os28.path.abspath(__file__)),
                                                               "account_client.py"), encoding="utf-8").read()
     print("  • Google düğmesi, Supabase'te Google kapalıyken/sunucu yokken gizli kalıyor; eski proje adresi kodda yok ✓")
+
+    # 32m. Forgot password: e-mailed code -> verify -> new password -> signed-in session (fake Supabase)
+    _rs32 = {"pw": None, "recover_calls": []}
+
+    class _FakeRecover(_H32):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, code, data):
+            body = _js32.dumps(data).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _body(self):
+            n = int(self.headers.get("Content-Length", 0))
+            return _js32.loads(self.rfile.read(n) or b"{}")
+
+        def do_POST(self):
+            d = self._body()
+            if self.path == "/auth/v1/recover":
+                _rs32["recover_calls"].append(d["email"])
+                if d["email"] == "limit@x.com":
+                    return self._send(429, {"msg": "For security purposes, you can only request this after 60 seconds."})
+                return self._send(200, {})                       # same answer for unknown e-mails
+            if self.path == "/auth/v1/verify":
+                if d.get("type") == "recovery" and d.get("token") == "123456":
+                    return self._send(200, {"access_token": "rtok", "refresh_token": "rrt", "user": {"email": d["email"]}})
+                return self._send(403, {"msg": "Token has expired or is invalid"})
+            self._send(404, {})
+
+        def do_PUT(self):
+            d = self._body()
+            if self.path == "/auth/v1/user" and self.headers.get("Authorization") == "Bearer rtok":
+                if d.get("password") == "samepass99":
+                    return self._send(422, {"msg": "New password should be different from the old password."})
+                _rs32["pw"] = d.get("password")
+                return self._send(200, {"email": "r@ornek.com"})
+            self._send(401, {"msg": "invalid JWT"})
+
+    _srvr = _S32(("127.0.0.1", 0), _FakeRecover)
+    _th32.Thread(target=_srvr.serve_forever, daemon=True).start()
+    _orig_cfg2 = _ac32.get_account_config
+    _ac32.get_account_config = lambda: {"account_supabase_url": f"http://127.0.0.1:{_srvr.server_address[1]}",
+                                        "account_supabase_key": "ANON-TEST"}
+    try:
+        _r = _ac32.request_password_reset("Kayitli@Ornek.com")
+        assert _r["ok"] and _rs32["recover_calls"] == ["kayitli@ornek.com"]
+        _r2 = _ac32.request_password_reset("hic-yok@ornek.com")
+        assert _r2["ok"] and _r2["message"] == _r["message"]                 # does not reveal whether the account exists
+        assert not _ac32.request_password_reset("eposta-degil")["ok"]
+        _r3 = _ac32.request_password_reset("limit@x.com")
+        assert not _r3["ok"] and "60 saniye" in _r3["message"]               # rate limit explained in Turkish
+        assert not _ac32.confirm_password_reset("r@ornek.com", "123456", "kisa")["ok"]      # < 8 characters
+        assert not _ac32.confirm_password_reset("r@ornek.com", "", "yenisifre99")["ok"]     # no code
+        _bad = _ac32.confirm_password_reset("r@ornek.com", "000000", "yenisifre99")
+        assert not _bad["ok"] and "Kod" in _bad["message"] and _rs32["pw"] is None          # wrong code: nothing changes
+        _same = _ac32.confirm_password_reset("r@ornek.com", "123456", "samepass99")
+        assert not _same["ok"] and "eskisiyle" in _same["message"]
+        _ok = _ac32.confirm_password_reset("R@Ornek.com", " 123 456 ", "yenisifre99")        # spaces in the code are tolerated
+        assert _ok["ok"] and _ok["token"] == "rtok" and _ok["email"] == "r@ornek.com" and _rs32["pw"] == "yenisifre99"
+    finally:
+        _ac32.get_account_config = _orig_cfg2
+        _srvr.shutdown()
+    _gate32 = _insp26.getsource(_gui.MehburApp._build_auth_gate)
+    assert "auth_show_pw" in _gate32 and "auth_forgot_link" in _gate32
+    assert set(_gui.MehburApp._AUTH_MODES) == {"login", "register", "forgot", "reset"}
+    print("  • Şifremi unuttum (kod → yeni şifre → giriş), şifreyi göster ve Google düğmesi kuralları çalışıyor ✓")
 
     print("  ✅ TEST 32 BAŞARILI: Hesap sunucusu (kayıt/giriş/oturum/kaba-kuvvet koruması) hazır.")
     passed_tests += 1
